@@ -942,6 +942,21 @@ function PageEditor({ context, options }) {
         void insertImageFiles(files);
         return true;
       },
+      transformPastedHTML(html) {
+        const document = new DOMParser().parseFromString(html, "text/html");
+        // Keep intentional formatting when copying between notes. External HTML
+        // often pairs dark text with a light email background that we don't keep.
+        if (document.querySelector("[data-pm-slice]")) return html;
+        document.querySelectorAll("[style], [color], [bgcolor]").forEach((element) => {
+          element.style.removeProperty("color");
+          element.style.removeProperty("background");
+          element.style.removeProperty("background-color");
+          element.style.removeProperty("-webkit-text-fill-color");
+          element.removeAttribute("color");
+          element.removeAttribute("bgcolor");
+        });
+        return document.body.innerHTML;
+      },
       handleDrop(view, event) {
         const files = Array.from(event.dataTransfer?.files || []).filter((file) =>
           String(file.type || "").toLowerCase().startsWith("image/")

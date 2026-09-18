@@ -5393,6 +5393,63 @@ function addProjectToTimesheet(project, deliverable) {
   renderTimesheets();
 }
 
+async function addDeliverableHoursToTimesheet(project, deliverable, hours, date = new Date()) {
+  const projectKey = getTimesheetProjectMatchKey(project);
+  if (!projectKey || !deliverable) throw new Error("Please select a deliverable with a project.");
+  if (!(date instanceof Date) || !Number.isFinite(date.getTime())) throw new Error("Enter a valid date.");
+  const amount = Number(hours);
+  if (!Number.isFinite(amount) || amount <= 0 || amount > MAX_HOURS_PER_DAY ||
+      Math.abs(amount * 10 - Math.round(amount * 10)) > 1e-8) {
+    throw new Error("Enter hours greater than 0, up to 24, in increments of 0.1.");
+  }
+  const weekKey = formatWeekKey(date);
+  const day = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"][date.getDay()];
+  const originalEntries = getWeekEntries(weekKey);
+  const total = originalEntries.reduce((sum, entry) => sum + normalizeTimesheetHours(entry.hours?.[day]), 0);
+  if (Math.round((total + amount) * 10) > MAX_HOURS_PER_DAY * 10) {
+    throw new Error(`Only ${Math.max(0, MAX_HOURS_PER_DAY - total).toFixed(1)} hours remain for this day.`);
+  }
+  const entries = originalEntries.map((entry) => ({ ...entry, hours: { ...entry.hours } }));
+  const matches = entries.filter((entry) => getTimesheetEntryMatchKey(entry) === projectKey);
+  // Prefer this deliverable, then a project summary, then the first project row.
+  let entry = matches.find((item) => deliverable.id && item.deliverableId === deliverable.id) ||
+    matches.find((item) => !item.deliverableId) || matches[0];
+  if (!entry) {
+    entry = {
+      id: createTimesheetEntryId(),
+      projectId: project.id || "",
+      projectName: formatTimesheetProjectName(project),
+      deliverableId: deliverable.id || "",
+      deliverableName: deliverable.name || "",
+      serviceDescription: deliverable.name || "",
+      pmInitials: getDefaultPmInitials(),
+      function: getDisciplineFunction(),
+      taskNumber: getTimesheetTaskNumberForDeliverable(deliverable.name || ""),
+      hours: { sun: 0, mon: 0, tue: 0, wed: 0, thu: 0, fri: 0, sat: 0 },
+    };
+    entries.push(entry);
+  }
+  const description = getTimesheetEntryDescription(entry);
+  const baseDescription = stripWfhSuffix(description);
+  const missingNames = getMissingDeliverables(baseDescription, normalizeDeliverableNames([deliverable]));
+  if (missingNames.length) {
+    const combined = [baseDescription, ...missingNames].filter(Boolean).join(", ");
+    entry.serviceDescription = hasWfhSuffix(description) ? appendWfhSuffix(combined) : combined;
+  }
+  entry.hours[day] = Math.round((normalizeTimesheetHours(entry.hours[day]) + amount) * 10) / 10;
+  const previousWeek = timesheetDb.weeks[weekKey];
+  const previousTimestamp = timesheetDb.lastModified;
+  setWeekEntries(weekKey, entries);
+  if (!await saveTimesheets({ silent: true })) {
+    if (previousWeek) previousWeek.entries = originalEntries;
+    else delete timesheetDb.weeks[weekKey];
+    timesheetDb.lastModified = previousTimestamp;
+    throw new Error("Failed to save timesheet data. Please try again.");
+  }
+  renderTimesheets();
+  return { weekKey, day, hours: amount };
+}
+
 function addManualTimesheetEntry() {
   const weekKey = formatWeekKey(currentTimesheetWeek);
   const entries = getWeekEntries(weekKey);
@@ -10430,6 +10487,7 @@ let userSettings = {
   theme: "dark",
   lightingTemplates: [],
   separateDeliverableCompletionGroups: true,
+  commandLineShowAllDeliverables: false,
   groupDeliverablesByProject: false,
   projectsViewMode: "list",
   projectsWideLayout: true,
@@ -12417,6 +12475,8 @@ async function loadUserSettings() {
       userSettings.enableUnderConstructionTools === true;
     userSettings.separateDeliverableCompletionGroups =
       userSettings.separateDeliverableCompletionGroups !== false;
+    userSettings.commandLineShowAllDeliverables =
+      userSettings.commandLineShowAllDeliverables === true;
     userSettings.groupDeliverablesByProject = false;
     userSettings.projectsWideLayout = userSettings.projectsWideLayout !== false;
     userSettings.minimizeEmptyProjectColumns =
@@ -12619,6 +12679,10 @@ async function populateSettingsModal() {
     userSettings.separateDeliverableCompletionGroups
   );
   setCheckboxValue(
+    "settings_commandLineShowAllDeliverables",
+    userSettings.commandLineShowAllDeliverables === true
+  );
+  setCheckboxValue(
     "settings_groupDeliverablesByProject",
     userSettings.groupDeliverablesByProject
   );
@@ -12747,6 +12811,10 @@ async function saveUserSettings() {
   const separateCompletionGroupsCheck = document.getElementById(
     "settings_separateDeliverableCompletionGroups"
   );
+  const commandLineShowAllCheck = document.getElementById("settings_commandLineShowAllDeliverables");
+  if (commandLineShowAllCheck) {
+    userSettings.commandLineShowAllDeliverables = commandLineShowAllCheck.checked;
+  }
   if (separateCompletionGroupsCheck) {
     userSettings.separateDeliverableCompletionGroups =
       separateCompletionGroupsCheck.checked;
@@ -36817,6 +36885,16 @@ function initEventListeners() {
   const separateCompletionGroupsSetting = document.getElementById(
     "settings_separateDeliverableCompletionGroups"
   );
+  const commandLineShowAllSetting = document.getElementById("settings_commandLineShowAllDeliverables");
+  if (commandLineShowAllSetting) {
+    commandLineShowAllSetting.onchange = (e) => {
+      userSettings.commandLineShowAllDeliverables = e.target.checked;
+      if (typeof industryCommandDock !== "undefined" && industryCommandDock) {
+        renderCommandDockItems();
+      }
+      debouncedSaveUserSettings();
+    };
+  }
   if (separateCompletionGroupsSetting) {
     separateCompletionGroupsSetting.onchange = (e) => {
       userSettings.separateDeliverableCompletionGroups = e.target.checked;

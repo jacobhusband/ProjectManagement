@@ -87,7 +87,7 @@ class PrepareXrefsCoreTests(unittest.TestCase):
             self.assertEqual(before, hashlib.sha256(archive.read_bytes()).hexdigest())
             self.assertEqual([target], list((project / 'Xrefs').glob('*.dwg')))
 
-    def test_missing_reference_does_not_replace_existing_target(self):
+    def test_missing_reference_is_detached_and_source_is_preserved(self):
         with tempfile.TemporaryDirectory(prefix='acies-xref-missing-') as temporary:
             project = Path(temporary)
             arch = project / 'Arch'
@@ -101,11 +101,18 @@ class PrepareXrefsCoreTests(unittest.TestCase):
             target.write_bytes(b'existing background')
             before = source.read_bytes()
             output = self.run_tool(source)
-            self.assertIn('Missing reference', output)
-            self.assertIn('Existing Xrefs and source drawings have been preserved', output)
-            self.assertEqual(b'existing background', target.read_bytes())
+            self.assertIn('Detached missing XREF', output)
+            self.assertIn('Verified clean on reopen', output)
+            self.assertNotEqual(b'existing background', target.read_bytes())
             self.assertEqual(before, source.read_bytes())
-            self.assertFalse((target.parent / 'Archive').exists())
+            archived = list((target.parent / 'Archive').glob('*.dwg'))
+            self.assertEqual(1, len(archived))
+            self.assertEqual(b'existing background', archived[0].read_bytes())
+            report = project / 'missing.txt'
+            self.core(project, f'''(setq f (open "{report.as_posix()}" "w"))
+(prin1 (tblsearch "BLOCK" "missing") f)
+(close f)''', target)
+            self.assertEqual('nil', report.read_text().strip())
 
     def test_paperspace_reference_is_bound_but_not_exploded(self):
         with tempfile.TemporaryDirectory(prefix='acies-xref-paper-') as temporary:

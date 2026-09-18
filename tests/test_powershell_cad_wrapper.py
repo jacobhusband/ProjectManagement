@@ -20,6 +20,62 @@ DETECT_PDF_SIZE_PATH = REPO_ROOT / "scripts" / "detect_pdf_size.py"
 
 
 class PowerShellCadWrapperTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "win32", "Publish runs in Windows PowerShell")
+    def test_publish_toggle_values_control_pdf_detection(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+        self.assertIsNotNone(powershell)
+        script = CAD_SCRIPT_PATHS[0].read_text(encoding="utf-8")
+        # Execute the production parameter binding, normalization and detection
+        # branch without opening AutoCAD or any dialogs.
+        header = script.split("function Ensure-WinFormsAssemblies", 1)[0]
+        detection = script.split(
+            "# --- Detect paper size from existing project PDFs ---", 1
+        )[1].split("# --- Automatically accept a valid detected size", 1)[0]
+        fixture = textwrap.dedent('''
+            $script:detectorCalls = 0
+            function Invoke-TestDetector {
+              $script:detectorCalls++
+              return "Test paper size"
+            }
+            $pythonExecutable = "Invoke-TestDetector"
+            $detectSizeScriptPath = $PSCommandPath
+            $files = @("fixture.dwg")
+            $paperSizes = @("Test paper size")
+        ''')
+        assertions = textwrap.dedent('''
+            foreach ($toggle in @($AutoDetectPaperSize, $AutoAcceptDetectedPaperSize,
+                                 $StripPdfLayers, $RefreshExcelOleLinks)) {
+              if ($toggle -isnot [bool]) { throw "Toggle was not normalized to a boolean" }
+            }
+            Write-Output "RESULT:$detectionStatus|$script:detectorCalls|$AutoDetectPaperSize|$AutoAcceptDetectedPaperSize|$StripPdfLayers|$RefreshExcelOleLinks"
+        ''')
+        with tempfile.TemporaryDirectory(prefix="acies-publish-toggles-") as temp_dir:
+            harness = Path(temp_dir) / "PublishToggles.ps1"
+            harness.write_text(header + fixture + detection + assertions, encoding="utf-8")
+            for value, expected in (
+                ("0", "disabled|0|False|False|False|False"),
+                ("false", "disabled|0|False|False|False|False"),
+                ("$false", "disabled|0|False|False|False|False"),
+                ("1", "detected|1|True|True|True|True"),
+                ("true", "detected|1|True|True|True|True"),
+                ("$true", "detected|1|True|True|True|True"),
+                (None, "detected|1|True|False|True|True"),
+            ):
+                with self.subTest(value=value):
+                    args = []
+                    if value is not None:
+                        for name in ("AutoDetectPaperSize", "AutoAcceptDetectedPaperSize",
+                                     "StripPdfLayers", "RefreshExcelOleLinks"):
+                            args.extend([f"-{name}", value])
+                    result = subprocess.run(
+                        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass",
+                         "-File", str(harness), *args],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    output = result.stdout + result.stderr
+                    self.assertEqual(result.returncode, 0, output)
+                    self.assertIn(f"RESULT:{expected}", output)
+
     def test_publish_supports_arch_full_bleed_e_paper_size(self):
         paper_size = "ARCH full bleed E (36.00 x 48.00 Inches)"
         plot_script = (REPO_ROOT / "scripts" / "PlotDWGs.ps1").read_text(
@@ -112,7 +168,7 @@ class PowerShellCadWrapperTests(unittest.TestCase):
                 self.assertNotIn("$dlg.ShowDialog()", text)
                 self.assertIn('Write-Host "PROGRESS: INPUT_FOLDER: $inputFolder"', text)
                 if script_path.name == "PlotDWGs.ps1":
-                    self.assertIn('[string]$AutoAcceptDetectedPaperSize = "false"', text)
+                    self.assertIn('$AutoAcceptDetectedPaperSize = "false"', text)
                     self.assertIn(
                         '$AutoAcceptDetectedPaperSize = Convert-ToBool $AutoAcceptDetectedPaperSize $false',
                         text,
@@ -121,11 +177,11 @@ class PowerShellCadWrapperTests(unittest.TestCase):
                         '@("-AutoAcceptDetectedPaperSize", $AutoAcceptDetectedPaperSize)',
                         text,
                     )
-                    self.assertIn('[string]$StripPdfLayers = "true"', text)
+                    self.assertIn('$StripPdfLayers = "true"', text)
                     self.assertIn('$StripPdfLayers = Convert-ToBool $StripPdfLayers $true', text)
                     self.assertIn('$stripPdfLayersScriptPath = Join-Path $scriptRoot "strip_pdf_layers.py"', text)
                     self.assertIn('@("-StripPdfLayers", $StripPdfLayers)', text)
-                    self.assertIn('[string]$RefreshExcelOleLinks = "true"', text)
+                    self.assertIn('$RefreshExcelOleLinks = "true"', text)
                     self.assertIn(
                         '$RefreshExcelOleLinks = Convert-ToBool $RefreshExcelOleLinks $true',
                         text,

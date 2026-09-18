@@ -14,13 +14,13 @@ function extract(name) {
 
 // The command line filters commands by default and only searches projects or
 // deliverables when the query starts with "#".
-function runFilter(value, items) {
+function runFilter(value, items, options = {}) {
   const section = { querySelector: () => null, hidden: false };
   const dock = {
     input: { value },
     items: items.map(item => ({ ...item, node: { hidden: false }, section })),
-    sections: [{ key: 'target', section, limit: 0, more: { hidden: true, textContent: '' } }],
-    activeIndex: -1,
+    sections: [{ key: 'target', section, limit: options.limit || 0, more: { hidden: true, textContent: '' } }],
+    activeIndex: options.activeIndex ?? -1,
   };
   const context = vm.createContext({
     industryCommandDock: dock,
@@ -31,11 +31,14 @@ function runFilter(value, items) {
     [
       extract('parseCommandDockQuery'),
       extract('isCommandDockTargetItem'),
+      extract('commandDockWithinOneEdit'),
+      extract('scoreCommandDockMatch'),
       extract('filterCommandDock'),
       'filterCommandDock();',
     ].join('\n'),
     context
   );
+  if (options.inspect) options.inspect(dock, context);
   return dock.items.filter(item => !item.node.hidden).map(item => item.label);
 }
 
@@ -79,4 +82,46 @@ test('a leading # searches projects and deliverables only', () => {
 test('# alone lists every target, including search-only projects', () => {
   assert.deepEqual(runFilter('#', items), ['Harborview Clinic', 'Maple Street Lofts', 'DD90']);
   assert.deepEqual(runFilter('# maple', items), ['Maple Street Lofts']);
+});
+
+test('commands tolerate one substituted, extra, missing, or transposed letter', () => {
+  for (const query of ['delivarable', 'deliverrable', 'delverable', 'delivreable']) {
+    assert.deepEqual(runFilter(query, items), ['Pin deliverable', 'Add Deliverable'], query);
+  }
+  assert.deepEqual(runFilter('add delverable', items), ['Add Deliverable']);
+  assert.deepEqual(runFilter('delvxxable', items), []);
+});
+
+test('target names tolerate typos while identifiers and short queries stay literal', () => {
+  assert.deepEqual(runFilter('#harbrview clinc', items), ['Harborview Clinic']);
+  assert.deepEqual(runFilter('#mapel', items), ['Maple Street Lofts']);
+  assert.deepEqual(runFilter('#24-102', items), []);
+  assert.deepEqual(runFilter('#dd91', items), []);
+  assert.deepEqual(runFilter('pn', items), []);
+  assert.deepEqual(runFilter('harbrview', items), []);
+});
+
+test('literal matches rank above typos before limits and receive keyboard selection', () => {
+  const candidates = [
+    { kind: 'project', label: 'Maple Court' },
+    { kind: 'project', label: 'Mapel Court' },
+  ];
+  assert.deepEqual(runFilter('#mapel', candidates, {
+    limit: 1,
+    activeIndex: 0,
+    inspect: dock => assert.equal(dock.items[dock.activeIndex].label, 'Mapel Court'),
+  }), ['Mapel Court']);
+});
+
+test('clearing a query restores browse order and preserves the selected item', () => {
+  runFilter('deliverable', [
+    { label: 'Delverable' },
+    { label: 'Deliverable' },
+  ], { inspect: (dock, context) => {
+    assert.equal(dock.items[dock.activeIndex].label, 'Deliverable');
+    dock.input.value = '';
+    vm.runInContext('filterCommandDock();', context);
+    assert.deepEqual(dock.items.map(item => item.label), ['Delverable', 'Deliverable']);
+    assert.equal(dock.items[dock.activeIndex].label, 'Deliverable');
+  } });
 });

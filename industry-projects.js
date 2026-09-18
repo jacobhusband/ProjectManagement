@@ -821,7 +821,7 @@ function setCommandDockExpanded(expanded) {
   if (dock.expanded && !industryActivePrompt) filterCommandDock();
 }
 
-function getCommandDockProjectDeliverables(project) {
+function getCommandDockProjectDeliverables(project, { includeAll = false, now = new Date() } = {}) {
   if (!project) return [];
   const list =
     typeof getOverviewDeliverables === "function"
@@ -829,8 +829,18 @@ function getCommandDockProjectDeliverables(project) {
       : Array.isArray(project.deliverables)
         ? project.deliverables
         : [];
-  const sorted = list.filter(Boolean).slice();
-  if (typeof compareDeliverablesByDue === "function") sorted.sort(compareDeliverablesByDue);
+  const cutoff = new Date(now);
+  cutoff.setHours(0, 0, 0, 0);
+  cutoff.setDate(cutoff.getDate() - 30);
+  const showAll = includeAll ||
+    (typeof userSettings !== "undefined" && userSettings.commandLineShowAllDeliverables === true);
+  const sorted = list.filter((candidate) => {
+    if (!candidate) return false;
+    if (showAll) return true;
+    const due = parseDueStr(getEffectiveDueStr(candidate));
+    return !due || due >= cutoff;
+  });
+  sorted.sort(compareDeliverablesByDueDesc);
   return sorted;
 }
 
@@ -906,7 +916,7 @@ function buildCommandDockTargetGroup(deliverable, project) {
       label: `Deliverables · ${getProjectShortName(project)}`,
       items,
       limit: 12,
-      empty: "This project has no deliverables.",
+      empty: "No recent deliverables. Enable Show all deliverables in command line in Settings to see older entries.",
     };
   }
   const items = (Array.isArray(db) ? db : []).map((candidate) => {
@@ -952,6 +962,12 @@ function buildCommandDockGroups(deliverable, project) {
   }));
 
   const deliverableItems = [
+    {
+      key: "add-to-timesheet",
+      label: "Add to Timesheet",
+      search: "add to timesheet log time hours day",
+      run: (target) => startTimesheetHoursPrompt(target.project, target.deliverable),
+    },
     {
       key: "add-deliverable",
       scope: "project",
@@ -1348,26 +1364,67 @@ function isCommandDockTargetItem(item) {
   return item.kind === "project" || item.kind === "deliverable";
 }
 
+function commandDockWithinOneEdit(left, right) {
+  if (Math.abs(left.length - right.length) > 1) return false;
+  let index = 0;
+  while (index < Math.min(left.length, right.length) && left[index] === right[index]) index++;
+  if (index === Math.min(left.length, right.length)) return true;
+  if (left.length < right.length) return left.slice(index) === right.slice(index + 1);
+  if (left.length > right.length) return left.slice(index + 1) === right.slice(index);
+  return left.slice(index + 1) === right.slice(index + 1) || (
+    left[index] === right[index + 1] && left[index + 1] === right[index] &&
+    left.slice(index + 2) === right.slice(index + 2)
+  );
+}
+
+function scoreCommandDockMatch(item, query, tokens) {
+  const label = String(item.label || "").toLowerCase();
+  const haystack = `${item.search || ""} ${label}`.toLowerCase();
+  if (label === query) return 0;
+  if (haystack.includes(query)) return 1;
+  const words = haystack.match(/[\p{L}\p{N}]+/gu) || [];
+  let typos = 0;
+  for (const token of tokens) {
+    if (haystack.includes(token)) continue;
+    // Short fragments and identifiers stay literal to avoid noisy matches.
+    if (token.length < 3 || !/^\p{L}+$/u.test(token) || !words.some(word =>
+      word.length >= 3 && /^\p{L}+$/u.test(word) && commandDockWithinOneEdit(token, word)
+    )) return Infinity;
+    typos++;
+  }
+  return typos ? 10 + typos : 2;
+}
+
 function filterCommandDock() {
   const dock = industryCommandDock;
-  const { targetMode, tokens } = parseCommandDockQuery(dock.input.value);
+  const { targetMode, query, tokens } = parseCommandDockQuery(dock.input.value);
   const hasQuery = targetMode || tokens.length > 0;
   const matches = (item) => {
-    const haystack = `${item.search || ""} ${item.label}`.toLowerCase();
     if (isCommandDockTargetItem(item)) {
       // Targets browse freely while the line is empty, but only "#" searches them.
       if (!targetMode) return !tokens.length && !item.searchOnly;
       if (!tokens.length) return true;
-      return tokens.every((token) => haystack.includes(token));
+      return true;
     }
     if (targetMode) return false;
     if (tokens.length === 1 && /^\d+$/.test(tokens[0])) return item.key === `hotkey:${tokens[0]}`;
     if (!tokens.length) return !item.searchOnly;
-    return tokens.every((token) => haystack.includes(token));
+    return true;
   };
-  dock.items.forEach((item) => {
-    item.node.hidden = !matches(item);
+  const current = dock.items[dock.activeIndex];
+  dock.items.forEach((item, index) => {
+    item.searchOrder ??= index;
+    const numericShortcut = !targetMode && /^\d+$/.test(query);
+    item.matchScore = matches(item) ? (tokens.length && !numericShortcut ? scoreCommandDockMatch(item, query, tokens) : 0) : Infinity;
+    item.node.hidden = !Number.isFinite(item.matchScore);
   });
+  // Keep the grouped layout, ranking matches within each group before its limit.
+  const sections = dock.sections || [];
+  dock.items.sort((a, b) =>
+    sections.findIndex(entry => entry.section === a.section) - sections.findIndex(entry => entry.section === b.section) ||
+    (tokens.length ? a.matchScore - b.matchScore : 0) || a.searchOrder - b.searchOrder
+  );
+  dock.items.forEach(item => item.node.parentNode?.appendChild(item.node));
   // Long target lists show only the first few until the query narrows them.
   (dock.sections || []).forEach(({ section, limit, more }) => {
     if (!limit) return;
@@ -1387,13 +1444,14 @@ function filterCommandDock() {
     section.hidden = !anyVisible && !(hasEmptyNote && !hasQuery);
   });
   const visible = getVisibleCommandDockItems();
-  const current = dock.items[dock.activeIndex];
   if (hasQuery) {
-    if (!current || current.node.hidden) {
-      setCommandDockActive(visible.length ? dock.items.indexOf(visible[0]) : -1);
-    }
+    const best = visible.reduce((result, item) => !result || item.matchScore < result.matchScore ? item : result, null);
+    const selected = current && !current.node.hidden && current.matchScore === best?.matchScore ? current : best;
+    setCommandDockActive(selected ? dock.items.indexOf(selected) : -1);
   } else if (current && current.node.hidden) {
     setCommandDockActive(-1);
+  } else if (current) {
+    setCommandDockActive(dock.items.indexOf(current));
   }
 }
 
@@ -1571,6 +1629,96 @@ function formatPromptDate(date) {
   return `${mm}/${dd}/${yyyy}`;
 }
 
+function parseTimesheetPromptDate(text) {
+  const raw = String(text || "today").trim().toLowerCase();
+  if (raw === "today" || raw === "yesterday") {
+    const date = new Date();
+    date.setHours(12, 0, 0, 0);
+    if (raw === "yesterday") date.setDate(date.getDate() - 1);
+    return date;
+  }
+  const iso = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  const us = raw.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{4}))?$/);
+  if (!iso && !us) return null;
+  const year = Number(iso ? iso[1] : us[3] || new Date().getFullYear());
+  const month = Number(iso ? iso[2] : us[1]);
+  const day = Number(iso ? iso[3] : us[2]);
+  const date = new Date(year, month - 1, day, 12);
+  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day ? date : null;
+}
+
+function startTimesheetHoursPrompt(project, deliverable) {
+  if (!project || !deliverable) return;
+  const dock = ensureCommandDock();
+  industryActivePrompt = {
+    type: "timesheet-hours", project, deliverable, step: 0,
+    values: { hours: "", date: "" },
+  };
+  dock.columns.hidden = true;
+  dock.promptView.hidden = false;
+  setCommandDockExpanded(true);
+  renderPromptView();
+  syncPromptInput();
+}
+
+async function advanceTimesheetHoursPrompt(raw) {
+  const prompt = industryActivePrompt;
+  if (!prompt || prompt.saving) return;
+  if (prompt.step === 0) {
+    const hours = Number(raw);
+    if (!raw || !Number.isFinite(hours) || hours <= 0 || hours > 24 ||
+        Math.abs(hours * 10 - Math.round(hours * 10)) > 1e-8) {
+      toast("Enter hours greater than 0, up to 24, in increments of 0.1.");
+      return;
+    }
+    prompt.values.hours = String(hours);
+    setPromptStep(1);
+    return;
+  }
+  const date = parseTimesheetPromptDate(raw);
+  if (!date) {
+    toast("Enter a valid date: MM/DD/YYYY, YYYY-MM-DD, today, or yesterday.");
+    return;
+  }
+  prompt.values.date = raw;
+  prompt.saving = true;
+  try {
+    const result = await addDeliverableHoursToTimesheet(prompt.project, prompt.deliverable, prompt.values.hours, date);
+    if (industryActivePrompt === prompt) {
+      cancelCommandDockPrompt({ silent: true });
+      setCommandDockExpanded(false);
+      industryCommandDock?.input?.blur();
+    }
+    toast(`Added ${result.hours} hours to ${getProjectShortName(prompt.project)} for ${formatPromptDate(date)}.`);
+  } catch (error) {
+    toast(error?.message || "Failed to add timesheet hours.");
+  } finally {
+    prompt.saving = false;
+  }
+}
+
+function renderTimesheetHoursPrompt() {
+  const dock = industryCommandDock;
+  const { project, deliverable, step, values } = industryActivePrompt;
+  const host = dock.promptView;
+  host.innerHTML = "";
+  const cancel = el("button", { type: "button", className: "cmd-prompt-cancel-btn", textContent: "✕ Cancel" });
+  cancel.addEventListener("click", () => cancelCommandDockPrompt());
+  const header = el("div", { className: "cmd-prompt-header" });
+  header.append(el("div", { className: "cmd-prompt-title", textContent: `Add to Timesheet · ${getProjectShortName(project)} · ${deliverable.name || "Deliverable"}` }), cancel);
+  const guide = el("div", { className: "cmd-prompt-guide" });
+  guide.append(el("div", { className: "cmd-prompt-instruction", textContent: step === 0 ? "Step 1 of 2: Enter hours to add." : `Step 2 of 2: Add ${values.hours} hours on which date?` }));
+  guide.append(el("div", { className: "cmd-prompt-subinstruction", textContent: step === 0 ? "Use increments of 0.1 hours. Existing project hours will be increased." : "Press Enter for today, or enter MM/DD/YYYY, YYYY-MM-DD, or yesterday. The date selects the timesheet week." }));
+  const chips = el("div", { className: "cmd-prompt-chips" });
+  (step === 0 ? ["0.5", "1", "2", "4", "8"] : ["Today", "Yesterday"]).forEach((value) => {
+    const button = el("button", { type: "button", className: "cmd-prompt-chip", textContent: value });
+    button.addEventListener("click", () => advancePromptStep(value));
+    chips.append(button);
+  });
+  guide.append(chips);
+  host.append(header, guide);
+}
+
 function startAddDeliverablePrompt(project, initialDescription = "") {
   if (!project) {
     toast("Please select a project first.");
@@ -1602,6 +1750,17 @@ function syncPromptInput() {
   const { step, values } = industryActivePrompt;
 
   dock.root.classList.add("has-pending");
+  if (industryActivePrompt.type === "timesheet-hours") {
+    dock.pending.textContent = `Add to Timesheet · ${step + 1}/2 ${step === 0 ? "Hours" : "Date"}`;
+    dock.pending.hidden = false;
+    dock.input.placeholder = step === 0 ? "Hours to add (e.g. 2.5)…" : "Date (MM/DD/YYYY), or press Enter for today…";
+    dock.input.value = step === 0 ? values.hours : values.date;
+    dock.scope.textContent = step === 0 ? "↩ continue · esc cancel" : "↩ add hours · ⌫ back · esc cancel";
+    if (dock.footShortcuts) dock.footShortcuts.textContent = dock.scope.textContent;
+    dock.input.focus({ preventScroll: true });
+    if (dock.input.value) dock.input.select();
+    return;
+  }
   if (step === 0) {
     dock.pending.textContent = "Add Deliverable · 1/3 Description";
     dock.pending.hidden = false;
@@ -1632,7 +1791,9 @@ function syncPromptInput() {
 
 function setPromptStep(stepIndex) {
   if (!industryActivePrompt) return;
-  industryActivePrompt.step = Math.max(0, Math.min(2, stepIndex));
+  if (industryActivePrompt.saving) return;
+  const lastStep = industryActivePrompt.type === "timesheet-hours" ? 1 : 2;
+  industryActivePrompt.step = Math.max(0, Math.min(lastStep, stepIndex));
   renderPromptView();
   syncPromptInput();
 }
@@ -1641,6 +1802,9 @@ function advancePromptStep(forcedValue) {
   const dock = industryCommandDock;
   if (!dock || !industryActivePrompt) return;
   const raw = String(forcedValue !== undefined ? forcedValue : dock.input.value).trim();
+  if (industryActivePrompt.type === "timesheet-hours") {
+    return advanceTimesheetHoursPrompt(raw);
+  }
   const { step, values } = industryActivePrompt;
 
   if (step === 0) {
@@ -1734,6 +1898,8 @@ async function completeAddDeliverablePrompt() {
 }
 
 function cancelCommandDockPrompt({ silent = false } = {}) {
+  const promptLabel = industryActivePrompt?.type === "timesheet-hours" ? "Add to Timesheet" : "Add Deliverable";
+  if (industryActivePrompt?.saving && !silent) return;
   industryActivePrompt = null;
   const dock = industryCommandDock;
   if (!dock) return;
@@ -1755,7 +1921,7 @@ function cancelCommandDockPrompt({ silent = false } = {}) {
   renderCommandDockItems();
   updateCommandDockContext();
   if (!silent) {
-    toast("Cancelled Add Deliverable.");
+    toast(`Cancelled ${promptLabel}.`);
   }
   dock.input.focus({ preventScroll: true });
 }
@@ -1837,6 +2003,7 @@ function handleCommandDockPromptInput() {
 function renderPromptView() {
   const dock = industryCommandDock;
   if (!dock || !industryActivePrompt) return;
+  if (industryActivePrompt.type === "timesheet-hours") return renderTimesheetHoursPrompt();
   const { project, step, values } = industryActivePrompt;
   const host = dock.promptView;
   host.innerHTML = "";
@@ -2013,12 +2180,17 @@ function selectDeliverableForCommands(deliverable, project, { expand = false, fo
   else if (!same) dock.input.focus({ preventScroll: true });
 }
 
-// Picking a project exposes project commands and its deliverables separately.
+// Picking a project selects its latest visible deliverable for commands.
 function selectProjectForCommands(project, { expand = true } = {}) {
   const dock = ensureCommandDock();
   dock.project = project || null;
   dock.deliverable = null;
   dock.input.value = "";
+  const latest = getCommandDockProjectDeliverables(project)[0];
+  if (latest) {
+    selectDeliverableForCommands(latest, project, { expand });
+    return;
+  }
   renderCommandDockItems();
   updateCommandDockContext();
   syncCommandDockSelection();
@@ -2067,7 +2239,7 @@ function syncCommandDockSelection() {
     return;
   }
   if (!dock.deliverable) return;
-  const stillExists = getCommandDockProjectDeliverables(dock.project).includes(dock.deliverable);
+  const stillExists = getCommandDockProjectDeliverables(dock.project, { includeAll: true }).includes(dock.deliverable);
   if (!stillExists) {
     dock.deliverable = null;
     renderCommandDockItems();

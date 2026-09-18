@@ -1,10 +1,10 @@
 param(
   [string]$AcadCore,
-  [string]$AutoDetectPaperSize = "true",
-  [string]$AutoAcceptDetectedPaperSize = "false",
+  $AutoDetectPaperSize = "true",
+  $AutoAcceptDetectedPaperSize = "false",
   [int]$ShrinkPercent = 100,
-  [string]$StripPdfLayers = "true",
-  [string]$RefreshExcelOleLinks = "true",
+  $StripPdfLayers = "true",
+  $RefreshExcelOleLinks = "true",
   [string]$FilesListPath = "",
   [string]$DefaultDirectory = ""
 )
@@ -24,6 +24,8 @@ function Convert-ToBool {
   }
 }
 
+# Keep toggle parameters untyped: a [string] constraint would coerce the
+# normalized $false back to "False", which is truthy in PowerShell conditions.
 $AutoDetectPaperSize = Convert-ToBool $AutoDetectPaperSize $true
 $AutoAcceptDetectedPaperSize = Convert-ToBool $AutoAcceptDetectedPaperSize $false
 $StripPdfLayers = Convert-ToBool $StripPdfLayers $true

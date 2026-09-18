@@ -64,7 +64,62 @@ namespace Acies.PrepareXrefs
                 if (matches.Length == 1) return matches[0];
                 if (matches.Length > 1) throw new InvalidOperationException("Ambiguous reference '" + reference + "' in " + owner);
             }
-            throw new FileNotFoundException("Missing reference '" + reference + "' in " + owner);
+            return null;
+        }
+
+        private void DetachMissing(Database db, string source)
+        {
+            var missingXrefs = new List<ObjectId>();
+            var missingMedia = new HashSet<ObjectId>();
+            using (var tr = db.TransactionManager.StartTransaction())
+            {
+                foreach (ObjectId id in (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead))
+                {
+                    var block = (BlockTableRecord)tr.GetObject(id, OpenMode.ForRead);
+                    if (block.IsFromExternalReference)
+                    {
+                        if (block.GetBlockReferenceIds(true, false).Count > 0 && Resolve(source, block.PathName) == null)
+                        {
+                            missingXrefs.Add(id);
+                            ReportDetached("XREF", block.PathName, source);
+                        }
+                        continue;
+                    }
+                    if (block.IsDependent) continue;
+                    foreach (ObjectId entityId in block)
+                    {
+                        var entity = tr.GetObject(entityId, OpenMode.ForRead);
+                        ObjectId definitionId;
+                        string path;
+                        if (entity is RasterImage image && !(entity is Wipeout))
+                        {
+                            definitionId = image.ImageDefId;
+                            if (definitionId.IsNull) continue;
+                            path = ((RasterImageDef)tr.GetObject(definitionId, OpenMode.ForRead)).SourceFileName;
+                        }
+                        else if (entity is UnderlayReference underlay)
+                        {
+                            definitionId = underlay.DefinitionId;
+                            if (definitionId.IsNull) continue;
+                            path = ((UnderlayDefinition)tr.GetObject(definitionId, OpenMode.ForRead)).SourceFileName;
+                        }
+                        else continue;
+                        if (Resolve(source, path) != null) continue;
+                        entity.UpgradeOpen();
+                        entity.Erase();
+                        if (missingMedia.Add(definitionId)) ReportDetached("image/underlay", path, source);
+                    }
+                }
+                foreach (var id in missingMedia) tr.GetObject(id, OpenMode.ForWrite).Erase();
+                tr.Commit();
+            }
+            foreach (var id in missingXrefs) db.DetachXref(id);
+        }
+
+        private static void ReportDetached(string kind, string path, string source)
+        {
+            Application.DocumentManager.MdiActiveDocument.Editor.WriteMessage(
+                "\nPROGRESS: Detached missing " + kind + " '" + path + "' from " + source + "\n");
         }
 
         public string Process(string source, string requestedOutput = null)
@@ -82,6 +137,7 @@ namespace Acies.PrepareXrefs
                 try
                 {
                     HostApplicationServices.WorkingDatabase = db;
+                    DetachMissing(db, source);
                     var refs = new Dictionary<ObjectId, string>();
                     using (var tr = db.TransactionManager.StartTransaction())
                     {
@@ -93,7 +149,8 @@ namespace Acies.PrepareXrefs
                             if (block.IsFromExternalReference && block.GetBlockReferenceIds(true, false).Count > 0)
                             {
                                 if (block.IsUnloaded) throw new InvalidOperationException("Unloaded XREF '" + block.Name + "' in " + source + ". Load it before preparation.");
-                                refs.Add(id, Resolve(source, block.PathName));
+                                refs.Add(id, Resolve(source, block.PathName) ??
+                                    throw new FileNotFoundException("Reference disappeared during preparation: " + block.PathName));
                             }
                             if (!block.IsFromExternalReference && !block.IsDependent)
                                 foreach (ObjectId entityId in block)
