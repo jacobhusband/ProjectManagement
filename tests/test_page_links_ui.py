@@ -201,7 +201,7 @@ class PageLinksUiTests(unittest.TestCase):
         # Clicking a wiki link opens the target Pages-tab page.
         self.assertIn('const wiki = e.target?.closest?.("a.page-wiki-link[data-page-id]");', ready_block)
         self.assertIn("const target = getGlobalPageById(wiki.dataset.pageId);", ready_block)
-        self.assertIn("if (target) flushPageSave().then(() => openGlobalPage(target));", ready_block)
+        self.assertIn("if (target) openGlobalPage(target);", ready_block)
 
 
 if __name__ == "__main__":

@@ -90,7 +90,8 @@ class ActivityTrayUiTests(unittest.TestCase):
         self.assertIn('"data-activity-action": "cancel"', text)
         self.assertIn('"data-activity-action": "dwg-compare"', text)
         self.assertIn('await handleActivityTrayRerun(activityId);', text)
-        self.assertIn('await handleActivityTrayCancel(activityId);', text)
+        # Cancel buttons call the handler directly from each activity card.
+        self.assertIn('void handleActivityTrayCancel(item.id);', text)
         self.assertIn("window.pywebview.api.cancel_activity(activityId)", text)
         self.assertIn('rawMessage.startsWith("INPUT_FOLDER:")', text)
         self.assertIn('rawMessage.startsWith("DWG_COMPARE_PAIR:")', text)

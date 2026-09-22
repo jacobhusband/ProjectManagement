@@ -41,7 +41,7 @@ class ReactPageEditorIslandTests(unittest.TestCase):
         self.assertIn("window.ProjectPagesEditor.mount(root, {});", script)
         self.assertIn("window.ProjectPagesEditor.setDocument({", script)
         self.assertIn("function queueProjectPagesEditorSave(html", script)
-        self.assertIn("pageEditorTarget.html = String(html || \"\");", script)
+        self.assertIn("pageEditorTarget.html = next;", script)
         self.assertIn("if (window.ProjectPagesEditor?.flushSave) {", script)
         self.assertIn("await window.ProjectPagesEditor.flushSave();", script)
         self.assertIn("window.ProjectPagesEditor.unmount();", script)
@@ -58,7 +58,7 @@ class ReactPageEditorIslandTests(unittest.TestCase):
         self.assertIn("function setDocument(pageContext) {", main)
         self.assertIn("async function flushSave() {", main)
         self.assertIn("window.ProjectPagesEditor = ProjectPagesEditorApi;", main)
-        self.assertIn("export { flushSave, mount, setDocument, unmount };", main)
+        self.assertIn("export { flushSave, mount, setDocument, unmount, createSaveQueue };", main)
 
     def test_react_editor_keeps_legacy_html_storage_contract(self):
         main = EDITOR_MAIN_PATH.read_text(encoding="utf-8")

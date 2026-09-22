@@ -13,6 +13,10 @@ COMMAND_PATH = (
 )
 
 
+@unittest.skipUnless(
+    ELECTRICAL_COMMANDS_ROOT.is_dir(),
+    "Cross-repo contract test: needs the sibling ElectricalCommands checkout",
+)
 class LightingPlanAutocadBridgeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

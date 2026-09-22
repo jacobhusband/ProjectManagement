@@ -7,7 +7,7 @@ from pathlib import Path
 import tempfile
 import os
 
-from apps.ProjectManagement.database import (
+from database import (
     init_db,
     upsert_project,
     get_project,

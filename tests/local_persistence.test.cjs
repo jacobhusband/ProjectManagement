@@ -37,9 +37,13 @@ for (const [name, endpoint, state] of [
       getProjectDeliverables: project => project.deliverables,
       console: { warn() {} },
       toast() {},
+      projectDataLoadError: '',
+      projectSaveInFlight: null,
+      projectSaveFollowUp: null,
     });
     context.buildGlobalPagesData = () => context.pages;
-    vm.runInContext(`${extract('normalizeIsoTimestamp')}\n${extract(name)}`, context);
+    const helpers = name === 'save' ? `${extract('queueProjectSave')}\n` : '';
+    vm.runInContext(`${extract('normalizeIsoTimestamp')}\n${helpers}${extract(name)}`, context);
     assert.equal(await context[name](), true);
     assert.equal(saved, context[state]);
     if (['timesheetDb', 'templatesDb', 'checklistsDb'].includes(state)) {

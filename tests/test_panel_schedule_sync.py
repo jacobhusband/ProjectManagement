@@ -8,13 +8,13 @@ import unittest
 from copy import deepcopy
 import openpyxl
 
-from apps.ProjectManagement.database import (
+from database import (
     get_panel_schedule,
     get_panel_workbook_binding,
     init_db,
     upsert_project,
 )
-from apps.ProjectManagement.panel_schedule_sync import (
+from panel_schedule_sync import (
     PanelScheduleSyncService,
     calculate_phase_balance,
     parse_panel_sheet,

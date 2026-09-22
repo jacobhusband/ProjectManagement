@@ -6,6 +6,15 @@ import tempfile
 import unittest
 
 
+AUDIT_COMMANDS_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "ElectricalCommands", "AutoCADCommands", "AuditCommands")
+)
+
+
+@unittest.skipUnless(
+    os.path.isdir(AUDIT_COMMANDS_DIR),
+    "Cross-repo contract test: needs the sibling ElectricalCommands checkout",
+)
 class TestProjectAuditEngine(unittest.TestCase):
     def setUp(self):
         test_dir = os.path.dirname(__file__)

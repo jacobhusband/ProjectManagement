@@ -21,12 +21,12 @@
             }
         })();
     </script>
-    <link rel="stylesheet" href="styles.css?v=20260910-canvas-sidebar" />
+    <link rel="stylesheet" href="styles.css?v=20260922-review-fixes" />
     <link rel="stylesheet" href="symbol_counter.css?v=20260818-delete-actions" />
     <link rel="stylesheet" href="industry.css?v=20260909-cmd-add-deliverable" />
     <link rel="stylesheet" href="modern-workspace.css?v=20260909-deliverables" />
     <link rel="stylesheet" href="deliverables-workspace.css?v=20260909" />
-    <link rel="stylesheet" href="project-pages-editor/dist/project-pages-editor-project-pages-editor.css?v=20260910-canvas-sidebar" />
+    <link rel="stylesheet" href="project-pages-editor/dist/project-pages-editor-project-pages-editor.css?v=20260918-notes-reliability" />
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 
@@ -196,6 +196,7 @@
                                 <line x1="6" y1="20" x2="6" y2="14"></line>
                             </svg>
                         </button>
+                        <button class="btn projects-attention-btn" id="projectsAttentionBtn" type="button" aria-pressed="false" title="Show unfinished deliverables due this week or overdue">Needs attention</button>
                         <div class="projects-view-toggle" role="group" aria-label="Projects view mode">
                             <button type="button" class="view-toggle-btn is-active" id="viewToggleList" data-view-mode="list" aria-pressed="true" title="List view">List</button>
                             <button type="button" class="view-toggle-btn" id="viewToggleCard" data-view-mode="card" aria-pressed="false" title="Card view">Board</button>
@@ -256,6 +257,7 @@
                                     <button type="button" class="projects-filter-option" data-filter-value="lastWeek" role="menuitemradio" aria-checked="false" tabindex="-1">Last week</button>
                                     <button type="button" class="projects-filter-option" data-filter-value="soon" role="menuitemradio" aria-checked="false" tabindex="-1">This week</button>
                                     <button type="button" class="projects-filter-option" data-filter-value="future" role="menuitemradio" aria-checked="false" tabindex="-1">Upcoming Weeks</button>
+                                    <button type="button" class="projects-filter-option" data-filter-value="attention" role="menuitemradio" aria-checked="false" tabindex="-1">Needs attention</button>
                                 </div>
                             </div>
                         </div>
@@ -375,6 +377,7 @@
                         <div id="columnConfigMenu" class="column-config-menu" role="menu" hidden></div>
                     </div>
                 </div>
+                <p id="projectsAttentionHint" class="projects-attention-hint" hidden>Unfinished deliverables due this week or overdue. Click Needs attention again to restore your previous view.</p>
                 <div class="projects-card-view" id="projectsCardView" hidden></div>
                 <table class="table projects-table">
                     <thead>
@@ -3489,6 +3492,22 @@
                 </div>
                 <label class="label">Status</label>
                 <div class="deliverable-status"></div>
+                <details class="deliverable-email-tool">
+                    <summary>Save an Outlook email (optional)</summary>
+                    <p class="tiny muted">Select one email in classic Outlook, then save it here. The message and its attachments are saved immediately, even if you later cancel this form.</p>
+                    <div class="deliverable-fields">
+                        <label class="field">Destination
+                            <select class="d-email-category"><option>Submittals</option><option>RFI</option><option>Correspondence</option></select>
+                        </label>
+                        <label class="field">Discipline
+                            <select class="d-email-discipline"><option>Electrical</option><option>Mechanical</option><option>Plumbing</option><option>General</option></select>
+                        </label>
+                        <label class="field">Folder date<input class="d-email-date" type="date" /></label>
+                    </div>
+                    <p class="d-email-preview tiny muted"></p>
+                    <button type="button" class="btn tiny d-email-save">Save selected Outlook email</button>
+                    <p class="d-email-result tiny" role="status" aria-live="polite"></p>
+                </details>
             </div>
         </div>
     </template>
@@ -3522,8 +3541,8 @@
         </div>
     </section>
     <div id="updateCheckIndicator" class="corner-status" hidden>Checking for updates...</div>
-    <script src="project-pages-editor/dist/project-pages-editor.js?v=20260910-canvas-sidebar"></script>
-    <script src="script.js?v=20260910-canvas-sidebar"></script>
+    <script src="project-pages-editor/dist/project-pages-editor.js?v=20260918-save-queue-export"></script>
+    <script src="script.js?v=20260922-review-fixes"></script>
     <script src="industry-projects.js?v=20260909-deliverables"></script>
     <script src="industry-shell.js?v=20260909-modern-dialogs"></script>
     <script src="symbol_counter_ui.js?v=20260818-delete-actions"></script>

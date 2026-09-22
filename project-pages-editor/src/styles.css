@@ -796,3 +796,29 @@
   cursor: pointer;
 }
 .page-attachment:focus-visible { outline: 2px solid currentColor; }
+
+/* Semantic text colors keep their meaning and contrast across themes. */
+:root {
+  --notes-color-gray: #abb6c5; --notes-color-brown: #d4a889;
+  --notes-color-orange: #ffb36b; --notes-color-yellow: #f5d76e;
+  --notes-color-green: #83d5a5; --notes-color-blue: #8cc6ff;
+  --notes-color-purple: #c3a6ef; --notes-color-pink: #f2a7cf;
+  --notes-color-red: #ff9b9b;
+}
+[data-theme="light"] {
+  --notes-color-gray: #4b5563; --notes-color-brown: #795031;
+  --notes-color-orange: #984300; --notes-color-yellow: #766000;
+  --notes-color-green: #21603d; --notes-color-blue: #205c96;
+  --notes-color-purple: #70469b; --notes-color-pink: #9a356a;
+  --notes-color-red: #ac3030;
+}
+.notes-format-toolbar { display: flex; flex-wrap: wrap; gap: 5px; padding: 8px 0; margin-bottom: 12px; border-bottom: 1px solid var(--glass-border); }
+.notes-format-toolbar button, .notes-nav-collapse { border: 1px solid var(--glass-border); border-radius: 5px; background: var(--bg-secondary); color: var(--text); padding: 6px 9px; font: inherit; font-size: 12px; cursor: pointer; }
+.notes-format-toolbar button:hover, .notes-format-toolbar button[aria-pressed="true"] { background: var(--surface-hover); border-color: var(--accent); }
+.notes-format-toolbar button:focus-visible, .project-pages-menu button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.notes-page-filter { box-sizing: border-box; width: 100%; margin-bottom: 18px; padding: 9px; border: 1px solid var(--glass-border); border-radius: 5px; background: var(--bg); color: var(--text); }
+.notes-nav-collapse { flex-shrink: 0; padding: 5px; }
+.notes-trash { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--glass-border); }
+.notes-trash summary { cursor: pointer; color: var(--text-secondary); }
+.notes-pending { color: var(--text-secondary); padding: 8px 0; }
+@media print { .notes-format-toolbar, .notes-pending, .notes-sidebar { display: none; } }

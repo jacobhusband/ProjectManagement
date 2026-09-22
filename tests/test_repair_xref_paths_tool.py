@@ -49,7 +49,7 @@ class RepairXrefPathsToolTests(unittest.TestCase):
         command, tool_id, kwargs = captured[0]
         self.assertEqual("toolRepairXrefPaths", tool_id)
         self.assertEqual({"activity_id": "repair-activity"}, kwargs)
-        self.assertTrue(command[4].endswith("ManageXrefPathsDWGs.ps1"))
+        self.assertTrue(command[command.index("-File") + 1].endswith("ManageXrefPathsDWGs.ps1"))
         self.assertIn("-FilesListPath", command)
         self.assertEqual(
             files_list_path, command[command.index("-FilesListPath") + 1]

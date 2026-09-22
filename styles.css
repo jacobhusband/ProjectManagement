@@ -9965,6 +9965,18 @@ dialog::backdrop {
   box-shadow: none;
 }
 
+.projects-attention-btn.is-active {
+  border-color: var(--accent);
+  color: var(--text);
+  background: var(--accent-dim);
+}
+
+.projects-attention-hint {
+  margin: 0.25rem 1.6rem 0.8rem;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
 .deliverable-tool-dropdown {
   position: relative;
   display: inline-block;

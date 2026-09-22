@@ -741,6 +741,14 @@ class CopyProjectLocallyBackendTests(unittest.TestCase):
 class LocalProjectManagerBackendTests(unittest.TestCase):
     def setUp(self):
         self.api = Api.__new__(Api)
+        # Comparisons record sync baselines; keep them out of the real app data.
+        metadata_dir = tempfile.TemporaryDirectory(prefix="acies-sync-metadata-")
+        self.addCleanup(metadata_dir.cleanup)
+        metadata_patch = patch.object(
+            main_module, "SYNC_METADATA_FILE", os.path.join(metadata_dir.name, "sync_metadata.json")
+        )
+        metadata_patch.start()
+        self.addCleanup(metadata_patch.stop)
 
     def _settings(self, disciplines=None):
         return {"discipline": disciplines or ["Electrical"]}
@@ -902,7 +910,12 @@ class LocalProjectManagerBackendTests(unittest.TestCase):
                 entry["relativePath"]: entry for entry in copy_preview["candidateFiles"]
             }
 
-            self.assertNotIn(os.path.join("Arch", "plans.dwg"), sync_lookup)
+            # Since 2026-06-10 newer files outside the managed folders are offered too
+            # (see test_newer_file_outside_managed_folder_is_detected); "additive only"
+            # means sync never deletes there.
+            arch_entry = sync_lookup[os.path.join("Arch", "plans.dwg")]
+            self.assertEqual("additive_only", arch_entry["scopeType"])
+            self.assertEqual("newer", arch_entry["changeType"])
             self.assertNotIn(os.path.join("Arch", "plans.dwg"), copy_lookup)
             self.assertEqual(
                 "additive_only",

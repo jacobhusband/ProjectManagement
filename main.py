@@ -320,6 +320,21 @@ class _ProjectPagePdfHtmlRenderer(HTMLParser):
             for name, value in attrs
             if str(name or "").lower() not in {"contenteditable", "spellcheck"}
         ]
+        # The notes editor stores theme-aware colors. PDF pages are white and
+        # the renderer does not resolve the application's CSS custom properties.
+        print_colors = {
+            "gray": "#4b5563", "brown": "#795031", "orange": "#984300",
+            "yellow": "#766000", "green": "#21603d", "blue": "#205c96",
+            "purple": "#70469b", "pink": "#9a356a", "red": "#ac3030",
+        }
+        filtered_attrs = [
+            (name, re.sub(
+                r"var\(--notes-color-([a-z]+)\)",
+                lambda match: print_colors.get(match.group(1), "#172033"),
+                value or "",
+            ) if str(name or "").lower() == "style" else value)
+            for name, value in filtered_attrs
+        ]
         if source_tag == "a" and attr_map.get("href") == "#":
             filtered_attrs = [
                 (name, value)
@@ -393,6 +408,17 @@ class _ProjectPagePdfHtmlRenderer(HTMLParser):
             self._output.append(self._stack.pop().get("close", ""))
         return "".join(self._output)
 
+
+# Opening these runs code instead of showing a document, so the app asks first
+# with a native prompt that scripts inside the window cannot answer.
+EXECUTABLE_FILE_EXTENSIONS = frozenset({
+    ".exe", ".com", ".scr", ".pif", ".bat", ".cmd", ".ps1", ".psm1", ".vbs", ".vbe",
+    ".js", ".jse", ".wsf", ".wsh", ".hta", ".msi", ".msp", ".mst", ".cpl", ".jar",
+    ".reg", ".msc", ".appref-ms", ".application", ".gadget", ".inf", ".scf", ".sct",
+})
+SHORTCUT_FILE_EXTENSIONS = frozenset({".lnk", ".url"})
+# Other protocol handlers (ms-msdt:, search-ms:, ...) have been used to launch code.
+OPEN_URL_ALLOWED_SCHEMES = frozenset({"http", "https", "mailto"})
 
 HEIF_IMAGE_EXTENSIONS = {".heic", ".heics", ".heif", ".heifs", ".hif"}
 HEIF_SUPPORT_ENABLED = False
@@ -653,6 +679,17 @@ WORKFLOW_TOOL_REGISTRY = {
         'requiredInputs': [
             {'key': 'dwgFiles', 'type': 'dwgFiles', 'label': 'DWG files',
              'help': 'These DWGs will have XREF paths stripped, colors set by layer, purged, and audited.'},
+        ],
+    },
+    'repairXrefPaths': {
+        'displayName': 'Repair XREF Paths',
+        'description': 'Scan XREFs in selected DWGs and point missing or orphaned references at the right files.',
+        'invoke': (lambda api, ctx, aid, params:
+                   api.run_repair_xref_paths_script(ctx, aid)),
+        'params': [],
+        'requiredInputs': [
+            {'key': 'dwgFiles', 'type': 'dwgFiles', 'label': 'DWG files',
+             'help': 'These DWGs will be scanned and their XREF paths repaired.'},
         ],
     },
     'publishDwgs': {
@@ -1594,6 +1631,231 @@ def _atomic_write_json_file(path, payload):
                 pass
 
 
+# --- Durable storage for the app's primary data files ---
+# tasks.json, notes.json, timesheets.json, templates.json, checklists.json and
+# settings.json hold the user's working data. A save writes a complete temporary
+# file and swaps it in, so a crash or power loss leaves either the old or the new
+# version, never a truncated one. The previous good version is kept as <name>.bak
+# plus one snapshot per day under backups/. A file that cannot be parsed is copied
+# aside instead of being overwritten or rotated into the backup, and loading a
+# damaged file restores the newest readable backup. A missing file is a fresh start.
+DATA_FILE_SNAPSHOT_DIRNAME = "backups"
+DATA_FILE_SNAPSHOT_KEEP = 14
+DATA_FILE_LOCKED_RETRIES = 5
+DATA_FILE_LOCKED_RETRY_DELAY_SECONDS = 0.1
+
+_DATA_FILE_LOCKS = {}
+_DATA_FILE_LOCKS_GUARD = threading.Lock()
+_DATA_FILE_VERIFIED_SIGNATURES = {}
+_DATA_RECOVERY_NOTICES = []
+_DATA_RECOVERY_NOTICES_LOCK = threading.Lock()
+
+
+class DataFileUnreadableError(Exception):
+    """A data file exists but neither it nor any of its backups can be read."""
+
+
+def _data_file_key(path):
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _get_data_file_lock(path):
+    key = _data_file_key(path)
+    with _DATA_FILE_LOCKS_GUARD:
+        lock = _DATA_FILE_LOCKS.get(key)
+        if lock is None:
+            lock = _DATA_FILE_LOCKS[key] = threading.RLock()
+        return lock
+
+
+def _data_file_signature(path):
+    try:
+        stat_result = os.stat(path)
+    except OSError:
+        return None
+    return (stat_result.st_mtime_ns, stat_result.st_size)
+
+
+def _read_file_bytes(path):
+    with open(path, "rb") as handle:
+        return handle.read()
+
+
+def _retry_while_locked(action):
+    """Retry a file operation briefly while another program holds the file open."""
+    for attempt in range(DATA_FILE_LOCKED_RETRIES):
+        try:
+            return action()
+        except PermissionError:
+            if attempt == DATA_FILE_LOCKED_RETRIES - 1:
+                raise
+            time.sleep(DATA_FILE_LOCKED_RETRY_DELAY_SECONDS)
+
+
+def _atomic_write_bytes(path, data):
+    """Write data to a flushed temporary file beside path, then swap it into place."""
+    folder = os.path.dirname(path) or "."
+    os.makedirs(folder, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=folder
+    )
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _retry_while_locked(lambda: os.replace(temp_path, path))
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
+def _read_data_file_once(path):
+    payload = _retry_while_locked(lambda: _read_json_file_strict(path))
+    _DATA_FILE_VERIFIED_SIGNATURES[_data_file_key(path)] = _data_file_signature(path)
+    return payload
+
+
+def _data_file_is_readable(path):
+    """True when the file parses, skipping the parse if it is unchanged since last checked."""
+    signature = _data_file_signature(path)
+    if signature is not None and _DATA_FILE_VERIFIED_SIGNATURES.get(_data_file_key(path)) == signature:
+        return True
+    try:
+        _read_data_file_once(path)
+    except PermissionError:
+        raise
+    except (ValueError, OSError):
+        return False
+    return True
+
+
+def _data_file_snapshot_paths(path):
+    """Return the dated snapshots of a data file, newest first."""
+    folder = os.path.join(os.path.dirname(path), DATA_FILE_SNAPSHOT_DIRNAME)
+    stem, ext = os.path.splitext(os.path.basename(path))
+    pattern = re.compile(
+        rf"^{re.escape(stem)}\.\d{{4}}-\d{{2}}-\d{{2}}{re.escape(ext)}$", re.IGNORECASE
+    )
+    try:
+        names = [name for name in os.listdir(folder) if pattern.match(name)]
+    except OSError:
+        return []
+    return [os.path.join(folder, name) for name in sorted(names, reverse=True)]
+
+
+def _snapshot_data_file_for_today(path):
+    """Keep the first good version seen each day under backups/, pruning old ones."""
+    stem, ext = os.path.splitext(os.path.basename(path))
+    snapshot_path = os.path.join(
+        os.path.dirname(path),
+        DATA_FILE_SNAPSHOT_DIRNAME,
+        f"{stem}.{datetime.date.today().isoformat()}{ext}",
+    )
+    if os.path.exists(snapshot_path):
+        return
+    _atomic_write_bytes(snapshot_path, _read_file_bytes(path))
+    for stale_path in _data_file_snapshot_paths(path)[DATA_FILE_SNAPSHOT_KEEP:]:
+        try:
+            os.remove(stale_path)
+        except OSError:
+            pass
+
+
+def _preserve_damaged_data_file(path):
+    """Copy an unreadable data file aside so that nothing ever overwrites it."""
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    preserved_path = f"{path}.damaged-{stamp}"
+    counter = 2
+    while os.path.exists(preserved_path):
+        preserved_path = f"{path}.damaged-{stamp}-{counter}"
+        counter += 1
+    shutil.copy2(path, preserved_path)
+    return preserved_path
+
+
+def _record_data_recovery_notice(path, recovered_from, preserved_path):
+    notice = {
+        "file": os.path.basename(path),
+        "recoveredFrom": recovered_from,
+        "preservedCopy": preserved_path,
+        "at": utc_now_iso(),
+    }
+    with _DATA_RECOVERY_NOTICES_LOCK:
+        _DATA_RECOVERY_NOTICES.append(notice)
+    logging.warning(
+        "Recovered %s from %s; the damaged file was kept as %s.",
+        path, recovered_from, preserved_path,
+    )
+
+
+def _consume_data_recovery_notices():
+    with _DATA_RECOVERY_NOTICES_LOCK:
+        notices = list(_DATA_RECOVERY_NOTICES)
+        _DATA_RECOVERY_NOTICES.clear()
+    return notices
+
+
+def _read_data_file_with_recovery(path):
+    """Load a data file, restoring it from the newest readable backup if it is damaged.
+
+    Raises FileNotFoundError when the file does not exist, and DataFileUnreadableError
+    when it exists but can be neither read nor restored.
+    """
+    with _get_data_file_lock(path):
+        try:
+            return _read_data_file_once(path)
+        except FileNotFoundError:
+            raise
+        except PermissionError as exc:
+            # Another program is holding a file that is probably intact, so an
+            # older backup must not replace it.
+            raise DataFileUnreadableError(
+                f"{os.path.basename(path)} is locked by another program ({exc})."
+            ) from exc
+        except (ValueError, OSError) as exc:
+            damage = exc
+
+        for backup_path in [path + ".bak", *_data_file_snapshot_paths(path)]:
+            try:
+                payload = _read_data_file_once(backup_path)
+            except (ValueError, OSError):
+                continue
+            preserved_path = _preserve_damaged_data_file(path)
+            _atomic_write_bytes(path, _read_file_bytes(backup_path))
+            _DATA_FILE_VERIFIED_SIGNATURES[_data_file_key(path)] = _data_file_signature(path)
+            _record_data_recovery_notice(path, backup_path, preserved_path)
+            return payload
+
+        raise DataFileUnreadableError(
+            f"{os.path.basename(path)} is damaged and no readable backup was found ({damage})."
+        )
+
+
+def _write_data_file_safely(path, payload):
+    """Save a data file atomically, keeping its current good version as a backup."""
+    content = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    with _get_data_file_lock(path):
+        if os.path.exists(path):
+            if _data_file_is_readable(path):
+                try:
+                    _atomic_write_bytes(path + ".bak", _read_file_bytes(path))
+                    _snapshot_data_file_for_today(path)
+                except OSError as exc:
+                    logging.warning("Could not refresh the backup of %s: %s", path, exc)
+            else:
+                preserved_path = _preserve_damaged_data_file(path)
+                logging.error(
+                    "%s could not be read; kept it as %s before saving.",
+                    path, preserved_path,
+                )
+        _atomic_write_bytes(path, content)
+        _DATA_FILE_VERIFIED_SIGNATURES[_data_file_key(path)] = _data_file_signature(path)
+
+
 # --- Local Project Manager sync baseline metadata ---
 # Records the last-synced mtime/size of both sides for each file copied by the
 # Work Locally tool so later comparisons can tell "one side changed" apart from
@@ -1640,7 +1902,30 @@ def _get_sync_baseline_files(local_project_path, server_project_path):
         if not isinstance(pair_entry, dict):
             return {}
         files = pair_entry.get('files')
-        return copy.deepcopy(files) if isinstance(files, dict) else {}
+        return deepcopy(files) if isinstance(files, dict) else {}
+
+
+def _sync_side_changed_since_baseline(baseline, side, file_entry):
+    """True when one side's copy differs from what was recorded at the last sync."""
+    try:
+        recorded_mtime = float(baseline.get(f'{side}Mtime') or 0.0)
+        current_mtime = float(file_entry.get('modifiedTimestamp') or 0.0)
+    except (TypeError, ValueError):
+        return True
+    if abs(current_mtime - recorded_mtime) > SYNC_BASELINE_MTIME_EPSILON_SECONDS:
+        return True
+    recorded_size = baseline.get(f'{side}Size')
+    return recorded_size is not None and recorded_size != file_entry.get('sizeBytes')
+
+
+def _build_sync_baseline_entry(relative_path, local_file, server_file):
+    return {
+        'relativePath': relative_path,
+        'localMtime': float(local_file.get('modifiedTimestamp') or 0.0),
+        'localSize': local_file.get('sizeBytes'),
+        'serverMtime': float(server_file.get('modifiedTimestamp') or 0.0),
+        'serverSize': server_file.get('sizeBytes'),
+    }
 
 
 def _sync_baseline_entry_effectively_equal(existing_entry, new_entry):
@@ -2835,6 +3120,42 @@ TEMPLATE_DEFAULT_FILENAME_BY_KEY = {
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
+APP_LOG_FILE_NAME = "acies-scheduler.log"
+
+
+def _configure_file_logging():
+    """Keeps a rotating log in the app data folder, because the installed app has no console."""
+    from logging.handlers import RotatingFileHandler
+
+    log_path = os.path.join(get_app_data_dir(), "logs", APP_LOG_FILE_NAME)
+    try:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        handler = RotatingFileHandler(log_path, maxBytes=1_000_000, backupCount=5, encoding="utf-8")
+    except OSError as exc:
+        logging.warning(f"File logging is unavailable: {exc}")
+        return None
+    handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(threadName)s - %(message)s'))
+    logging.getLogger().addHandler(handler)
+
+    def log_uncaught_exception(exc_type, exc_value, exc_traceback):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        logging.critical("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
+
+    def log_uncaught_thread_exception(args):
+        if issubclass(args.exc_type, SystemExit):
+            return
+        thread_name = args.thread.name if args.thread else "unknown"
+        logging.critical(
+            f"Uncaught exception in thread {thread_name}",
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+
+    sys.excepthook = log_uncaught_exception
+    threading.excepthook = log_uncaught_thread_exception
+    return log_path
+
 # --- Circuit Breaker AI helpers ---
 CB_TEMPLATE_PATH = BASE_DIR / "CircuitBreakerAI" / "ElectricalPanels" / "Template.xlsx"
 CB_RATE_LIMIT_MAX_REQUESTS = 2
@@ -3410,6 +3731,8 @@ class Api:
             'tag': tag_name,
             'latest_version': latest_version,
             'download_url': download_url,
+            # GitHub reports a "sha256:<hex>" digest for release assets.
+            'digest': (asset.get('digest') or '') if asset else '',
             'release_notes': data.get('body') or '',
             'html_url': data.get('html_url') or ''
         }
@@ -3508,20 +3831,35 @@ class Api:
         ) from last_error
 
     def download_and_install_app_update(self, download_url=None):
-        """Download the newest installer and launch it silently."""
-        if not download_url:
-            return {'status': 'error', 'message': 'No download URL provided (publish a release asset named acies-scheduler-setup.exe).'}
+        """Download the newest installer and launch it silently.
 
+        download_url is accepted for compatibility with the UI but never used: the
+        installer location is looked up again here, so nothing running in the page
+        can make the app download and run a different program.
+        """
         target = Path(tempfile.gettempdir()) / self.app_installer_name
         app_path = sys.executable if getattr(sys, "frozen", False) else None
 
         try:
+            release = self._fetch_latest_release()
+            download_url = str(release.get('download_url') or '')
+            expected_prefix = f"https://github.com/{self.app_update_repo}/releases/download/"
+            if not download_url.startswith(expected_prefix):
+                return {'status': 'error', 'message': 'No download URL provided (publish a release asset named acies-scheduler-setup.exe).'}
+
+            sha256 = hashlib.sha256()
             with requests.get(download_url, stream=True, timeout=60) as r:
                 r.raise_for_status()
                 with open(target, 'wb') as f:
                     for chunk in r.iter_content(chunk_size=8192):
                         if chunk:
                             f.write(chunk)
+                            sha256.update(chunk)
+
+            digest = str(release.get('digest') or '').strip().lower()
+            if digest.startswith('sha256:') and digest.split(':', 1)[1] != sha256.hexdigest():
+                target.unlink(missing_ok=True)
+                return {'status': 'error', 'message': 'The downloaded installer did not match the published release, so it was not run.'}
 
             # Prepare the restart command separately to avoid f-string backslash syntax error
             restart_cmd = f'Start-Process -FilePath "{app_path}"' if app_path else ""
@@ -4105,8 +4443,11 @@ class Api:
         return {'status': 'started'}
 
     def _build_powershell_script_command(self, script_path, *args):
+        # Skip the user's PowerShell profile, as the scripts' own STA relaunch does:
+        # it slows every launch and can print into the PROGRESS stream.
         command = [
             'powershell.exe',
+            '-NoProfile',
             '-ExecutionPolicy',
             'Bypass',
             '-File',
@@ -4122,18 +4463,12 @@ class Api:
         """Reads and returns user settings from settings.json."""
         settings = None
         try:
-            with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
-                settings = json.load(f)
+            settings = _read_data_file_with_recovery(SETTINGS_FILE)
         except FileNotFoundError:
             settings = None
-        except json.JSONDecodeError:
-            bak_path = SETTINGS_FILE + '.bak'
-            try:
-                with open(bak_path, 'r', encoding='utf-8') as f:
-                    settings = json.load(f)
-                logging.info(f"Recovered user settings from backup file: {bak_path}")
-            except (FileNotFoundError, json.JSONDecodeError):
-                settings = None
+        except Exception as e:
+            logging.error(f"Error loading user settings from {SETTINGS_FILE}: {e}")
+            settings = None
         if settings is None:
             settings = build_default_user_settings()
 
@@ -4156,10 +4491,7 @@ class Api:
         """Saves user settings to settings.json."""
         try:
             normalized_data, _ = _sanitize_user_settings_payload(data)
-            if os.path.exists(SETTINGS_FILE):
-                shutil.copy2(SETTINGS_FILE, SETTINGS_FILE + '.bak')
-            with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(normalized_data, f, ensure_ascii=False, indent=2)
+            _write_data_file_safely(SETTINGS_FILE, normalized_data)
             return {'status': 'success'}
         except Exception as e:
             logging.error(f"Error saving user settings: {e}")
@@ -5238,6 +5570,95 @@ class Api:
         except Exception as exc:
             logging.error(f"Error saving active Outlook selection: {exc}")
             return {'status': 'error', 'message': str(exc)}
+
+    def save_deliverable_outlook_email(self, context=None):
+        """Archive the selected Outlook message and attachments in the project tree."""
+        staging = None
+        try:
+            data = context if isinstance(context, dict) else {}
+            raw_root = str(data.get('projectPath') or '').strip()
+            if not raw_root or not os.path.isabs(raw_root):
+                raise ValueError('Set an absolute project folder path first.')
+            root = self._find_project_root_by_id(raw_root) or os.path.normpath(raw_root)
+            if not os.path.isdir(root):
+                raise ValueError('The project folder is unavailable. Check the project path and network connection.')
+            name = str(data.get('deliverableName') or '').strip()
+            if not name:
+                raise ValueError('Enter a deliverable name first.')
+            date = datetime.date.fromisoformat(str(data.get('date') or ''))
+            category = str(data.get('category') or '')
+            destinations = {'Submittals': ('Submittals',), 'RFI': ('RFI',),
+                            'Correspondence': ('Documents', 'Correspondence')}
+            if category not in destinations:
+                raise ValueError('Choose a valid destination category.')
+            parts = list(destinations[category])
+            if category == 'Submittals':
+                discipline = str(data.get('discipline') or '')
+                if discipline not in ('Electrical', 'Mechanical', 'Plumbing', 'General'):
+                    raise ValueError('Choose a valid discipline.')
+                parts.append(discipline)
+            parent = os.path.join(root, *parts)
+            if not self._is_within_directory(os.path.realpath(root), os.path.realpath(parent)):
+                raise ValueError('Destination must be inside the project folder.')
+
+            def _save():
+                nonlocal staging
+                application, _ = self._get_desktop_outlook_namespace()
+                explorer = application.ActiveExplorer()
+                selection = explorer.Selection if explorer is not None else None
+                if selection is None or int(selection.Count) != 1:
+                    raise ValueError('Select exactly one email in classic Outlook, then try again.')
+                item = selection.Item(1)
+                if int(getattr(item, 'Class', 0)) != 43:
+                    raise ValueError('The selected Outlook item is not an email.')
+                os.makedirs(parent, exist_ok=True)
+                staging = tempfile.mkdtemp(prefix='.email-', dir=parent)
+                used = set()
+
+                def output_name(value, fallback):
+                    original_stem, original_ext = os.path.splitext(str(value or fallback))
+                    safe = (self._sanitize_email_path_component(original_stem, 'attachment')
+                            + re.sub(r'[^A-Za-z0-9.]', '_', original_ext)[:16]).rstrip(' .')
+                    if safe.split('.')[0].upper() in {'CON', 'PRN', 'AUX', 'NUL',
+                            *('COM%d' % n for n in range(1, 10)),
+                            *('LPT%d' % n for n in range(1, 10))}:
+                        safe = '_' + safe
+                    stem, ext = os.path.splitext(safe)
+                    candidate = safe
+                    counter = 2
+                    while candidate.casefold() in used:
+                        candidate = f'{stem} ({counter}){ext}'
+                        counter += 1
+                    used.add(candidate.casefold())
+                    return candidate
+
+                subject = str(item.Subject or 'Email')
+                email_name = output_name(subject + '.msg', 'email.msg')
+                # Unicode MSG preserves the complete message, headers and attachments.
+                item.SaveAs(os.path.join(staging, email_name), 9)
+                attachments = item.Attachments
+                for index in range(1, int(attachments.Count) + 1):
+                    attachment = attachments.Item(index)
+                    filename = output_name(attachment.FileName, f'attachment-{index}')
+                    attachment.SaveAsFile(os.path.join(staging, filename))
+                folder_name = f'{date.isoformat()} {self._sanitize_email_path_component(name, "Deliverable")}'
+                destination = os.path.join(parent, folder_name)
+                counter = 2
+                while os.path.exists(destination):
+                    destination = os.path.join(parent, f'{folder_name} ({counter})')
+                    counter += 1
+                os.rename(staging, destination)
+                staging = None
+                return {'status': 'success', 'folder': destination,
+                        'emailPath': os.path.join(destination, email_name),
+                        'subject': subject, 'attachmentCount': int(attachments.Count)}
+
+            return self._run_with_outlook_com(_save)
+        except Exception as exc:
+            return {'status': 'error', 'message': str(exc)}
+        finally:
+            if staging and os.path.isdir(staging):
+                shutil.rmtree(staging)
 
     def _outlook_message_candidate_score(self, message_summary):
         summary = message_summary if isinstance(message_summary, dict) else {}
@@ -7098,27 +7519,46 @@ Return ONLY the JSON object.
             raise RuntimeError(f"AI error: {msg}")
 
     def get_tasks(self):
-        """Reads and returns the content of tasks.json."""
+        """Reads and returns the content of tasks.json.
+
+        A damaged file is restored from its newest readable backup. When no readable
+        copy exists this returns an error payload rather than an empty list, so the
+        UI never mistakes unreadable data for a fresh install and saves over it.
+        """
         try:
-            payload = _read_json_file_strict(TASKS_FILE)
-            return _overlay_projects_with_lighting_schedule_records(payload)
+            payload = _read_data_file_with_recovery(TASKS_FILE)
         except FileNotFoundError:
             return []
-        except ValueError as e:
+        except Exception as e:
             logging.error(f"Error loading tasks from {TASKS_FILE}: {e}")
-            return []
+            return {
+                'status': 'error',
+                'code': 'data_file_unreadable',
+                'message': str(e),
+                'path': TASKS_FILE,
+            }
+        return _overlay_projects_with_lighting_schedule_records(payload)
+
+    def _load_tasks_for_update(self):
+        """Returns the project list for backend edits, refusing to work from unreadable data."""
+        tasks = self.get_tasks()
+        if not isinstance(tasks, list):
+            message = tasks.get('message') if isinstance(tasks, dict) else ''
+            raise RuntimeError(message or 'Project data could not be loaded.')
+        return tasks
 
     def save_tasks(self, data):
-        """Saves data to tasks.json and creates a backup."""
+        """Saves data to tasks.json, keeping the previous version as a backup."""
         try:
-            if os.path.exists(TASKS_FILE):
-                shutil.copy2(TASKS_FILE, TASKS_FILE + '.bak')
-            with open(TASKS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            _write_data_file_safely(TASKS_FILE, data)
             return {'status': 'success'}
         except Exception as e:
             logging.error(f"Error saving tasks: {e}")
             return {'status': 'error', 'message': str(e)}
+
+    def get_data_recovery_notices(self):
+        """Returns, then clears, notices about data files restored from backups."""
+        return {'status': 'success', 'notices': _consume_data_recovery_notices()}
 
     def delete_project(self, project_id="", project_name=""):
         """Deletes a project from the SQLite DB and checklist DB."""
@@ -7255,7 +7695,10 @@ Return ONLY the JSON object.
             w_path = str(workbook_path or '').strip()
             
             if not w_path:
-                tasks = _read_json_file_strict(TASKS_FILE) if os.path.exists(TASKS_FILE) else []
+                try:
+                    tasks = _read_data_file_with_recovery(TASKS_FILE)
+                except FileNotFoundError:
+                    tasks = []
                 proj = next((p for p in tasks if str(p.get('id') or p.get('number') or '') == p_id), None)
                 if proj and proj.get('path'):
                     candidate = os.path.join(proj['path'], 'Panels.xlsx')
@@ -7621,18 +8064,17 @@ Return ONLY the JSON object.
     def get_notes(self):
         """Reads and returns the content of notes.json."""
         try:
-            with open(NOTES_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
+            return _read_data_file_with_recovery(NOTES_FILE)
+        except FileNotFoundError:
+            return {}
+        except Exception as e:
+            logging.error(f"Error loading notes from {NOTES_FILE}: {e}")
             return {}
 
     def save_notes(self, data):
-        """Saves notes data to notes.json and creates a backup."""
+        """Saves notes data to notes.json, keeping the previous version as a backup."""
         try:
-            if os.path.exists(NOTES_FILE):
-                shutil.copy2(NOTES_FILE, NOTES_FILE + '.bak')
-            with open(NOTES_FILE, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            _write_data_file_safely(NOTES_FILE, data)
             return {'status': 'success'}
         except Exception as e:
             logging.error(f"Error saving notes: {e}")
@@ -7641,21 +8083,20 @@ Return ONLY the JSON object.
     def get_timesheets(self):
         """Reads and returns the content of timesheets.json."""
         try:
-            with open(TIMESHEETS_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                if isinstance(data, dict) and not isinstance(data.get('expenses'), dict):
-                    data['expenses'] = {}
-                return data
-        except (FileNotFoundError, json.JSONDecodeError):
+            data = _read_data_file_with_recovery(TIMESHEETS_FILE)
+        except FileNotFoundError:
             return {'weeks': {}, 'expenses': {}, 'lastModified': None}
+        except Exception as e:
+            logging.error(f"Error loading timesheets from {TIMESHEETS_FILE}: {e}")
+            return {'weeks': {}, 'expenses': {}, 'lastModified': None}
+        if isinstance(data, dict) and not isinstance(data.get('expenses'), dict):
+            data['expenses'] = {}
+        return data
 
     def save_timesheets(self, data):
-        """Saves timesheets data to timesheets.json and creates a backup."""
+        """Saves timesheets data to timesheets.json, keeping the previous version as a backup."""
         try:
-            if os.path.exists(TIMESHEETS_FILE):
-                shutil.copy2(TIMESHEETS_FILE, TIMESHEETS_FILE + '.bak')
-            with open(TIMESHEETS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            _write_data_file_safely(TIMESHEETS_FILE, data)
             return {'status': 'success'}
         except Exception as e:
             logging.error(f"Error saving timesheets: {e}")
@@ -7666,21 +8107,23 @@ Return ONLY the JSON object.
     def get_templates(self):
         """Reads and returns templates data, installing defaults on first run."""
         try:
-            with open(TEMPLATES_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-
-            # Check if defaults need installation
-            if not data.get('defaultTemplatesInstalled'):
-                data = self._install_default_templates(data)
-
-            data = self._ensure_default_templates(data)
-            return data
-        except (FileNotFoundError, json.JSONDecodeError):
-            # First run - create initial structure with defaults
+            data = _read_data_file_with_recovery(TEMPLATES_FILE)
+        except Exception as e:
+            if not isinstance(e, FileNotFoundError):
+                logging.error(f"Error loading templates from {TEMPLATES_FILE}: {e}")
+            # First run (or unreadable with no backup) - create initial structure with
+            # defaults. Saving it sets any unreadable file aside rather than losing it.
             data = {'templates': [], 'defaultTemplatesInstalled': False, 'lastModified': None}
             data = self._install_default_templates(data)
             data = self._ensure_default_templates(data)
             return data
+
+        # Check if defaults need installation
+        if not data.get('defaultTemplatesInstalled'):
+            data = self._install_default_templates(data)
+
+        data = self._ensure_default_templates(data)
+        return data
 
     def _install_default_templates(self, data):
         """Install default templates on first run."""
@@ -7754,10 +8197,7 @@ Return ONLY the JSON object.
     def save_templates(self, data):
         """Saves templates data with backup."""
         try:
-            if os.path.exists(TEMPLATES_FILE):
-                shutil.copy2(TEMPLATES_FILE, TEMPLATES_FILE + '.bak')
-            with open(TEMPLATES_FILE, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            _write_data_file_safely(TEMPLATES_FILE, data)
             return {'status': 'success'}
         except Exception as e:
             logging.error(f"Error saving templates: {e}")
@@ -8452,19 +8892,18 @@ Return ONLY the JSON object.
     def get_checklists(self):
         """Reads and returns checklists data."""
         try:
-            with open(CHECKLISTS_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
+            return _read_data_file_with_recovery(CHECKLISTS_FILE)
+        except FileNotFoundError:
             # First run - return empty structure
+            return {'checklists': [], 'lastModified': None}
+        except Exception as e:
+            logging.error(f"Error loading checklists from {CHECKLISTS_FILE}: {e}")
             return {'checklists': [], 'lastModified': None}
 
     def save_checklists(self, data):
         """Saves checklists data with backup."""
         try:
-            if os.path.exists(CHECKLISTS_FILE):
-                shutil.copy2(CHECKLISTS_FILE, CHECKLISTS_FILE + '.bak')
-            with open(CHECKLISTS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            _write_data_file_safely(CHECKLISTS_FILE, data)
             return {'status': 'success'}
         except Exception as e:
             logging.error(f"Error saving checklists: {e}")
@@ -8760,7 +9199,7 @@ Return ONLY the JSON object.
             worksheet.cell(
                 row=rate_row,
                 column=3,
-                value=f"{mileage_rate:.2f} CENTS PER MILE",
+                value=f"${mileage_rate:.3f} PER MILE",
             )
             worksheet.cell(
                 row=rate_row,
@@ -9053,7 +9492,7 @@ Return ONLY the JSON object.
                     render_result = self._render_project_expense_sheet(
                         ws_exp,
                         expense_projects,
-                        expense_data.get('mileageRate', 0.70),
+                        expense_data.get('mileageRate', 0.725),
                     )
                     temp_files_to_cleanup.extend(
                         self._add_expense_sheet_images(
@@ -10080,7 +10519,7 @@ Return ONLY the JSON object.
             render_result = self._render_project_expense_sheet(
                 ws,
                 data.get('projects', []),
-                data.get('mileageRate', 0.70),
+                data.get('mileageRate', 0.725),
             )
             temp_files_to_cleanup = self._add_expense_sheet_images(
                 ws,
@@ -10113,7 +10552,7 @@ Return ONLY the JSON object.
     def mark_overdue_projects_complete(self):
         """Marks all deliverables with due dates before today as complete."""
         try:
-            tasks = self.get_tasks()
+            tasks = self._load_tasks_for_update()
             today = datetime.date.today()
             count = 0
             for task in tasks:
@@ -10152,7 +10591,9 @@ Return ONLY the JSON object.
                                     t['done'] = True
                             count += 1
             if count > 0:
-                self.save_tasks(tasks)
+                saved = self.save_tasks(tasks)
+                if saved.get('status') != 'success':
+                    raise RuntimeError(saved.get('message') or 'Could not save projects.')
             return {'status': 'success', 'count': count}
         except Exception as e:
             logging.error(f"Error marking overdue projects: {e}")
@@ -10161,7 +10602,7 @@ Return ONLY the JSON object.
     def mark_overdue_projects_delivered(self):
         """Marks all deliverables with due dates before today as delivered."""
         try:
-            tasks = self.get_tasks()
+            tasks = self._load_tasks_for_update()
             today = datetime.date.today()
             count = 0
             for task in tasks:
@@ -10200,7 +10641,9 @@ Return ONLY the JSON object.
                                     t['done'] = True
                             count += 1
             if count > 0:
-                self.save_tasks(tasks)
+                saved = self.save_tasks(tasks)
+                if saved.get('status') != 'success':
+                    raise RuntimeError(saved.get('message') or 'Could not save projects.')
             return {'status': 'success', 'count': count}
         except Exception as e:
             logging.error(f"Error marking overdue projects delivered: {e}")
@@ -10256,6 +10699,16 @@ Return ONLY the JSON object.
                 local_path = self._coerce_local_email_path(target)
                 if local_path:
                     return self.open_path(local_path)
+            if re.match(r"^(?:[a-zA-Z]:[\\/]|\\\\)", target):
+                return self.open_path(target)
+
+            scheme = urlparse(target).scheme.lower()
+            if scheme not in OPEN_URL_ALLOWED_SCHEMES:
+                logging.warning(f"Refused to open link with unsupported scheme: {scheme or target[:40]}")
+                return {
+                    'status': 'error',
+                    'message': 'Only web, email and file links can be opened from the app.',
+                }
 
             if sys.platform == "win32":
                 if preferred_browser == "edge" and target.lower().startswith(("http://", "https://")):
@@ -10456,6 +10909,14 @@ Return ONLY the JSON object.
             p = os.path.normpath(path)
             if sys.platform == "win32":
                 if os.path.exists(p):
+                    program = self._get_program_launched_by_path(p)
+                    if program and not self._confirm_with_native_dialog(
+                        "Run a program?",
+                        "A link in ACIES Scheduler is about to run:\n\n"
+                        f"{program}\n\n"
+                        "Only choose Yes if you added this link yourself and trust it.",
+                    ):
+                        return {'status': 'cancelled', 'message': 'The program was not run.'}
                     os.startfile(p)
                 else:
                     parent = os.path.dirname(p)
@@ -10470,6 +10931,49 @@ Return ONLY the JSON object.
         except Exception as e:
             logging.error(f"Error opening path: {e}")
             return {'status': 'error', 'message': str(e)}
+
+    def _get_program_launched_by_path(self, path):
+        """Returns the program that opening path would run, or '' for documents and folders."""
+        if not os.path.isfile(path):
+            return ''
+        extension = os.path.splitext(path)[1].lower()
+        if extension in EXECUTABLE_FILE_EXTENSIONS:
+            return path
+        if extension not in SHORTCUT_FILE_EXTENSIONS:
+            return ''
+        target = self._resolve_shortcut_target(path)
+        if extension == '.url' and target.lower().startswith(('http://', 'https://')):
+            return ''
+        risky_extensions = EXECUTABLE_FILE_EXTENSIONS | SHORTCUT_FILE_EXTENSIONS
+        if extension == '.lnk' and target and (
+            os.path.isdir(target) or os.path.splitext(target)[1].lower() not in risky_extensions
+        ):
+            return ''
+        return target or path
+
+    def _resolve_shortcut_target(self, path):
+        """Returns the target of a .lnk or .url shortcut, or '' when it cannot be read."""
+        def _read_target():
+            import win32com.client
+            shell = win32com.client.Dispatch("WScript.Shell")
+            return str(shell.CreateShortcut(path).TargetPath or '').strip()
+
+        try:
+            return self._run_with_outlook_com(_read_target)
+        except Exception as exc:
+            logging.warning(f"Could not read shortcut target for {path}: {exc}")
+            return ''
+
+    @staticmethod
+    def _confirm_with_native_dialog(title, message):
+        """Asks the user in a Windows message box, which scripts in the page cannot answer."""
+        if sys.platform != 'win32':
+            return True
+        import ctypes
+        mb_yesno, mb_iconwarning, mb_defbutton2 = 0x4, 0x30, 0x100
+        mb_setforeground, mb_topmost, idyes = 0x10000, 0x40000, 6
+        flags = mb_yesno | mb_iconwarning | mb_defbutton2 | mb_setforeground | mb_topmost
+        return ctypes.windll.user32.MessageBoxW(None, message, title, flags) == idyes
 
     @staticmethod
     def _schedule_temp_file_cleanup(path, delay_seconds=120):
@@ -11908,6 +12412,7 @@ Return ONLY the JSON object.
         scope_type='',
         change_type='',
         direction_label='',
+        selected_by_default=None,
     ):
         normalized_relative_path = os.path.normpath(str(relative_path or '').strip())
         local_file = local_file or {}
@@ -11931,7 +12436,7 @@ Return ONLY the JSON object.
             )
 
         resolved_change_type = str(change_type or '').strip().lower()
-        if resolved_change_type not in {'newer', 'missing'}:
+        if resolved_change_type not in {'newer', 'missing', 'deleted'}:
             resolved_change_type = (
                 'missing'
                 if str(reason or '').strip().lower() in {'server_missing', 'local_missing'}
@@ -11953,7 +12458,11 @@ Return ONLY the JSON object.
                     else 'Newer than server'
                 )
 
-        should_auto_select = resolved_change_type in {'newer', 'missing'}
+        should_auto_select = (
+            resolved_change_type in {'newer', 'missing'}
+            if selected_by_default is None
+            else bool(selected_by_default)
+        )
 
         return {
             'relativePath': normalized_relative_path,
@@ -11974,6 +12483,78 @@ Return ONLY the JSON object.
             'sizeBytes': source_size_bytes,
             'sizeLabel': source_size_label,
             'selectedByDefault': should_auto_select,
+        }
+
+    @staticmethod
+    def _decide_local_project_manager_sync_direction(local_file, server_file, baseline, tolerance_seconds):
+        """Decides which copy of a file that exists on both sides should win.
+
+        Returns 'equal', 'to_server', 'to_local' or 'conflict'. With a baseline from the
+        last sync, only the side that changed since then wins, and a file changed on
+        both sides is left to the user. Without one, the newer copy wins; copies with the
+        same timestamp but different sizes are also left to the user.
+        """
+        local_mtime = float(local_file.get('modifiedTimestamp') or 0.0)
+        server_mtime = float(server_file.get('modifiedTimestamp') or 0.0)
+        same_size = local_file.get('sizeBytes') == server_file.get('sizeBytes')
+        if abs(local_mtime - server_mtime) <= tolerance_seconds and same_size:
+            return 'equal'
+        if baseline:
+            local_changed = _sync_side_changed_since_baseline(baseline, 'local', local_file)
+            server_changed = _sync_side_changed_since_baseline(baseline, 'server', server_file)
+            if local_changed and server_changed:
+                return 'conflict'
+            if local_changed:
+                return 'to_server'
+            if server_changed:
+                return 'to_local'
+            return 'equal'
+        if local_mtime - server_mtime > tolerance_seconds:
+            return 'to_server'
+        if server_mtime - local_mtime > tolerance_seconds:
+            return 'to_local'
+        return 'conflict'
+
+    def _build_local_project_manager_conflict_entry(
+        self,
+        local_project_path,
+        server_project_path,
+        relative_path,
+        local_file,
+        server_file,
+        root_folder='',
+        scope_type='',
+    ):
+        normalized_relative_path = os.path.normpath(str(relative_path or '').strip())
+        return {
+            'relativePath': normalized_relative_path,
+            'path': normalized_relative_path,
+            'rootFolder': root_folder,
+            'scopeType': scope_type,
+            'reason': 'both_changed',
+            'localPath': os.path.normpath(
+                str(local_file.get('path') or os.path.join(local_project_path, normalized_relative_path))
+            ),
+            'serverPath': os.path.normpath(
+                str(server_file.get('path') or os.path.join(server_project_path, normalized_relative_path))
+            ),
+            'localMtime': float(local_file.get('modifiedTimestamp') or 0.0),
+            'serverMtime': float(server_file.get('modifiedTimestamp') or 0.0),
+            'localSize': local_file.get('sizeBytes'),
+            'serverSize': server_file.get('sizeBytes'),
+            'localModifiedAt': str(local_file.get('modifiedAt') or '').strip(),
+            'serverModifiedAt': str(server_file.get('modifiedAt') or '').strip(),
+        }
+
+    def _build_sync_baseline_for_paths(self, relative_path, local_path, server_path):
+        local_stat = os.stat(self._to_windows_extended_path(local_path))
+        server_stat = os.stat(self._to_windows_extended_path(server_path))
+        return {
+            'relativePath': relative_path,
+            'localMtime': local_stat.st_mtime,
+            'localSize': local_stat.st_size,
+            'serverMtime': server_stat.st_mtime,
+            'serverSize': server_stat.st_size,
         }
 
     def _resolve_local_project_manager_pair(
@@ -12111,9 +12692,18 @@ Return ONLY the JSON object.
         local_to_server_blocked_entries = []
         server_to_local_blocked_entries = []
         equal_files = []
+        conflict_candidates = []
         comparison_tolerance_seconds = 60.0
         seen_local_blocked = set()
         seen_server_blocked = set()
+        # Baselines record both sides at the last sync, which tells "one side changed"
+        # apart from "both changed" and "deleted" apart from "never copied".
+        baseline_files = _get_sync_baseline_files(
+            normalized_local_project_path,
+            normalized_server_project_path,
+        )
+        baseline_upserts = []
+        scans_complete = not local_scan.get('scanErrors') and not server_scan.get('scanErrors')
 
         def add_local_blocked_entry(entry):
             dedupe_key = (
@@ -12180,12 +12770,30 @@ Return ONLY the JSON object.
             )
             root_folder = str(path_details.get('rootFolder') or '').strip()
             scope_type = str(path_details.get('scopeType') or 'additive_only').strip().lower()
+            baseline = baseline_files.get(_normalize_sync_metadata_file_key(relative_path))
 
             if local_file and server_file:
-                local_modified_timestamp = float(local_file.get('modifiedTimestamp') or 0.0)
-                server_modified_timestamp = float(server_file.get('modifiedTimestamp') or 0.0)
-                time_difference = local_modified_timestamp - server_modified_timestamp
-                if time_difference > comparison_tolerance_seconds:
+                decision = self._decide_local_project_manager_sync_direction(
+                    local_file,
+                    server_file,
+                    baseline,
+                    comparison_tolerance_seconds,
+                )
+                if decision == 'conflict':
+                    conflict_candidates.append(
+                        self._build_local_project_manager_conflict_entry(
+                            normalized_local_project_path,
+                            normalized_server_project_path,
+                            relative_path,
+                            local_file,
+                            server_file,
+                            root_folder=root_folder,
+                            scope_type=scope_type,
+                        )
+                    )
+                    continue
+
+                if decision == 'to_server':
                     conflict_path = find_target_conflict(
                         relative_path,
                         normalized_server_project_path,
@@ -12221,7 +12829,7 @@ Return ONLY the JSON object.
                     )
                     continue
 
-                if time_difference < -comparison_tolerance_seconds:
+                if decision == 'to_local':
                     conflict_path = find_target_conflict(
                         relative_path,
                         normalized_local_project_path,
@@ -12263,6 +12871,11 @@ Return ONLY the JSON object.
                     'rootFolder': root_folder,
                     'scopeType': scope_type,
                 })
+                # Matching copies are in sync, so record them as the baseline. This also
+                # covers projects copied before baselines were kept.
+                baseline_upserts.append(
+                    _build_sync_baseline_entry(relative_path, local_file, server_file)
+                )
                 continue
 
             if local_file:
@@ -12295,12 +12908,41 @@ Return ONLY the JSON object.
                         root_folder=root_folder,
                         scope_type=scope_type,
                         change_type='missing',
-                        direction_label='Missing on server',
+                        # A baseline means it was synced before and later deleted on the
+                        # server; do not bring it back unless the user asks.
+                        direction_label='Deleted on server' if baseline else 'Missing on server',
+                        selected_by_default=False if baseline else None,
                     )
                 )
                 continue
 
             if server_file:
+                # A baseline means the file was synced before and later deleted locally.
+                # Managed folders may pass that deletion on to the server; additive-only
+                # folders never delete. Deletions are never preselected, and none are
+                # offered after an incomplete scan, where a missing file proves nothing.
+                if (
+                    baseline
+                    and scans_complete
+                    and scope_type == 'managed'
+                    and not _sync_side_changed_since_baseline(baseline, 'server', server_file)
+                ):
+                    deletion_entry = self._build_local_project_manager_candidate_entry(
+                        normalized_local_project_path,
+                        normalized_server_project_path,
+                        relative_path,
+                        'local_deleted',
+                        server_file=server_file,
+                        direction='to_server',
+                        root_folder=root_folder,
+                        scope_type=scope_type,
+                        change_type='deleted',
+                        direction_label='Deleted locally',
+                        selected_by_default=False,
+                    )
+                    deletion_entry['sizeBytes'] = server_file.get('sizeBytes')
+                    deletion_entry['sizeLabel'] = str(server_file.get('sizeLabel') or deletion_entry['sizeLabel'])
+                    local_to_server_candidates.append(deletion_entry)
                 conflict_path = find_target_conflict(
                     relative_path,
                     normalized_local_project_path,
@@ -12330,7 +12972,8 @@ Return ONLY the JSON object.
                         root_folder=root_folder,
                         scope_type=scope_type,
                         change_type='missing',
-                        direction_label='Missing locally',
+                        direction_label='Deleted locally' if baseline else 'Missing locally',
+                        selected_by_default=False if baseline else None,
                     )
                 )
 
@@ -12347,6 +12990,28 @@ Return ONLY the JSON object.
             key=lambda item: str(item.get('relativePath') or '').lower()
         )
         equal_files.sort(key=lambda item: str(item.get('relativePath') or '').lower())
+        conflict_candidates.sort(key=lambda item: str(item.get('relativePath') or '').lower())
+
+        # Forget files that are gone from both sides, but only after complete scans,
+        # since a folder that failed to scan would otherwise look deleted.
+        stale_baseline_paths = []
+        if scans_complete:
+            present_keys = {
+                _normalize_sync_metadata_file_key(relative_path_key)
+                for relative_path_key in all_relative_path_keys
+            }
+            stale_baseline_paths = [
+                str(entry.get('relativePath') or key)
+                for key, entry in baseline_files.items()
+                if key not in present_keys and isinstance(entry, dict)
+            ]
+        if baseline_upserts or stale_baseline_paths:
+            _update_sync_baseline_files(
+                normalized_local_project_path,
+                normalized_server_project_path,
+                upsert_entries=baseline_upserts,
+                remove_relative_paths=stale_baseline_paths,
+            )
 
         return {
             'status': 'success',
@@ -12356,6 +13021,8 @@ Return ONLY the JSON object.
             'localToServerBlockedEntries': local_to_server_blocked_entries,
             'serverToLocalBlockedEntries': server_to_local_blocked_entries,
             'equalFiles': equal_files,
+            'conflictCandidates': conflict_candidates,
+            'conflictCandidateCount': len(conflict_candidates),
         }
 
     def _create_local_project_manager_backup(
@@ -12529,6 +13196,7 @@ Return ONLY the JSON object.
             'managedLocalToServerNewerCount': managed_local_newer_count,
             'managedServerToLocalNewerCount': managed_server_newer_count,
             'equalFileCount': len(equal_files),
+            'conflictCandidateCount': len(comparison_result.get('conflictCandidates', []) or []),
         }
 
     def _preview_local_project_manager_direction(
@@ -12590,6 +13258,7 @@ Return ONLY the JSON object.
             'managedLocalToServerNewerCount': comparison_summary.get('managedLocalToServerNewerCount', 0),
             'managedServerToLocalNewerCount': comparison_summary.get('managedServerToLocalNewerCount', 0),
             'equalFileCount': comparison_summary.get('equalFileCount', 0),
+            'conflictCandidateCount': comparison_summary.get('conflictCandidateCount', 0),
             'hasMixedUpdates': comparison_summary.get('summary') == 'mixed',
         }
 
@@ -12735,6 +13404,8 @@ Return ONLY the JSON object.
                 }
 
         copied_files = []
+        deleted_files = []
+        synced_baselines = []
         for candidate_entry in pending_candidates:
             relative_path = str(candidate_entry.get('relativePath') or '').strip()
             if not relative_path:
@@ -12746,6 +13417,24 @@ Return ONLY the JSON object.
             destination_path = os.path.normpath(
                 str(candidate_entry.get(destination_path_key) or '').strip()
             )
+
+            if (
+                direction_key != 'to_local'
+                and str(candidate_entry.get('reason') or '').strip().lower() == 'local_deleted'
+            ):
+                # The backup above already holds a copy of the server file.
+                try:
+                    if self._is_copy_project_path_file(destination_path):
+                        os.remove(self._to_windows_extended_path(destination_path))
+                    deleted_files.append({'relativePath': relative_path, 'path': destination_path})
+                except Exception as e:
+                    failed_files.append({
+                        'relativePath': relative_path,
+                        'source': source_path,
+                        'destination': destination_path,
+                        'error': str(e),
+                    })
+                continue
 
             if not self._is_copy_project_path_file(source_path):
                 failed_files.append({
@@ -12795,10 +13484,31 @@ Return ONLY the JSON object.
                     'destination': destination_path,
                     'error': str(e),
                 })
+                continue
+
+            local_path, server_path = (
+                (destination_path, source_path)
+                if direction_key == 'to_local'
+                else (source_path, destination_path)
+            )
+            try:
+                synced_baselines.append(
+                    self._build_sync_baseline_for_paths(relative_path, local_path, server_path)
+                )
+            except OSError as exc:
+                logging.warning(f"Could not record the sync baseline for {relative_path}: {exc}")
+
+        if synced_baselines or deleted_files:
+            _update_sync_baseline_files(
+                normalized_local_project_path,
+                normalized_server_project_path,
+                upsert_entries=synced_baselines,
+                remove_relative_paths=[entry['relativePath'] for entry in deleted_files],
+            )
 
         return {
             'status': 'success',
-            'message': message_success if copied_files else message_empty,
+            'message': message_success if copied_files or deleted_files else message_empty,
             'localProjectPath': normalized_local_project_path,
             'serverProjectPath': normalized_server_project_path,
             'resolvedServerProjectPath': pair_resolution.get('resolvedServerProjectPath') or '',
@@ -12807,6 +13517,8 @@ Return ONLY the JSON object.
             'workroomProjectPath': str(pair_resolution.get('workroomProjectPath') or '').strip(),
             'copiedFiles': copied_files,
             'copiedFileCount': len(copied_files),
+            'deletedFiles': deleted_files,
+            'deletedFileCount': len(deleted_files),
             'failedFiles': failed_files,
             'failedFileCount': len(failed_files),
             'blockedEntries': blocked_entries,
@@ -12879,6 +13591,68 @@ Return ONLY the JSON object.
             )
         except Exception as e:
             logging.error(f"Error applying Local Project Manager sync: {e}")
+            return {'status': 'error', 'message': str(e)}
+
+    def resolve_local_project_manager_conflict(self, local_project_path, server_project_path, relative_path, strategy):
+        """Settle a file changed on both sides by copying the chosen side over the other.
+
+        The copy being replaced is backed up first, and the result becomes the new sync
+        baseline, so the file is no longer reported as a conflict.
+        """
+        try:
+            strategy_key = str(strategy or '').strip().lower()
+            if strategy_key not in {'keep_local', 'keep_server'}:
+                return {'status': 'error', 'message': 'Choose whether to keep the local or the server copy.'}
+            relative_paths = self._normalize_local_project_manager_relative_paths(relative_path)
+            if not relative_paths:
+                return {'status': 'error', 'message': 'A file path inside the project is required.'}
+            pair_resolution = self._resolve_local_project_manager_pair(local_project_path, server_project_path)
+            if pair_resolution.get('status') != 'success':
+                return pair_resolution
+
+            local_root = pair_resolution.get('localProjectPath') or ''
+            server_root = pair_resolution.get('serverProjectPath') or ''
+            normalized_relative_path = relative_paths[0]
+            local_path = os.path.normpath(os.path.join(local_root, normalized_relative_path))
+            server_path = os.path.normpath(os.path.join(server_root, normalized_relative_path))
+            if strategy_key == 'keep_local':
+                source_path, destination_path = local_path, server_path
+                destination_root, direction = server_root, 'to_server'
+            else:
+                source_path, destination_path = server_path, local_path
+                destination_root, direction = local_root, 'to_local'
+            if not self._is_copy_project_path_file(source_path):
+                return {'status': 'error', 'message': f'The copy to keep was not found: {source_path}'}
+
+            backup_result = self._create_local_project_manager_backup(
+                destination_root,
+                [normalized_relative_path],
+                direction=direction,
+            )
+            if backup_result.get('status') != 'success' or backup_result.get('failedFiles'):
+                return {
+                    'status': 'error',
+                    'code': 'backup_failed',
+                    'message': 'Failed to back up the copy being replaced, so nothing was changed.',
+                    'backupResult': backup_result,
+                }
+
+            self._copy_local_project_manager_file(source_path, destination_path)
+            _update_sync_baseline_files(
+                local_root,
+                server_root,
+                upsert_entries=[
+                    self._build_sync_baseline_for_paths(normalized_relative_path, local_path, server_path)
+                ],
+            )
+            return {
+                'status': 'success',
+                'relativePath': normalized_relative_path,
+                'strategy': strategy_key,
+                'backupPath': str(backup_result.get('backupPath') or ''),
+            }
+        except Exception as e:
+            logging.error(f"Error resolving Local Project Manager conflict: {e}")
             return {'status': 'error', 'message': str(e)}
 
     def _copy_folder_contents(self, source_folder, destination_folder, cancel_check=None):
@@ -14106,6 +14880,10 @@ Return ONLY the JSON object.
                 'serverToLocalCandidates': list(
                     comparison_result.get('serverToLocalCandidates', []) or []
                 ),
+                'conflictCandidates': list(
+                    comparison_result.get('conflictCandidates', []) or []
+                ),
+                'conflictCandidateCount': comparison_summary.get('conflictCandidateCount', 0),
                 'managedRootNames': list(
                     comparison_result.get('managedRootNames', []) or []
                 ),
@@ -17894,6 +18672,82 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
         except Exception as exc:
             return {'status': 'error', 'message': str(exc)}
 
+    def run_repair_xref_paths_script(self, launch_context=None, activity_id=None):
+        """Runs ManageXrefPathsDWGs.ps1 to find and repoint the XREFs of the selected DWGs."""
+        tool_id = 'toolRepairXrefPaths'
+        activity_key = str(activity_id or '').strip()
+        try:
+            script_path = os.path.join(BASE_DIR, "scripts", "ManageXrefPathsDWGs.ps1")
+            if not os.path.exists(script_path):
+                raise Exception("ManageXrefPathsDWGs.ps1 not found in scripts directory.")
+            settings = self.get_user_settings()
+            if self.test_mode:
+                return self._run_workroom_cad_tool_in_test_mode(
+                    settings,
+                    launch_context,
+                    tool_id,
+                    'run_repair_xref_paths_script',
+                    activity_id=activity_id,
+                )
+            acad_path = settings.get('autocadPath', '')
+            if not acad_path:
+                raise Exception("No AutoCAD version selected in settings.")
+            workflow_blocking = self._normalize_launch_context(launch_context).get('workflowBlocking') is True
+
+            dwg_files = self._get_launch_context_cad_file_paths(launch_context)
+            if dwg_files:
+                files_list_path = self._write_files_list_temp(dwg_files)
+                selected_count = len(dwg_files)
+            else:
+                picker_result = self._select_cad_files_in_app(
+                    self._resolve_launch_context_default_directory(launch_context, allow_workroom=True)
+                )
+                if picker_result.get('status') == 'cancelled':
+                    return {'status': 'cancelled', 'activityId': activity_key}
+                if picker_result.get('status') != 'success':
+                    raise Exception(picker_result.get('message') or 'Could not select DWG files.')
+                files_list_path = picker_result['selection']['files_list_path']
+                selected_count = len(picker_result.get('paths') or [])
+
+            self._notify_tool_status(
+                tool_id,
+                f"Using selected DWGs ({selected_count})...",
+                activity_id=activity_id,
+            )
+            command = self._build_powershell_script_command(
+                script_path,
+                '-AcadCore',
+                acad_path,
+                '-FilesListPath',
+                files_list_path,
+            )
+            self._trace_cad_auto_select(
+                'tool_command_launch',
+                tool_id=tool_id,
+                tool_name='run_repair_xref_paths_script',
+                command=command,
+                command_type='argv',
+                has_files_list_path=True,
+                files_list_path=files_list_path,
+            )
+            run_kwargs = {'activity_id': activity_id}
+            if workflow_blocking:
+                run_kwargs['wait'] = True
+            script_result = self._run_script_with_progress(command, tool_id, **run_kwargs)
+            if workflow_blocking and isinstance(script_result, dict):
+                script_status = str(script_result.get('status') or '').strip().lower()
+                if script_status in ('error', 'cancelled'):
+                    return {
+                        'status': script_status,
+                        'message': script_result.get('message') or 'Repair XREF Paths did not finish.',
+                        'activityId': activity_key,
+                    }
+            return {'status': 'success', 'activityId': activity_key}
+        except Exception as e:
+            logging.error(f"Error running Repair XREF Paths: {e}")
+            self._notify_tool_status(tool_id, f"ERROR: {e}", activity_id=activity_id)
+            return {'status': 'error', 'message': str(e), 'activityId': activity_key}
+
     def run_clean_xrefs_script(self, launch_context=None, activity_id=None, params_override=None):
         """Runs the removeXREFPaths.ps1 PowerShell script with progress updates.
 
@@ -18568,6 +19422,8 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
 
 # --- Main Application Setup ---
 if __name__ == '__main__':
+    _configure_file_logging()
+    logging.info(f"Starting ACIES Scheduler {APP_VERSION}")
     # Ensure current working directory is set to ProjectManagement folder so relative paths (styles.css, script.js, assets) resolve properly
     os.chdir(str(BASE_DIR))
     api = Api()

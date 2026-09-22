@@ -41,9 +41,8 @@ class DeliverableLinkAndProjectPathUiTests(unittest.TestCase):
     def test_deliverable_and_work_item_attachment_wiring_exists(self):
         script = SCRIPT_JS_PATH.read_text(encoding="utf-8")
 
+        # Cloud attachment merging was removed with cloud sync in 8fa93fa.
         for expected in (
-            "function sanitizeAttachmentForCloud(attachment = {}) {",
-            "function mergeCloudAndLocalAttachments(remoteAttachments = [], localAttachments = []) {",
             "function getDeliverableCardAttachments(card) {",
             "function setDeliverableCardAttachments(card, attachments) {",
             "function syncProjectAttachmentFields(project) {",
@@ -59,7 +58,7 @@ class DeliverableLinkAndProjectPathUiTests(unittest.TestCase):
             "trigger.appendChild(createAttachmentTriggerIcon());",
             'className: "project-details-header",',
             'className: "project-details-main",',
-            "projectDetailsHeader.append(projectDetailsMain);",
+            "projectDetailsHeader.append(projectDetailsMain, projectDetailsActions);",
             "nameCell.appendChild(projectDetailsHeader);",
             'kind: "deliverable",',
         ):
@@ -72,7 +71,7 @@ class DeliverableLinkAndProjectPathUiTests(unittest.TestCase):
         html = INDEX_HTML_PATH.read_text(encoding="utf-8")
         css = STYLES_CSS_PATH.read_text(encoding="utf-8")
 
-        self.assertIn('<div class="deliverable-attachment-control"></div>', html)
+        # The 2.0.0 release moved deliverable attachments out of the edit dialog.
         self.assertNotIn("Project Attachments", html)
         self.assertNotIn('id="modalProjectAttachmentHost"', html)
         self.assertNotIn('<div class="deliverable-link-control"></div>', html)

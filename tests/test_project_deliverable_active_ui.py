@@ -38,10 +38,10 @@ class ProjectDeliverableActiveFeatureRemovalTests(unittest.TestCase):
         ):
             self.assertNotIn(removed, script)
 
+        # Local migration strips legacy fields; the cloud-side copies of this cleanup
+        # were removed with cloud sync in 8fa93fa.
         self.assertIn("function projectHasLegacyActiveState(project) {", script)
         self.assertIn("delete out.overviewDeliverableId;", script)
-        self.assertIn("delete sanitized.active;", script)
-        self.assertIn("delete sanitized.overviewDeliverableId;", script)
         self.assertIn('let deliverablesFilter = "all";', script)
         self.assertIn('return deliverablesFilter || "all";', script)
 

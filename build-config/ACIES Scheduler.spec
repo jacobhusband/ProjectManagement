@@ -32,6 +32,7 @@ a = Analysis(
         (os.path.join(project_root, 'scripts', 'detect_pdf_size.py'), 'scripts'),
         (os.path.join(project_root, 'scripts', 'PlotDWGs.ps1'), 'scripts'),
         (os.path.join(project_root, 'scripts', 'ManageLayersDWGs.ps1'), 'scripts'),
+        (os.path.join(project_root, 'scripts', 'ManageXrefPathsDWGs.ps1'), 'scripts'),
         (os.path.join(project_root, 'scripts', 'ListDwgXrefs.ps1'), 'scripts'),
         (os.path.join(project_root, 'scripts', 'removeXREFPaths.ps1'), 'scripts'),
         (os.path.join(project_root, 'scripts', 'StripRefPaths.dll'), 'scripts'),

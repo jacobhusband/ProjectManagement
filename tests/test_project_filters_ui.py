@@ -49,12 +49,8 @@ class ProjectFiltersUiTests(unittest.TestCase):
             'id="settings_separateDeliverableCompletionGroups"', settings_block
         )
         self.assertIn('Separate Incomplete and Complete Deliverables', settings_block)
-        self.assertIn('id="settings_groupDeliverablesByProject"', settings_block)
-        self.assertIn('Group Deliverables by Project', settings_block)
-        self.assertLess(
-            settings_block.index('id="settings_separateDeliverableCompletionGroups"'),
-            settings_block.index('id="settings_groupDeliverablesByProject"'),
-        )
+        # "Group Deliverables by Project" was retired in 17f6a90 and is always off.
+        self.assertNotIn('id="settings_groupDeliverablesByProject"', settings_block)
         self.assertNotIn('class="projects-view-controls"', html)
 
     def test_project_filter_script_wiring_exists(self):
@@ -98,8 +94,10 @@ class ProjectFiltersUiTests(unittest.TestCase):
             "separateDeliverableCompletionGroups =\n    userSettings.separateDeliverableCompletionGroups !== false;",
             script,
         )
+        # "Group Deliverables by Project" was retired in 17f6a90: it is forced off on
+        # load and whenever view preferences sync from settings.
         self.assertIn(
-            "groupDeliverablesByProject =\n    userSettings.groupDeliverablesByProject === true;",
+            "  groupDeliverablesByProject = false;\n  userSettings.groupDeliverablesByProject = false;",
             script,
         )
         self.assertIn("separateDeliverableCompletionGroups: true,", user_settings_block)
@@ -108,10 +106,7 @@ class ProjectFiltersUiTests(unittest.TestCase):
             "userSettings.separateDeliverableCompletionGroups =\n      userSettings.separateDeliverableCompletionGroups !== false;",
             load_settings_block,
         )
-        self.assertIn(
-            "userSettings.groupDeliverablesByProject =\n      userSettings.groupDeliverablesByProject === true;",
-            load_settings_block,
-        )
+        self.assertIn("userSettings.groupDeliverablesByProject = false;", load_settings_block)
         self.assertIn("syncProjectViewPreferencesFromSettings();", load_settings_block)
         self.assertIn(
             '"settings_separateDeliverableCompletionGroups"',
@@ -121,8 +116,6 @@ class ProjectFiltersUiTests(unittest.TestCase):
             "userSettings.separateDeliverableCompletionGroups",
             populate_block,
         )
-        self.assertIn('"settings_groupDeliverablesByProject"', populate_block)
-        self.assertIn("userSettings.groupDeliverablesByProject", populate_block)
         self.assertIn(
             '"settings_separateDeliverableCompletionGroups"',
             save_block,
@@ -131,8 +124,6 @@ class ProjectFiltersUiTests(unittest.TestCase):
             "userSettings.separateDeliverableCompletionGroups =",
             save_block,
         )
-        self.assertIn('"settings_groupDeliverablesByProject"', save_block)
-        self.assertIn("userSettings.groupDeliverablesByProject =", save_block)
         self.assertIn("syncProjectViewPreferencesFromSettings();", save_block)
         self.assertIn(
             '"settings_separateDeliverableCompletionGroups"',
@@ -140,11 +131,6 @@ class ProjectFiltersUiTests(unittest.TestCase):
         )
         self.assertIn(
             "userSettings.separateDeliverableCompletionGroups = e.target.checked;",
-            settings_handlers_block,
-        )
-        self.assertIn('"settings_groupDeliverablesByProject"', settings_handlers_block)
-        self.assertIn(
-            "userSettings.groupDeliverablesByProject = e.target.checked;",
             settings_handlers_block,
         )
         self.assertIn("syncProjectViewPreferencesFromSettings();", settings_handlers_block)

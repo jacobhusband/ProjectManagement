@@ -102,7 +102,7 @@ class PageEmailAttachmentUiTests(unittest.TestCase):
         insert_block = self._block(
             main,
             "function insertPageEmailAtPos(emailRef, pos) {",
-            "async function resolveAndInsertEmail(pending, pos) {",
+            "function resolveAndInsertEmail(pending, pos) {",
         )
         self.assertIn("while (depth > 0 && !$pos.node(depth).isTextblock) depth -= 1;", insert_block)
         self.assertIn("insertAt = depth > 0 ? $pos.end(depth) : pos;", insert_block)

@@ -168,7 +168,7 @@ class TimesheetExcelExportTests(unittest.TestCase):
             "totals": dict(DAY_TOTALS, mileage=0),
             "expenses": {
                 "projects": projects,
-                "mileageRate": 0.70,
+                "mileageRate": 0.725,
             },
         }
         with patch.object(main_module.os, "startfile", create=True):
@@ -187,7 +187,6 @@ class TimesheetExcelExportTests(unittest.TestCase):
                     result = self.api.export_expense_sheet_excel({
                         "weekKey": week_key,
                         "projects": projects,
-                        "mileageRate": 0.70,
                     })
             self.assertEqual("success", result["status"])
             output_path = documents_dir / f"Expense_Sheet_{week_key}.xlsx"
@@ -340,6 +339,8 @@ class TimesheetExcelExportTests(unittest.TestCase):
             worksheet, template_sheet = self._load_expense_sheet(workbook_path)
 
         self.assertEqual("PROJECT: Beta", worksheet["A13"].value)
+        self.assertEqual("$0.725 PER MILE", worksheet["C22"].value)
+        self.assertEqual("=D21*0.725", worksheet["D22"].value)
         self.assertEqual("JOB #: 1002", worksheet["A14"].value)
         self._assert_style_matches(worksheet, "A13", template_sheet, "A1")
         self._assert_style_matches(worksheet, "B15", template_sheet, "B3")
@@ -395,6 +396,8 @@ class TimesheetExcelExportTests(unittest.TestCase):
         worksheet, template_sheet = self._load_expense_sheet(workbook_path)
 
         self.assertEqual("PROJECT: Delta", worksheet["A13"].value)
+        self.assertEqual("$0.725 PER MILE", worksheet["C22"].value)
+        self.assertEqual("=D21*0.725", worksheet["D22"].value)
         self._assert_style_matches(worksheet, "A13", template_sheet, "A1")
         self._assert_style_matches(worksheet, "B15", template_sheet, "B3")
         self._assert_style_matches(worksheet, "A16", template_sheet, "A4")

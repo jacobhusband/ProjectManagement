@@ -6,7 +6,7 @@ Compatible with unittest and pytest.
 import os
 import tempfile
 import unittest
-from apps.ProjectManagement.database import (
+from database import (
     init_db,
     upsert_project,
     get_project,

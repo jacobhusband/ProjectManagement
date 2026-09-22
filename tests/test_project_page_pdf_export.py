@@ -60,6 +60,13 @@ _PNG_DATA_URL = "data:image/png;base64," + _PNG_1X1_B64
 
 
 class ProjectPagePdfExportTests(unittest.TestCase):
+    def test_theme_colors_resolve_to_print_colors(self):
+        renderer = main_module._ProjectPagePdfHtmlRenderer(lambda _: None)
+        renderer.feed('<p><span style="color:var(--notes-color-blue)">Blue note</span></p>')
+        renderer.close()
+        self.assertIn("#205c96", renderer.rendered_html())
+        self.assertNotIn("var(--notes-color", renderer.rendered_html())
+
     def setUp(self):
         self.api = Api.__new__(Api)
 

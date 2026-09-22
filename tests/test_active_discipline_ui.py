@@ -7,13 +7,13 @@ SCRIPT_JS_PATH = REPO_ROOT / "script.js"
 
 
 class ActiveDisciplineUiTests(unittest.TestCase):
-    def test_active_discipline_settings_and_cloud_sync_exist(self):
+    def test_active_discipline_settings_exist(self):
+        # Cloud settings sync (and its activeDiscipline normalization) was removed in 8fa93fa.
         script = SCRIPT_JS_PATH.read_text(encoding="utf-8")
 
         self.assertIn('activeDiscipline: "Electrical",', script)
         self.assertIn("function normalizeActiveDiscipline(", script)
         self.assertIn("function syncActiveDisciplineWithConfigured() {", script)
-        self.assertIn("activeDiscipline: normalizeActiveDiscipline(", script)
 
     def test_active_discipline_can_be_unconfigured_known_discipline(self):
         script = SCRIPT_JS_PATH.read_text(encoding="utf-8")

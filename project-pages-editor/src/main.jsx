@@ -27,6 +27,8 @@ import sql from "highlight.js/lib/languages/sql";
 import typescript from "highlight.js/lib/languages/typescript";
 import xml from "highlight.js/lib/languages/xml";
 import "./styles.css";
+import { createInsertionAnchor } from "./insertionAnchor.js";
+import { createSaveQueue } from "./saveQueue.js";
 import { selectionWouldDeleteWorkbook } from "./workbookProtection.js";
 
 const lowlight = createLowlight();
@@ -50,6 +52,8 @@ let currentContext = null;
 let currentOptions = {};
 let flushCurrentEditor = null;
 const listeners = new Set();
+const pagePositions = new Map();
+const sidebarGroups = new Map();
 
 function emitContext() {
   listeners.forEach((listener) => listener(currentContext));
@@ -623,15 +627,15 @@ const PageImportant = Extension.create({
 
 const TEXT_COLORS = [
   { label: "Default", value: null },
-  { label: "Gray", value: "#9b9a97" },
-  { label: "Brown", value: "#a8775c" },
-  { label: "Orange", value: "#d9730d" },
-  { label: "Yellow", value: "#c29343" },
-  { label: "Green", value: "#4d9968" },
-  { label: "Blue", value: "#3f83c8" },
-  { label: "Purple", value: "#9d68d3" },
-  { label: "Pink", value: "#d5598f" },
-  { label: "Red", value: "#e03e3e" },
+  { label: "Gray", value: "var(--notes-color-gray)" },
+  { label: "Brown", value: "var(--notes-color-brown)" },
+  { label: "Orange", value: "var(--notes-color-orange)" },
+  { label: "Yellow", value: "var(--notes-color-yellow)" },
+  { label: "Green", value: "var(--notes-color-green)" },
+  { label: "Blue", value: "var(--notes-color-blue)" },
+  { label: "Purple", value: "var(--notes-color-purple)" },
+  { label: "Pink", value: "var(--notes-color-pink)" },
+  { label: "Red", value: "var(--notes-color-red)" },
 ];
 
 const HIGHLIGHT_COLORS = [
@@ -684,6 +688,24 @@ function commandMatches(command, query) {
 }
 
 function NotesSidebar({ context, editor = null }) {
+  const [filter, setFilter] = useState("");
+  const sidebarKey = context.project?.id || "workspace";
+  const [collapsed, setCollapsed] = useState(() => sidebarGroups.get(sidebarKey) || new Set());
+  const allPages = context.navigationPages || context.childPages || [];
+  let hiddenDepth = null;
+  const visiblePages = allPages.filter((page) => {
+    const depth = page.depth || 0;
+    if (filter.trim()) return String(page.title || "Untitled").toLowerCase().includes(filter.trim().toLowerCase());
+    if (hiddenDepth !== null && depth > hiddenDepth) return false;
+    hiddenDepth = collapsed.has(page.id) ? depth : null;
+    return true;
+  });
+  const toggleGroup = (id) => {
+    const next = new Set(collapsed);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    sidebarGroups.set(sidebarKey, next);
+    setCollapsed(next);
+  };
   const globalPages = Array.isArray(context.globalPages) ? context.globalPages : [];
   return (
       <aside className="notes-sidebar" aria-label="Notes navigation">
@@ -691,6 +713,8 @@ function NotesSidebar({ context, editor = null }) {
           <span className="notes-eyebrow">ACIES / {context.kind === "global" ? "Workspace" : "Project"}</span>
           <strong>{context.project?.name || context.title || "Untitled"}</strong>
         </div>
+        <input type="search" className="notes-page-filter" aria-label="Filter pages" placeholder="Filter pages…"
+          value={filter} onChange={(event) => setFilter(event.target.value)} />
         <nav className="notes-page-nav" aria-label="Pages">
           <div className="page-child-links-label">Notes</div>
           {context.kind !== "global" ? <>
@@ -699,8 +723,11 @@ function NotesSidebar({ context, editor = null }) {
               onClick={() => context.onOpenOverview?.()}>
               <span aria-hidden="true">▤</span> Overview
             </button>
-            {(context.navigationPages || context.childPages || []).map((child) => (
+            {visiblePages.map((child) => (
               <div className={`notes-nav-row ${context.subpage?.id === child.id ? "is-active" : ""}`} key={child.id}>
+                {allPages.some((page, index) => allPages[index - 1]?.id === child.id && (page.depth || 0) > (child.depth || 0)) && !filter.trim() &&
+                  <button type="button" className="notes-nav-collapse" aria-label={`${collapsed.has(child.id) ? "Expand" : "Collapse"} ${child.title || "Untitled"}`}
+                    aria-expanded={!collapsed.has(child.id)} onClick={() => toggleGroup(child.id)}>{collapsed.has(child.id) ? "▸" : "▾"}</button>}
                 <button type="button" className="notes-nav-link"
                   style={{ paddingLeft: `${12 + Math.min(child.depth || 0, 5) * 14}px` }}
                   aria-current={context.subpage?.id === child.id ? "page" : undefined}
@@ -709,7 +736,7 @@ function NotesSidebar({ context, editor = null }) {
                   <span className="notes-nav-title">{child.title || "Untitled"}</span>
                 </button>
                 <button type="button" className="notes-nav-delete" aria-label={`Delete ${child.title || "Untitled"}`}
-                  title="Delete subpage" onClick={() => context.onDeleteSubpage?.(child.id)}>×</button>
+                  title="Move subpage to trash" onClick={() => context.onDeleteSubpage?.(child.id)}>×</button>
               </div>
             ))}
             <button type="button" className="notes-nav-link notes-nav-add" onClick={() => context.onCreateSubpage?.()}>
@@ -718,7 +745,7 @@ function NotesSidebar({ context, editor = null }) {
             <button type="button" className="notes-nav-link notes-nav-add" onClick={() => context.onCreateSubpage?.("canvas")}>
               <span aria-hidden="true">+</span> Add canvas
             </button>
-          </> : globalPages.map((page) => (
+          </> : globalPages.filter((page) => String(page.title || "Untitled").toLowerCase().includes(filter.trim().toLowerCase())).map((page) => (
             <button type="button" key={page.id}
               className={`notes-nav-link ${context.globalPage?.id === page.id ? "is-active" : ""}`}
               aria-current={context.globalPage?.id === page.id ? "page" : undefined}
@@ -727,6 +754,11 @@ function NotesSidebar({ context, editor = null }) {
             </button>
           ))}
         </nav>
+        {!!context.trashEntries?.length && <details className="notes-trash">
+          <summary>Trash ({context.trashEntries.length})</summary>
+          {context.trashEntries.map((entry) => <button type="button" className="notes-nav-link" key={entry.id}
+            onClick={() => context.onRestoreTrash?.(entry.id)}>Restore {entry.title || "Untitled"}{entry.count > 1 ? ` (${entry.count} pages)` : ""}</button>)}
+        </details>}
         <NotesOutline editor={editor} documentKey={context.documentKey} />
       </aside>
   );
@@ -742,7 +774,7 @@ function PageEditorApp() {
     const sidebar = document.getElementById("pageCanvasSidebarRoot");
     return sidebar ? createPortal(<NotesSidebar context={context} />, sidebar) : null;
   }
-  return <PageEditor context={context} options={currentOptions} />;
+  return <PageEditor key={context.documentKey} context={context} options={currentOptions} />;
 }
 
 function NotesOutline({ editor, documentKey }) {
@@ -755,10 +787,13 @@ function NotesOutline({ editor, documentKey }) {
         .map((node) => ({ node, title: node.textContent, level: node.tagName })));
     };
     const frame = requestAnimationFrame(refresh);
-    editor.on("update", refresh);
+    let timer;
+    const schedule = () => { clearTimeout(timer); timer = setTimeout(refresh, 150); };
+    editor.on("update", schedule);
     return () => {
+      clearTimeout(timer);
       cancelAnimationFrame(frame);
-      editor.off("update", refresh);
+      editor.off("update", schedule);
     };
   }, [editor, documentKey]);
   if (!headings.length) return null;
@@ -774,13 +809,17 @@ function NotesOutline({ editor, documentKey }) {
 }
 
 function PageEditor({ context, options }) {
+  const initialPositionRef = useRef(pagePositions.get(context.documentKey));
+  const positionRestoredRef = useRef(false);
   const fileInputRef = useRef(null);
   const workbookInputRef = useRef(null);
   const titleElementRef = useRef(null);
   const titleValueRef = useRef(context.title || "");
   const hydrateWorkbooksRef = useRef(async () => {});
   const workbookHydrationFrameRef = useRef(null);
-  const saveTimerRef = useRef(null);
+  const pendingRef = useRef(new Set());
+  const [pendingCount, setPendingCount] = useState(0);
+  const [selectionVersion, setSelectionVersion] = useState(0);
   const titleTimerRef = useRef(null);
   const suppressUpdateRef = useRef(false);
   const [slash, setSlash] = useState({ open: false, query: "", selected: 0, range: null, pos: null });
@@ -1005,6 +1044,7 @@ function PageEditor({ context, options }) {
     },
     onSelectionUpdate({ editor: activeEditor }) {
       refreshMenus(activeEditor);
+      setSelectionVersion((value) => value + 1);
     },
   });
 
@@ -1067,10 +1107,7 @@ function PageEditor({ context, options }) {
   hydrateWorkbooksRef.current = hydrateWorkbooks;
 
   const flushSave = useCallback(async () => {
-    if (saveTimerRef.current) {
-      clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = null;
-    }
+    while (pendingRef.current.size) await Promise.allSettled([...pendingRef.current]);
     if (titleTimerRef.current) {
       clearTimeout(titleTimerRef.current);
       titleTimerRef.current = null;
@@ -1091,7 +1128,7 @@ function PageEditor({ context, options }) {
   useEffect(() => {
     if (!editor) return;
     suppressUpdateRef.current = true;
-    editor.commands.setContent(context.html || "", false);
+    // A keyed editor starts with this page's content and a fresh undo history.
     suppressUpdateRef.current = false;
     titleValueRef.current = context.title || "";
     if (titleElementRef.current) {
@@ -1110,11 +1147,18 @@ function PageEditor({ context, options }) {
           // Bail before focus("end"), which would scroll straight back to the bottom.
           target.scrollIntoView({ block: "center", behavior: "auto" });
           target.classList.add("is-important-focused");
+          positionRestoredRef.current = true;
           setTimeout(() => target.classList.remove("is-important-focused"), 1600);
           return;
         }
       }
-      editor.commands.focus("end");
+      const saved = initialPositionRef.current;
+      const scroll = editor.view.dom.closest(".page-view-scroll");
+      if (saved) {
+        editor.commands.setTextSelection(Math.min(saved.caret, editor.state.doc.content.size));
+      }
+      if (scroll) scroll.scrollTop = saved?.scroll || 0;
+      positionRestoredRef.current = true;
     });
     return () => cancelAnimationFrame(frame);
   }, [context.documentKey, editor]);
@@ -1154,12 +1198,39 @@ function PageEditor({ context, options }) {
 
   function queueHtmlSave(html) {
     context.onHtmlChange?.(stripTransientPageHtml(html), { immediate: false });
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = setTimeout(() => {
-      saveTimerRef.current = null;
-      context.onRequestPersist?.();
-    }, 700);
   }
+
+  function trackPending(operation) {
+    const pending = operation();
+    pendingRef.current.add(pending);
+    setPendingCount(pendingRef.current.size);
+    pending.finally(() => {
+      pendingRef.current.delete(pending);
+      if (!editor?.isDestroyed) setPendingCount(pendingRef.current.size);
+    }).catch(() => {});
+    return pending;
+  }
+
+  useEffect(() => {
+    if (!editor) return;
+    const scroll = editor.view.dom.closest(".page-view-scroll");
+    const remember = () => {
+      // Replacing a long page with a short page clamps the shared scroller.
+      // That scroll event must not overwrite the page we just left.
+      if (!positionRestoredRef.current || currentContext?.documentKey !== context.documentKey) return;
+      pagePositions.set(context.documentKey, {
+        caret: editor.state.selection.from, scroll: scroll?.scrollTop || 0,
+      });
+      if (pagePositions.size > 100) pagePositions.delete(pagePositions.keys().next().value);
+    };
+    editor.on("selectionUpdate", remember);
+    scroll?.addEventListener("scroll", remember, { passive: true });
+    return () => {
+      editor.off("selectionUpdate", remember);
+      scroll?.removeEventListener("scroll", remember);
+      clearTimeout(titleTimerRef.current);
+    };
+  }, [editor, context.documentKey]);
 
   function refreshMenus(activeEditor) {
     const slashQuery = detectSlashQuery(activeEditor);
@@ -1265,12 +1336,12 @@ function PageEditor({ context, options }) {
       void attachEmailFromPicker();
     } else if (command.id === "file") {
       chain.run();
-      const pos = editor.state.selection.from;
-      void context.onPickAttachment?.().then((attachments) => {
+      const anchor = createInsertionAnchor(editor);
+      void trackPending(() => context.onPickAttachment?.().then((attachments) => {
         if (!attachments?.length || editor.isDestroyed) return;
-        editor.chain().focus().insertContentAt(Math.min(pos, editor.state.doc.content.size),
+        editor.chain().focus().insertContentAt(anchor.position,
           attachments.flatMap((attrs) => [{ type: "pageAttachment", attrs }, { type: "text", text: " " }])).run();
-      }).catch((error) => context.onToast?.(error?.message || "Could not add file link."));
+      }).catch((error) => context.onToast?.(error?.message || "Could not add file link.")).finally(() => anchor.release()));
     } else if (command.id === "page") {
       chain.run();
       context.onCreateSubpage?.();
@@ -1309,37 +1380,45 @@ function PageEditor({ context, options }) {
     setPageLink((state) => ({ ...state, open: false }));
   }
 
-  async function insertImageFiles(files) {
+  function insertImageFiles(files) {
+    return trackPending(() => performInsertImageFiles(files));
+  }
+
+  async function performInsertImageFiles(files) {
     if (!editor || !context.onSaveAsset) return;
-    for (const file of Array.from(files || [])) {
-      if (!String(file.type || "").toLowerCase().startsWith("image/")) continue;
-      try {
-        const dataUrl = await readFileAsDataUrl(file);
-        const result = await context.onSaveAsset(dataUrl, file.name || "");
-        if (result?.status !== "success" || !result.assetPath) {
-          context.onToast?.(result?.message || "Could not save image.");
-          continue;
+    const anchor = createInsertionAnchor(editor);
+    try {
+      for (const file of Array.from(files || [])) {
+        if (!String(file.type || "").toLowerCase().startsWith("image/")) continue;
+        try {
+          const dataUrl = await readFileAsDataUrl(file);
+          const result = await context.onSaveAsset(dataUrl, file.name || "");
+          if (result?.status !== "success" || !result.assetPath) {
+            context.onToast?.(result?.message || "Could not save image.");
+            continue;
+          }
+          if (editor.isDestroyed) return;
+          editor
+            .chain()
+            .focus()
+            .insertContentAt(anchor.position, { type: "image", attrs: {
+              src: dataUrl,
+              assetPath: result.assetPath,
+              alt: file.name || "Image",
+              widthPercent: "80",
+              class: "page-inline-image",
+              style: "max-width: 100%;",
+            } })
+            .run();
+        } catch (error) {
+          context.onToast?.(error?.message || "Could not insert image. Please try again.");
         }
-        editor
-          .chain()
-          .focus()
-          .setImage({
-            src: dataUrl,
-            assetPath: result.assetPath,
-            alt: file.name || "Image",
-            widthPercent: "80",
-            class: "page-inline-image",
-            style: "max-width: 100%;",
-          })
-          .run();
-      } catch (error) {
-        console.warn("Page image insert failed:", error);
-      }
     }
+    } finally { anchor.release(); }
   }
 
   function insertPageEmailAtPos(emailRef, pos) {
-    if (!editor || !emailRef) return;
+    if (!editor || editor.isDestroyed || !emailRef) return;
     const attrs = {};
     PAGE_EMAIL_ATTRS.forEach(([key]) => {
       attrs[key] = String(emailRef[key] || "");
@@ -1360,7 +1439,12 @@ function PageEditor({ context, options }) {
     editor.chain().focus().insertContentAt(insertAt, { type: "pageEmail", attrs }).run();
   }
 
-  async function resolveAndInsertEmail(pending, pos) {
+  function resolveAndInsertEmail(pending, pos) {
+    const anchor = editor ? createInsertionAnchor(editor, pos ?? editor.state.selection.from) : null;
+    return trackPending(() => performResolveAndInsertEmail(pending, anchor).finally(() => anchor?.release()));
+  }
+
+  async function performResolveAndInsertEmail(pending, anchor) {
     let result = null;
     try {
       result = await pending;
@@ -1372,7 +1456,7 @@ function PageEditor({ context, options }) {
       if (result?.message) context.onToast?.(result.message);
       return;
     }
-    insertPageEmailAtPos(result.emailRef, pos);
+    insertPageEmailAtPos(result.emailRef, anchor?.position);
   }
 
   function attachDroppedEmail(pending, pos) {
@@ -1394,7 +1478,12 @@ function PageEditor({ context, options }) {
     requestAnimationFrame(() => editor?.commands.focus());
   }
 
-  async function submitWorkbookDialog() {
+  function submitWorkbookDialog() {
+    const anchor = editor ? createInsertionAnchor(editor) : null;
+    return trackPending(() => performSubmitWorkbookDialog(anchor).finally(() => anchor?.release()));
+  }
+
+  async function performSubmitWorkbookDialog(anchor) {
     const isExternal = workbookDialog.mode === "link";
     const name = String(workbookDialog.name || "").trim();
     const path = String(workbookDialog.path || "").trim();
@@ -1426,14 +1515,15 @@ function PageEditor({ context, options }) {
         }));
         return;
       }
+      if (!editor || editor.isDestroyed) return;
       editor
         ?.chain()
         .focus()
-        .insertPageWorkbook({
+        .insertContentAt(anchor.position, { type: "pageWorkbook", attrs: {
           fileRef: result.fileRef,
           fileName: result.fileName || `${name.replace(/\.xlsx$/i, "")}.xlsx`,
           storageType: result.storageType || (isExternal ? "external" : "managed"),
-        })
+        } })
         .run();
       setWorkbookDialog(createWorkbookDialogState());
       requestAnimationFrame(() => void hydrateWorkbooks());
@@ -1446,7 +1536,11 @@ function PageEditor({ context, options }) {
     }
   }
 
-  async function chooseExistingWorkbook() {
+  function chooseExistingWorkbook() {
+    return trackPending(() => performChooseExistingWorkbook());
+  }
+
+  async function performChooseExistingWorkbook() {
     if (!context.onChooseWorkbookFile) {
       setWorkbookDialog((state) => ({ ...state, error: "File picker is unavailable." }));
       return;
@@ -1678,6 +1772,31 @@ function PageEditor({ context, options }) {
         }}
       />
 
+      <div className="notes-format-toolbar" role="toolbar" aria-label="Text formatting" data-selection-version={selectionVersion}>
+        {[
+          ["Bold", "bold", (chain) => chain.toggleBold()],
+          ["Italic", "italic", (chain) => chain.toggleItalic()],
+          ["Bullets", "bulletList", (chain) => chain.toggleBulletList()],
+          ["Numbered list", "orderedList", (chain) => chain.toggleOrderedList()],
+          ["Checklist", "taskList", (chain) => chain.toggleTaskList()],
+          ["Reset text color", null, (chain) => chain.unsetColor().unsetHighlight()],
+          ["Clear formatting", null, (chain) => chain.unsetBold().unsetItalic().unsetUnderline().unsetStrike().unsetCode().unsetColor().unsetHighlight()],
+        ].map(([label, mark, command]) => <button key={label} type="button"
+          aria-pressed={mark ? !!editor?.isActive(mark) : undefined}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => editor && command(editor.chain().focus()).run()}>{label}</button>)}
+        <button type="button" onMouseDown={(event) => event.preventDefault()}
+          onClick={() => {
+            const href = window.prompt("Link URL (leave empty to remove)", editor?.getAttributes("link").href || "https://");
+            if (href === null || !editor) return;
+            const chain = editor.chain().focus().extendMarkRange("link");
+            if (!href.trim()) chain.unsetLink().run();
+            else chain.setLink({ href: normalizeHref(href) }).run();
+          }}>Link</button>
+        <button type="button" onMouseDown={(event) => event.preventDefault()}
+          onClick={(event) => setColorMenu({ open: true, mode: "color", pos: event.currentTarget.getBoundingClientRect() })}>Color</button>
+      </div>
+      {pendingCount > 0 && <div role="status" className="notes-pending">Adding attachment… Page changes will wait until it finishes.</div>}
       <div className="project-pages-editor-surface">
         <EditorContent editor={editor} />
       </div>
@@ -1819,6 +1938,12 @@ function WorkbookDialog({
           void onSubmit();
         }}
         onKeyDown={(event) => {
+          if (event.key === "Tab") {
+            const elements = Array.from(event.currentTarget.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex="0"]'));
+            const first = elements[0], last = elements[elements.length - 1];
+            if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+            else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+          }
           if (event.key === "Escape") {
             event.preventDefault();
             onCancel();
@@ -1938,6 +2063,8 @@ function CommandMenu({ id, open, position, header, rows }) {
           key={row.key}
           onMouseDown={(event) => {
             event.preventDefault();
+          }}
+          onClick={() => {
             row.onMouseDown();
           }}
         >
@@ -2005,6 +2132,8 @@ function TableMenu({ open, position, editor }) {
           aria-label={action.title}
           onMouseDown={(event) => {
             event.preventDefault();
+          }}
+          onClick={() => {
             action.run(editor.chain().focus()).run();
           }}
         >
@@ -2033,6 +2162,8 @@ function CalloutMenu({ open, position, onEmoji, onColor }) {
           title="Callout icon"
           onMouseDown={(event) => {
             event.preventDefault();
+          }}
+          onClick={() => {
             onEmoji(emoji);
           }}
         >
@@ -2049,6 +2180,8 @@ function CalloutMenu({ open, position, onEmoji, onColor }) {
           aria-label={`${color} callout`}
           onMouseDown={(event) => {
             event.preventDefault();
+          }}
+          onClick={() => {
             onColor(color);
           }}
         />
@@ -2082,7 +2215,9 @@ function ColorMenu({ open, mode, position, colors, onPick }) {
             aria-label={`${mode === "highlight" ? "Highlight" : "Text color"}: ${color.label}`}
             onMouseDown={(event) => {
               event.preventDefault();
-              onPick(color.value);
+            }}
+          onClick={() => {
+            onPick(color.value);
             }}
           >
             <span
@@ -2136,10 +2271,10 @@ async function flushSave() {
   if (flushCurrentEditor) await flushCurrentEditor();
 }
 
-const ProjectPagesEditorApi = { flushSave, mount, setDocument, unmount };
+const ProjectPagesEditorApi = { flushSave, mount, setDocument, unmount, createSaveQueue };
 
 if (typeof window !== "undefined") {
   window.ProjectPagesEditor = ProjectPagesEditorApi;
 }
 
-export { flushSave, mount, setDocument, unmount };
+export { flushSave, mount, setDocument, unmount, createSaveQueue };

@@ -388,7 +388,8 @@ class DeliverableQuickAccessPdfUiTests(unittest.TestCase):
             'methodName: "open_latest_arch_set"',
             "const discipline = getActiveWorkroomDiscipline();",
             "quickAccessDropdown.classList.add(\"deliverable-card-quick-access-action\");",
-            "leftActions.append(pinBtn, statusDropdown, toolDropdown, quickAccessDropdown);",
+            # Pin moved into the card's More menu in the 2026-09-05 UX pass.
+            "leftActions.append(statusDropdown, toolDropdown, quickAccessDropdown);",
             'dropdown.classList.contains("deliverable-card-quick-access-action");',
         ):
             self.assertIn(expected, text)

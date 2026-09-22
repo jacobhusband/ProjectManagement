@@ -5504,9 +5504,9 @@ function openAddTimesheetProjectDialog() {
       deliverables.forEach((deliverable) => {
         const option = el("div", { className: "ts-project-option" });
         option.innerHTML = `
-          <div><strong>${project.id || "--"}</strong> - ${project.nick || project.name || "Unnamed"
+          <div><strong>${escapeHtml(project.id || "--")}</strong> - ${escapeHtml(project.nick || project.name || "Unnamed")
           }</div>
-          <div class="muted tiny">${deliverable.name || "Deliverable"} - Due: ${humanDate(getEffectiveDueStr(deliverable)) || "No date"
+          <div class="muted tiny">${escapeHtml(deliverable.name || "Deliverable")} - Due: ${escapeHtml(humanDate(getEffectiveDueStr(deliverable)) || "No date")
           }</div>
         `;
         option.onclick = () => {
@@ -5610,7 +5610,7 @@ async function exportTimesheetToExcel() {
 
 // ===================== EXPENSE SHEET FUNCTIONS =====================
 
-const MILEAGE_RATE = 0.70; // Fixed rate per mile
+const MILEAGE_RATE = 0.725; // Dollars per mile
 const EXPENSE_IMAGE_THUMB_MAX_SIZE = 320;
 const EXPENSE_IMAGE_MODAL_MAX_SIZE = 1800;
 const expenseAttachmentPreviewCache = new Map();
@@ -6680,7 +6680,7 @@ function openAddExpenseProjectDialog() {
       const alreadyHasExpenses = expenseProjectKeys.has(projectKey);
       const option = el("div", { className: "ts-project-option" + (alreadyHasExpenses ? " disabled" : "") });
       option.innerHTML = `
-        <div><strong>${project.id || "--"}</strong> - ${project.name || "Unnamed"}${alreadyHasExpenses ? " (already added)" : ""}</div>
+        <div><strong>${escapeHtml(project.id || "--")}</strong> - ${escapeHtml(project.name || "Unnamed")}${alreadyHasExpenses ? " (already added)" : ""}</div>
       `;
       if (!alreadyHasExpenses) {
         option.onclick = () => {
@@ -8508,7 +8508,9 @@ async function deletePageEmailRef(attrs) {
 function openExternalUrl(url) {
   try {
     if (window.pywebview?.api?.open_url) {
-      window.pywebview.api.open_url(url);
+      Promise.resolve(window.pywebview.api.open_url(url)).then((result) => {
+        if (result?.status === "error" && result.message) toast(result.message);
+      });
       return;
     }
   } catch {
@@ -10300,6 +10302,7 @@ function initProjectsBackToTop() {
 
 // State variables
 let db = [];
+let globalPageTrash = [];
 let globalPages = []; // [{ id, title, page: { html, updatedAt } }]
 let activeGlobalPageId = null;
 let editIndex = -1;
@@ -10309,6 +10312,8 @@ let pinnedProjectDragState = null;
 let projectPinHandleSuppressClickUntil = 0;
 let statusFilter = "all";
 let dueFilter = "all";
+// Filters, sort and board week to restore when leaving the Needs attention view.
+let projectAttentionPreviousFilters = null;
 let pendingCadLaunchContext = null;
 let modalEmailSession = {
   active: false,
@@ -12226,11 +12231,19 @@ async function persistUserSettingsLocally({ silent = false } = {}) {
   }
 }
 
+// A failed load leaves `db` empty, and saving that would replace every project on
+// disk. Saving stays paused until project data loads successfully.
+let projectDataLoadError = "";
+
 async function load() {
   try {
     const arr = await window.pywebview.api.get_tasks();
+    if (arr && !Array.isArray(arr) && arr.status === "error") {
+      throw new Error(arr.message || "Project data could not be read.");
+    }
     const { data, didMigrate } = migrateProjects(arr);
     migrateStatuses(data);
+    projectDataLoadError = "";
     if (didMigrate) {
       db = data;
       await save();
@@ -12238,11 +12251,50 @@ async function load() {
     return data;
   } catch (e) {
     console.warn("Backend load failed:", e);
+    projectDataLoadError = e?.message || "Project data could not be loaded.";
     return [];
   }
 }
 
+// Project saves run one at a time, because an older snapshot could otherwise finish
+// after a newer one and overwrite it. Requests made while a save is running share a
+// single follow-up save, which sends whatever `db` holds by then.
+let projectSaveInFlight = null;
+let projectSaveFollowUp = null;
+
+function queueProjectSave() {
+  if (!projectSaveInFlight) {
+    projectSaveInFlight = window.pywebview.api
+      .save_tasks(db)
+      .then((response) => {
+        if (response?.status !== "success") {
+          throw new Error(response?.message || "Save failed.");
+        }
+      })
+      .finally(() => {
+        projectSaveInFlight = null;
+      });
+    return projectSaveInFlight;
+  }
+  if (!projectSaveFollowUp) {
+    projectSaveFollowUp = projectSaveInFlight
+      .catch(() => {})
+      .then(() => {
+        projectSaveFollowUp = null;
+        return queueProjectSave();
+      });
+  }
+  return projectSaveFollowUp;
+}
+
 async function save({ silent = false } = {}) {
+  if (projectDataLoadError) {
+    console.warn("Project save skipped because project data did not load:", projectDataLoadError);
+    if (!silent) {
+      toast("⚠️ Saving is paused because project data could not be loaded. Restart the app.", 6000);
+    }
+    return false;
+  }
   syncPinnedProjectOrders(db, { seedMissing: true });
   db.forEach((project) => {
     syncProjectAttachmentFields(project);
@@ -12252,8 +12304,7 @@ async function save({ silent = false } = {}) {
     });
   });
   try {
-    const response = await window.pywebview.api.save_tasks(db);
-    if (response.status !== "success") throw new Error(response.message);
+    await queueProjectSave();
     return true;
   } catch (e) {
     console.warn("Backend save failed:", e);
@@ -12261,6 +12312,31 @@ async function save({ silent = false } = {}) {
       return false;
     }
     toast("⚠️ Failed to save data.");
+  }
+}
+
+function showProjectDataLoadError() {
+  alert(
+    "ACIES could not read your project data, so saving projects is paused to protect it.\n\n" +
+      `${projectDataLoadError}\n\n` +
+      "Nothing has been overwritten. Close the app and check tasks.json and its backups " +
+      "in Documents\\ProjectManagementApp before continuing."
+  );
+}
+
+async function showDataRecoveryNotices() {
+  try {
+    const response = await window.pywebview.api.get_data_recovery_notices?.();
+    const notices = Array.isArray(response?.notices) ? response.notices : [];
+    if (!notices.length) return;
+    notices.forEach((notice) => console.warn("Restored data file from backup:", notice));
+    const files = notices.map((notice) => notice.file).join(", ");
+    toast(
+      `Restored ${files} from a backup because the saved file was damaged. The damaged copy was kept beside it.`,
+      12000
+    );
+  } catch (e) {
+    console.warn("Could not check for data recovery notices:", e);
   }
 }
 
@@ -12386,6 +12462,7 @@ function buildGlobalPagesData() {
     version: 2,
     pages: serializeGlobalPagesForStore(),
     scratchpad: scratchpadHtml,
+    trash: globalPageTrash,
   };
 }
 
@@ -12393,11 +12470,13 @@ async function loadGlobalPages() {
   try {
     const data = (await window.pywebview.api.get_notes()) || {};
     globalPages = readGlobalPagesData(data);
+    globalPageTrash = (Array.isArray(data.trash) ? data.trash : []).filter((entry) => entry && Array.isArray(entry.pages));
     scratchpadHtml = typeof data.scratchpad === "string" ? data.scratchpad : "";
     activeGlobalPageId = globalPages[0]?.id || null;
     return globalPages;
   } catch (e) {
     globalPages = [];
+    globalPageTrash = [];
     scratchpadHtml = "";
     activeGlobalPageId = null;
     return [];
@@ -15331,7 +15410,9 @@ function normalizeLocalProjectManagerDirectionCandidateFile(
   if (directionKey === "to_local") {
     normalizedReason = rawReason === "local_missing" ? "local_missing" : "server_newer";
   } else {
-    normalizedReason = rawReason === "server_missing" ? "server_missing" : "local_newer";
+    normalizedReason = ["server_missing", "local_deleted"].includes(rawReason)
+      ? rawReason
+      : "local_newer";
   }
   const relativePath = String(candidate?.relativePath || "").trim();
   const pathParts = relativePath.split(/[\\/]+/).filter(Boolean);
@@ -15342,12 +15423,9 @@ function normalizeLocalProjectManagerDirectionCandidateFile(
       .toLowerCase() === "managed"
       ? "managed"
       : "additive_only";
-  const changeType =
-    String(candidate?.changeType || "")
-      .trim()
-      .toLowerCase() === "missing"
-      ? "missing"
-      : "newer";
+  const rawChangeType = String(candidate?.changeType || "").trim().toLowerCase();
+  // "deleted" rows remove the server copy, so they must never be shown as replacements.
+  const changeType = ["missing", "deleted"].includes(rawChangeType) ? rawChangeType : "newer";
   const directionLabel =
     String(candidate?.directionLabel || "").trim() ||
     (directionKey === "to_local"
@@ -16102,13 +16180,15 @@ function getLocalProjectManagerCopyToServerReviewGroups(syncState = null) {
   const candidateFiles = Array.isArray(syncState?.candidateFiles)
     ? syncState.candidateFiles
     : [];
+  // Only preselected rows are copied. Rows the backend leaves unselected, such as files
+  // deleted on one side since the last sync, are listed as not copied and never sent.
+  const selectedFiles = candidateFiles.filter((entry) => entry?.selected !== false);
+  const changeTypeOf = (entry) => String(entry?.changeType || "").trim().toLowerCase();
   return {
-    replaceFiles: candidateFiles.filter(
-      (entry) => String(entry?.changeType || "").trim().toLowerCase() === "newer"
-    ),
-    addFiles: candidateFiles.filter(
-      (entry) => String(entry?.changeType || "").trim().toLowerCase() === "missing"
-    ),
+    replaceFiles: selectedFiles.filter((entry) => changeTypeOf(entry) === "newer"),
+    addFiles: selectedFiles.filter((entry) => changeTypeOf(entry) === "missing"),
+    deleteFiles: selectedFiles.filter((entry) => changeTypeOf(entry) === "deleted"),
+    skippedFiles: candidateFiles.filter((entry) => entry?.selected === false),
   };
 }
 
@@ -16179,11 +16259,22 @@ function createLocalProjectManagerReviewSection(title, items, emptyMessage, acti
     );
   } else {
     items.forEach((candidate) =>
-      list.appendChild(createLocalProjectManagerReviewFileRow(candidate, actionLabel))
+      list.appendChild(
+        createLocalProjectManagerReviewFileRow(
+          candidate,
+          typeof actionLabel === "function" ? actionLabel(candidate) : actionLabel
+        )
+      )
     );
   }
   section.appendChild(list);
   return section;
+}
+
+function describeSkippedLocalProjectManagerReviewFile(candidate) {
+  return String(candidate?.changeType || "").toLowerCase() === "deleted"
+    ? "Deleted locally since the last sync. The server copy is kept"
+    : `${candidate?.directionLabel || "Changed"} since the last sync. Not copied`;
 }
 
 function renderLocalProjectManagerCopyToServerReview(container, syncState = null) {
@@ -16211,14 +16302,23 @@ function renderLocalProjectManagerCopyToServerReview(container, syncState = null
     return;
   }
 
-  const { replaceFiles, addFiles } =
+  const { replaceFiles, addFiles, deleteFiles, skippedFiles } =
     getLocalProjectManagerCopyToServerReviewGroups(syncState);
-  const totalFiles = replaceFiles.length + addFiles.length;
+  const skippedSection = skippedFiles.length
+    ? createLocalProjectManagerReviewSection(
+        "Not copied",
+        skippedFiles,
+        "",
+        describeSkippedLocalProjectManagerReviewFile
+      )
+    : null;
+  const totalFiles = replaceFiles.length + addFiles.length + deleteFiles.length;
   if (!totalFiles) {
     renderLocalProjectManagerEmptyState(
       container,
       "No local changes are ready to copy to the server."
     );
+    if (skippedSection) container.appendChild(skippedSection);
     return;
   }
 
@@ -16229,7 +16329,11 @@ function renderLocalProjectManagerCopyToServerReview(container, syncState = null
         replaceFiles.length === 1 ? "" : "s"
       } will replace server files. ${addFiles.length} file${
         addFiles.length === 1 ? "" : "s"
-      } will be added to the server.`,
+      } will be added to the server.${
+        deleteFiles.length
+          ? ` ${deleteFiles.length} file${deleteFiles.length === 1 ? "" : "s"} will be deleted from the server.`
+          : ""
+      }`,
     })
   );
   container.appendChild(
@@ -16248,6 +16352,17 @@ function renderLocalProjectManagerCopyToServerReview(container, syncState = null
       "Will be added to server"
     )
   );
+  if (deleteFiles.length) {
+    container.appendChild(
+      createLocalProjectManagerReviewSection(
+        "Delete from server",
+        deleteFiles,
+        "",
+        "Deleted locally. Will be deleted from the server (a backup is kept)"
+      )
+    );
+  }
+  if (skippedSection) container.appendChild(skippedSection);
 }
 
 function renderLocalProjectManagerConflictResolutionView(container) {
@@ -16489,10 +16604,10 @@ function buildLocalProjectManagerSyncSelectionPayload() {
 function buildLocalProjectManagerCopyToServerReviewPayload() {
   const syncState = copyProjectLocallyDialogState.sync;
   const serverPathInfo = getLocalProjectManagerServerPathInfo();
-  const reviewedRelativePaths = (Array.isArray(syncState.candidateFiles)
-    ? syncState.candidateFiles
-    : []
-  )
+  // Send exactly what the review lists, never the rows shown as not copied.
+  const { replaceFiles, addFiles, deleteFiles } =
+    getLocalProjectManagerCopyToServerReviewGroups(syncState);
+  const reviewedRelativePaths = [...replaceFiles, ...addFiles, ...deleteFiles]
     .map((entry) => String(entry?.relativePath || "").trim())
     .filter(Boolean);
 
@@ -16668,10 +16783,10 @@ function updateLocalProjectManagerFooter() {
 
   if (copyProjectLocallyDialogState.syncReviewVisible === true) {
     const syncState = copyProjectLocallyDialogState.sync;
-    const { replaceFiles, addFiles } =
+    const { replaceFiles, addFiles, deleteFiles } =
       getLocalProjectManagerCopyToServerReviewGroups(syncState);
-    const candidateFiles = [...replaceFiles, ...addFiles];
-    const totalBytes = candidateFiles.reduce((sum, entry) => {
+    const candidateFiles = [...replaceFiles, ...addFiles, ...deleteFiles];
+    const totalBytes = [...replaceFiles, ...addFiles].reduce((sum, entry) => {
       return sum + (Number.isFinite(entry?.sizeBytes) ? Number(entry.sizeBytes) : 0);
     }, 0);
     if (copyToServerBtn) {
@@ -16709,8 +16824,8 @@ function updateLocalProjectManagerFooter() {
       return;
     }
     summaryEl.textContent = `${replaceFiles.length} replace | ${addFiles.length} add${
-      totalBytes > 0 ? ` | ${formatCopyProjectLocallySizeLabel(totalBytes)}` : ""
-    }`;
+      deleteFiles.length ? ` | ${deleteFiles.length} delete` : ""
+    }${totalBytes > 0 ? ` | ${formatCopyProjectLocallySizeLabel(totalBytes)}` : ""}`;
     return;
   }
 
@@ -17265,6 +17380,7 @@ function matchesProjectDeliverablesFilter(deliverable, filter) {
 
 function matchesDueFilter(deliverable, filter) {
   if (filter === "all") return true;
+  if (filter === "attention") return deliverableNeedsAttention(deliverable);
   const d = parseDueStr(getEffectiveDueStr(deliverable));
   if (!d) return false;
   const today = new Date();
@@ -17288,7 +17404,48 @@ function matchesDueFilter(deliverable, filter) {
   return true;
 }
 
+// Unfinished work due this week or earlier. A hard deadline counts even when the
+// internal target date is later, so it can never be hidden behind the target.
+function deliverableNeedsAttention(deliverable, now = new Date()) {
+  if (isFinished(deliverable)) return false;
+  const endOfWeek = getWeekStartDate(now);
+  endOfWeek.setDate(endOfWeek.getDate() + 6);
+  endOfWeek.setHours(23, 59, 59, 999);
+  return [getEffectiveDueStr(deliverable), getHardDueStr(deliverable)]
+    .some((value) => {
+      const due = parseDueStr(value);
+      return due !== null && due <= endOfWeek;
+    });
+}
+
+function toggleProjectAttentionView() {
+  if (dueFilter === "attention") {
+    const previous = projectAttentionPreviousFilters;
+    dueFilter = previous?.dueFilter || "all";
+    statusFilter = previous?.statusFilter || "all";
+    deliverablesFilter = previous?.deliverablesFilter || "all";
+    if (previous) {
+      currentSort = previous.currentSort;
+      projectCardWeek = previous.projectCardWeek;
+    }
+    projectAttentionPreviousFilters = null;
+  } else {
+    projectAttentionPreviousFilters = {
+      dueFilter, statusFilter, deliverablesFilter,
+      currentSort: { ...currentSort }, projectCardWeek: new Date(projectCardWeek),
+    };
+    dueFilter = "attention";
+    statusFilter = "all";
+    deliverablesFilter = "all";
+    currentSort = { key: "due", dir: "asc" };
+    projectCardWeek = getWeekStartDate(new Date());
+  }
+  resetProjectsListPagination();
+  render();
+}
+
 function getTimeframeFilterLabel(filter) {
+  if (filter === "attention") return "unfinished work due this week or overdue";
   if (filter === "lastWeek") return "last week";
   if (filter === "soon") return "this week";
   if (filter === "future") return "upcoming weeks";
@@ -17359,7 +17516,9 @@ function getProjectListRenderContext(project) {
   const overviewDeliverables = getOverviewDeliverables(project);
   if (!overviewDeliverables.length) return null;
 
-  const isTimeframeView = !isBoard && dueFilter !== "all";
+  // The board pages by week instead of using timeframe filters, except Needs
+  // attention, which replaces week paging while it is on.
+  const isTimeframeView = (!isBoard || dueFilter === "attention") && dueFilter !== "all";
   const timeframeDeliverables = isTimeframeView
     ? overviewDeliverables.filter((deliverable) =>
         matchesDueFilter(deliverable, dueFilter)
@@ -17425,6 +17584,12 @@ function getProjectsFilterValue(filterKey) {
 function setProjectsFilterValue(filterKey, value) {
   resetProjectsListPagination();
   if (filterKey === "timeframe") {
+    if (value === "attention" && dueFilter !== "attention") {
+      toggleProjectAttentionView();
+      return;
+    }
+    // Choosing another timeframe leaves Needs attention without restoring old filters.
+    if (value !== "attention") projectAttentionPreviousFilters = null;
     dueFilter = value;
     if (currentSort.key === "due") {
       currentSort.dir = value === "all" ? "asc" : "desc";
@@ -23474,7 +23639,10 @@ function renderCardView(items = db, projectListContextMap = null) {
   const currentWeekStart = getWeekStartDate(new Date());
   const isCurrentWeek = weekStart.getTime() === currentWeekStart.getTime();
 
-  const visibleColumns = projectCardColumns.filter((c) => !c.hidden);
+  const attentionActive = dueFilter === "attention";
+  const visibleColumns = attentionActive
+    ? projectCardColumns.filter((c) => !["Complete", "Delivered", "nodate"].includes(c.key))
+    : projectCardColumns.filter((c) => !c.hidden);
   const pinnedShown = visibleColumns.some((c) => c.key === "pinned");
   const nodateShown = visibleColumns.some((c) => c.key === "nodate");
 
@@ -23513,7 +23681,8 @@ function renderCardView(items = db, projectListContextMap = null) {
     const overduePull =
       isCurrentWeek &&
       deliverableIsOverdueIncomplete(deliverable, weekStart);
-    if (!inWeek && !overduePull) continue;
+    // Needs attention already limits the rows to overdue and this-week work.
+    if (!attentionActive && !inWeek && !overduePull) continue;
 
     const primary =
       STATUS_PRIORITY.find((s) => hasStatus(deliverable, s)) || "In progress";
@@ -23528,7 +23697,7 @@ function renderCardView(items = db, projectListContextMap = null) {
   }
 
   const renderColumns =
-    hideEmptyProjectColumns === true
+    hideEmptyProjectColumns === true || attentionActive
       ? visibleColumns.filter(
           (column) => (buckets.get(column.key) || []).length > 0
         )
@@ -24146,6 +24315,16 @@ function attachKanbanDragHandlers(host) {
 }
 
 function render() {
+  const attentionButton = document.getElementById("projectsAttentionBtn");
+  const attentionActive = dueFilter === "attention";
+  attentionButton?.setAttribute("aria-pressed", String(attentionActive));
+  attentionButton?.classList.toggle("is-active", attentionActive);
+  const attentionHint = document.getElementById("projectsAttentionHint");
+  if (attentionHint) attentionHint.hidden = !attentionActive;
+  for (const id of ["weekNavPrev", "weekNavNext"]) {
+    const button = document.getElementById(id);
+    if (button) button.disabled = attentionActive;
+  }
   const tbody = document.getElementById("tbody");
   const emptyState = document.getElementById("emptyState");
   syncProjectsFilterDropdowns();
@@ -24818,6 +24997,54 @@ function addDeliverableCard(deliverable, options = {}) {
   const nameInput = card.querySelector(".d-name");
   nameInput.value = deliverable.name || "";
   nameInput.addEventListener("input", () => refreshModalDeliverableSummary(card));
+
+  const emailTool = card.querySelector(".deliverable-email-tool");
+  if (emailTool) {
+    const category = emailTool.querySelector(".d-email-category");
+    const discipline = emailTool.querySelector(".d-email-discipline");
+    const date = emailTool.querySelector(".d-email-date");
+    const button = emailTool.querySelector(".d-email-save");
+    const result = emailTool.querySelector(".d-email-result");
+    const today = new Date();
+    date.value = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+    discipline.value = getActiveDiscipline();
+    if (!discipline.value) discipline.value = "Electrical";
+    const preview = () => {
+      discipline.disabled = category.value !== "Submittals";
+      const parent = category.value === "Submittals"
+        ? `Submittals\\${discipline.value}`
+        : category.value === "RFI" ? "RFI" : "Documents\\Correspondence";
+      emailTool.querySelector(".d-email-preview").textContent =
+        `Project folder → ${parent}\\${date.value} ${nameInput.value.trim() || "Deliverable name"}`;
+    };
+    emailTool.addEventListener("change", preview);
+    nameInput.addEventListener("input", preview);
+    preview();
+    button.onclick = async () => {
+      button.disabled = true;
+      result.textContent = "Saving email and attachments…";
+      try {
+        if (!window.pywebview?.api?.save_deliverable_outlook_email) {
+          throw new Error("This tool requires the desktop app and classic Outlook.");
+        }
+        const saved = await window.pywebview.api.save_deliverable_outlook_email({
+          projectPath: normalizeProjectPath(val("f_path")),
+          deliverableName: nameInput.value.trim(),
+          category: category.value, discipline: discipline.value, date: date.value,
+        });
+        if (saved?.status !== "success") throw new Error(saved?.message || "Could not save the email.");
+        setDeliverableCardAttachments(card, [
+          ...getDeliverableCardAttachments(card),
+          { type: "path", description: `${nameInput.value.trim()} email and attachments`, target: saved.folder },
+        ]);
+        result.textContent = `Saved email and ${saved.attachmentCount} attachment(s) to ${saved.folder}`;
+      } catch (error) {
+        result.textContent = error?.message || "Could not save the email.";
+      } finally {
+        button.disabled = false;
+      }
+    };
+  }
 
   card.querySelector(".d-due").value = deliverable.due || "";
   card.querySelector(".d-hard-due").value = deliverable.hardDue || "";
@@ -25758,7 +25985,7 @@ function renderGlobalPagesView() {
   const pages = Array.isArray(globalPages) ? globalPages : [];
   const hasPages = pages.length > 0;
   if (emptyState) emptyState.hidden = hasPages;
-  if (listEl) listEl.hidden = !hasPages;
+  if (listEl) listEl.hidden = !hasPages && !globalPageTrash.length;
   if (searchInput) {
     searchInput.disabled = !hasPages;
     if (searchInput.value !== notesSearchQuery) {
@@ -25767,6 +25994,21 @@ function renderGlobalPagesView() {
   }
   if (!listEl) return;
   listEl.innerHTML = "";
+  if (globalPageTrash.length) {
+    const trash = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = `Trash (${globalPageTrash.length})`;
+    trash.appendChild(summary);
+    globalPageTrash.forEach((entry) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "btn";
+      button.textContent = `Restore ${entry.title || "Untitled"}`;
+      button.onclick = () => void restoreNotesTrash(null, entry.id);
+      trash.appendChild(button);
+    });
+    listEl.appendChild(trash);
+  }
   const query = String(notesSearchQuery || "").trim().toLowerCase();
   const visible = pages.filter((p) => globalPageMatchesSearch(p, query));
   if (!visible.length) {
@@ -25942,20 +26184,55 @@ function promptCreateGlobalPage(kind = "") {
   openGlobalPage(page);
 }
 
-function deleteGlobalPage(page) {
-  if (!page) return;
-  if (!confirm(`Permanently delete page "${page.title || "Untitled"}"?`)) return;
-  void (async () => {
-    const cleanupResult = await deleteManagedPageWorkbooks([page]);
-    const idx = globalPages.indexOf(page);
-    if (idx > -1) globalPages.splice(idx, 1);
-    if (activeGlobalPageId === page.id) {
-      activeGlobalPageId = globalPages[0]?.id || null;
-    }
-    saveGlobalPages();
-    renderGlobalPagesView();
-    reportPageWorkbookCleanup(cleanupResult);
-  })();
+async function deleteGlobalPage(page) {
+  if (!page || !confirm(`Move "${page.title || "Untitled"}" to trash? You can restore it later.`)) return;
+  if (!await flushPageSave()) return;
+  const index = globalPages.indexOf(page);
+  if (index < 0) return;
+  const entry = { id: createId("trash"), title: page.title, deletedAt: new Date().toISOString(), pages: [page] };
+  globalPageTrash.push(entry);
+  globalPages.splice(index, 1);
+  if (!await saveGlobalPages({ silent: true })) {
+    globalPages.splice(index, 0, page);
+    globalPageTrash = globalPageTrash.filter((item) => item !== entry);
+    toast("Could not move the page to trash. Please try again.");
+    return;
+  }
+  if (activeGlobalPageId === page.id) activeGlobalPageId = globalPages[0]?.id || null;
+  if (pageNav.globalPage?.id === page.id) await closePageView();
+  renderGlobalPagesView();
+}
+
+async function restoreNotesTrash(project, entryId) {
+  if (!await flushPageSave()) return;
+  const trash = project ? (project.pageTrash || []) : globalPageTrash;
+  const entry = trash.find((item) => item.id === entryId);
+  if (!entry) return;
+  const pages = project ? getProjectSubpages(project) : globalPages;
+  // Keep IDs for wiki links and hierarchy; never overwrite a live page.
+  if (entry.pages.some((restored) => pages.some((page) => page.id === restored.id))) {
+    toast("A page with this ID already exists. Restore was cancelled to protect it.");
+    return;
+  }
+  const restored = project ? entry.pages : entry.pages.map(normalizeGlobalPage).filter(Boolean);
+  if (project) {
+    const ids = new Set([...pages, ...restored].map((page) => page.id));
+    restored.forEach((page) => { if (!ids.has(page.parentId)) page.parentId = null; });
+  }
+  pages.push(...restored);
+  const index = trash.indexOf(entry);
+  trash.splice(index, 1);
+  const ok = project ? await save({ silent: true }) : await saveGlobalPages({ silent: true });
+  if (!ok) {
+    pages.splice(pages.length - restored.length, restored.length);
+    trash.splice(index, 0, entry);
+    toast("Could not restore the page. Please try again.");
+    return;
+  }
+  renderGlobalPagesView();
+  if (project) { render(); if (pageNav.project === project) renderPageView(); }
+  else if (pageNav.globalPage) renderPageView();
+  toast(`Restored "${entry.title || "Untitled"}".`);
 }
 
 function createChecklistSearchResultItem(item, numberLookup) {
@@ -27229,7 +27506,7 @@ async function ensureBundlesRendered({ force = false } = {}) {
     try {
       await fetchBundleStatuses();
     } catch (e) {
-      container.innerHTML = `<div class="error-message">Error: ${e.message}</div>`;
+      container.innerHTML = `<div class="error-message">Error: ${escapeHtml(e.message)}</div>`;
       return;
     }
   } else if (!force && bundlesLastRenderKey === bundlesCacheKey && !bundlesNeedsRender) {
@@ -32564,6 +32841,7 @@ function isNewUser() {
 }
 
 function hasExistingUserData() {
+  if (projectDataLoadError) return true;
   if (Array.isArray(db) && db.length > 0) return true;
   if (Array.isArray(globalPages) && globalPages.length > 0) {
     return true;
@@ -33929,7 +34207,7 @@ function initToolCardDetailsToggles() {
 
       const tooltip = document.createElement("div");
       tooltip.className = "tool-card-tooltip";
-      tooltip.innerHTML = `<div class="tool-card-tooltip-title">${headerText}</div><div class="tool-card-tooltip-text">${descriptionText}</div>`;
+      tooltip.innerHTML = `<div class="tool-card-tooltip-title">${escapeHtml(headerText)}</div><div class="tool-card-tooltip-text">${escapeHtml(descriptionText)}</div>`;
 
       helpBtn.append(helpIcon, tooltip);
 
@@ -35363,6 +35641,7 @@ function initEventListeners() {
     }
   });
   document.getElementById("statsBtn").onclick = () => showStatsModal();
+  document.getElementById("projectsAttentionBtn")?.addEventListener("click", toggleProjectAttentionView);
   const scratchpadBtn = document.getElementById("scratchpadBtn");
   if (scratchpadBtn) scratchpadBtn.onclick = () => toggleScratchpad();
   document.getElementById("settings_howToSetupBtn").onclick = () =>
@@ -37318,6 +37597,11 @@ async function init() {
         setTimeout(() => showSetupHelpBanner(), 1000);
       }
     }
+    await showDataRecoveryNotices();
+    if (projectDataLoadError) {
+      // Let the loader close first so the warning is not hidden behind it.
+      setTimeout(showProjectDataLoadError, 300);
+    }
     prefetchBundles();
   } finally {
     hideAppLoader();
@@ -37332,8 +37616,6 @@ let pageEditorTarget = null; // reference to the {html, updatedAt} object being 
 // render scrolls to the first flagged line instead of focusing the document end.
 let pendingImportantPageScroll = false;
 let pageEditorOwnerKey = "";
-let pageSaveTimer = null;
-let pageMiscSaveTimer = null;
 let pageSelectionRange = null;
 let pageSelectedImage = null;
 let pageFindRefreshTimer = null;
@@ -37540,6 +37822,14 @@ function setPageSaveStatus(text) {
   const el = document.getElementById("pageSaveStatus");
   if (el) {
     el.textContent = text || "";
+    if (text === "Save failed") {
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "btn mini";
+      retry.textContent = "Retry";
+      retry.addEventListener("click", () => void flushPageSave());
+      el.append(" ", retry);
+    }
     el.classList.toggle("is-saved", text === "Saved" || text === "Published");
   }
 }
@@ -38008,62 +38298,42 @@ async function persistActivePage() {
   if (pageNav.globalPage) return saveGlobalPages({ silent: true });
   return save({ silent: true });
 }
+// All page edits share one serialized, revision-aware persistence queue.
+const pagePersistence = window.ProjectPagesEditor.createSaveQueue({
+  persist: persistActivePage,
+  onStatus: setPageSaveStatus,
+});
 function queueProjectPagesEditorSave(html, { persist = true } = {}) {
   if (!pageEditorTarget) return;
-  pageEditorTarget.html = String(html || "");
+  const next = String(html || "");
+  if (pageEditorTarget.html === next) return;
+  pageEditorTarget.html = next;
   pageEditorTarget.updatedAt = new Date().toISOString();
-  if (!persist) return;
-  setPageSaveStatus("Saving...");
-  if (pageSaveTimer) clearTimeout(pageSaveTimer);
-  pageSaveTimer = setTimeout(async () => {
-    pageSaveTimer = null;
-    const ok = await persistActivePage();
-    setPageSaveStatus(ok ? "Saved" : "Save failed");
-  }, 700);
+  pagePersistence.dirty();
+  queuePageFindRefresh();
 }
 function queuePageSave() {
   const editor = getPageEditorEl();
   if (!editor || !pageEditorTarget) return;
-  pageEditorTarget.html = serializePageHtml(editor);
-  pageEditorTarget.updatedAt = new Date().toISOString();
-  setPageSaveStatus("Saving...");
-  if (pageSaveTimer) clearTimeout(pageSaveTimer);
-  pageSaveTimer = setTimeout(async () => {
-    pageSaveTimer = null;
-    const ok = await persistActivePage();
-    setPageSaveStatus(ok ? "Saved" : "Save failed");
-  }, 700);
+  queueProjectPagesEditorSave(serializePageHtml(editor));
 }
 async function flushPageSave() {
-  if (window.ProjectPagesEditor?.flushSave) {
-    try {
-      await window.ProjectPagesEditor.flushSave();
-    } catch (e) {
-      console.warn("React page editor flush failed:", e);
-    }
-  }
-  if (pageSaveTimer) {
-    clearTimeout(pageSaveTimer);
-    pageSaveTimer = null;
-  }
-  if (pageMiscSaveTimer) {
-    clearTimeout(pageMiscSaveTimer);
-    pageMiscSaveTimer = null;
-  }
-  const editor = getPageEditorEl();
-  const reactEditorActive = !!getProjectPagesEditorRoot()?.querySelector("#pageEditor");
-  if (
-    !reactEditorActive &&
-    editor &&
-    pageEditorTarget &&
-    !isCanvasPage(pageEditorTarget)
-  ) {
-    pageEditorTarget.html = serializePageHtml(editor);
-    pageEditorTarget.updatedAt = new Date().toISOString();
-  }
   try {
-    await persistActivePage();
-  } catch (_) {}
+    if (window.ProjectPagesEditor?.flushSave) {
+      await window.ProjectPagesEditor.flushSave();
+    }
+    const editor = getPageEditorEl();
+    const reactEditorActive = !!getProjectPagesEditorRoot()?.querySelector("#pageEditor");
+    if (!reactEditorActive && editor && pageEditorTarget && !isCanvasPage(pageEditorTarget)) {
+      queuePageSave();
+    }
+    if (await pagePersistence.flush()) return true;
+  } catch (error) {
+    console.warn("Page save failed:", error);
+    setPageSaveStatus("Save failed");
+  }
+  toast("Your changes have not been saved. Use Retry before leaving this page.");
+  return false;
 }
 
 function getActivePagePdfPayload() {
@@ -38101,7 +38371,7 @@ async function publishActivePagePdf() {
       button.setAttribute("aria-busy", "true");
     }
     setPageSaveStatus("Preparing PDF...");
-    await flushPageSave();
+    if (!await flushPageSave()) return;
     const payload = getActivePagePdfPayload();
     if (!payload) {
       setPageSaveStatus("Save failed");
@@ -38787,32 +39057,30 @@ function createProjectSubpageFromSlash() {
   openProjectPage(project, child);
 }
 
-function deleteProjectSubpage(project, subpage) {
+async function deleteProjectSubpage(project, subpage) {
   if (!project || !subpage) return;
-  const descendantIds = getProjectSubpageDescendantIds(project, subpage.id);
+  const descendants = getProjectSubpageDescendantIds(project, subpage.id);
   const title = subpage.title || "Untitled";
-  const message = descendantIds.size
-    ? `Permanently delete "${title}" and its ${descendantIds.size} nested subpage${descendantIds.size === 1 ? "" : "s"}?`
-    : `Permanently delete page "${title}"?`;
-  if (!confirm(message)) return;
-  const removeIds = new Set([subpage.id, ...descendantIds]);
-  const viewingRemoved = pageNav.subpage && removeIds.has(pageNav.subpage.id);
-  const currentSubpages = getProjectSubpages(project);
-  void (async () => {
-    const cleanupResult = await deleteManagedPageWorkbooks(
-      currentSubpages.filter((sp) => removeIds.has(sp.id))
-    );
-    project.subpages = getProjectSubpages(project).filter((sp) => !removeIds.has(sp.id));
-    void save({ silent: true });
-    if (viewingRemoved) {
-      openProjectPage(project, getProjectSubpageById(project, subpage.parentId));
-    } else {
-      render();
-      if (getProjectPagesEditorRoot()?.querySelector("#pageEditor") || isCanvasPage(pageEditorTarget)) renderPageView();
-      else renderPageChildLinks(project, pageNav.subpage);
-    }
-    reportPageWorkbookCleanup(cleanupResult);
-  })();
+  if (!confirm(`Move "${title}"${descendants.size ? ` and ${descendants.size} nested pages` : ""} to trash? Attached files will be kept for restoration.`)) return;
+  if (!await flushPageSave()) return;
+  const removeIds = new Set([subpage.id, ...descendants]);
+  const pages = getProjectSubpages(project);
+  const removed = pages.filter((page) => removeIds.has(page.id));
+  if (!removed.length) return;
+  const entry = { id: createId("trash"), title, deletedAt: new Date().toISOString(), pages: removed };
+  if (!Array.isArray(project.pageTrash)) project.pageTrash = [];
+  project.pageTrash.push(entry);
+  const original = [...pages];
+  pages.splice(0, pages.length, ...pages.filter((page) => !removeIds.has(page.id)));
+  if (!await save({ silent: true })) {
+    pages.splice(0, pages.length, ...original);
+    project.pageTrash = project.pageTrash.filter((item) => item !== entry);
+    toast("Could not move the page to trash. Please try again.");
+    return;
+  }
+  if (pageNav.subpage && removeIds.has(pageNav.subpage.id)) {
+    await openProjectPage(project, getProjectSubpageById(project, subpage.parentId));
+  } else { render(); if (pageNav.project === project) renderPageView(); }
 }
 
 function handlePageSlashBeforeInput(event) {
@@ -39403,8 +39671,11 @@ function setPageViewMode(mode) {
     }
   }
 }
+let pageNavigationRequest = 0;
 async function closePageView() {
-  await flushPageSave();
+  const request = ++pageNavigationRequest;
+  if (!await flushPageSave()) return;
+  if (request !== pageNavigationRequest) return;
   const header = document.querySelector("#pageView > .app-header");
   if (header && pageHeaderPlaceholder) pageHeaderPlaceholder.replaceWith(header);
   pageHeaderPlaceholder = null;
@@ -39439,13 +39710,16 @@ function pageGoBack() {
   const { project, subpage } = pageNav;
   if (subpage && project) {
     const parent = getProjectSubpageById(project, subpage.parentId);
-    flushPageSave().then(() => openProjectPage(project, parent));
+    void openProjectPage(project, parent);
   } else {
     closePageView();
   }
 }
-function openProjectPage(project, subpage = null) {
+async function openProjectPage(project, subpage = null) {
   if (!project) return;
+  const request = ++pageNavigationRequest;
+  if (pageEditorTarget && !await flushPageSave()) return;
+  if (request !== pageNavigationRequest) return;
   ensurePageViewReady();
   const activeSubpage = subpage
     ? getProjectSubpageById(project, subpage.id || subpage)
@@ -39456,8 +39730,11 @@ function openProjectPage(project, subpage = null) {
   showPageView();
   renderPageView();
 }
-function openGlobalPage(globalPage) {
+async function openGlobalPage(globalPage) {
   if (!globalPage) return;
+  const request = ++pageNavigationRequest;
+  if (pageEditorTarget && !await flushPageSave()) return;
+  if (request !== pageNavigationRequest) return;
   ensurePageViewReady();
   pageNav = { project: null, subpage: null, globalPage };
   activeGlobalPageId = globalPage.id;
@@ -39486,18 +39763,14 @@ function handleProjectPagesEditorTitleChange(value) {
   renderPageBreadcrumb(project, subpage);
 }
 async function persistProjectPagesEditorNow() {
-  setPageSaveStatus("Saving...");
-  const ok = await persistActivePage();
-  setPageSaveStatus(ok ? "Saved" : "Save failed");
-  try {
-    if (pageNav.globalPage) renderGlobalPagesView();
-    else render();
-  } catch (_) {}
+  return flushPageSave();
 }
+
 function createProjectSubpageFromEditor(kind = "") {
   const { project, subpage } = pageNav;
   if (!project) return;
-  flushPageSave().then(() => {
+  flushPageSave().then((ok) => {
+    if (!ok) return;
     const subpages = getProjectSubpages(project);
     const child = createProjectSubpage({
       title: "Untitled",
@@ -39522,9 +39795,14 @@ function createGlobalPageFromEditor(title) {
 function setProjectPagesEditorDocument(context) {
   const root = prepareProjectPagesEditorMount();
   if (!root || !isProjectPagesEditorAvailable()) return false;
+  const ownerKey = pageEditorOwnerKey;
   window.ProjectPagesEditor.mount(root, {});
   window.ProjectPagesEditor.setDocument({
     ...context,
+    trashEntries: (context.project ? context.project.pageTrash || [] : globalPageTrash).map((entry) => ({
+      id: entry.id, title: entry.title, count: entry.pages.length, deletedAt: entry.deletedAt,
+    })),
+    onRestoreTrash: (id) => restoreNotesTrash(context.project || null, id),
     navigationPages: context.project ? (() => {
       const groups = getProjectSubpagesByParent(context.project);
       const pages = [];
@@ -39541,14 +39819,14 @@ function setProjectPagesEditorDocument(context) {
       visit("", 0);
       return pages;
     })() : [],
-    onOpenOverview: () => flushPageSave().then(() => openProjectPage(pageNav.project)),
+    onOpenOverview: () => openProjectPage(pageNav.project),
     globalPages: (Array.isArray(globalPages) ? globalPages : []).map((page) => ({
       id: page.id,
       title: page.title || "Untitled",
     })),
     onHtmlChange: (html, options = {}) => {
       queueProjectPagesEditorSave(html, { persist: options.immediate !== true });
-      if (options.immediate === true) return persistActivePage();
+      if (options.immediate === true) return true;
       return true;
     },
     onTitleChange: handleProjectPagesEditorTitleChange,
@@ -39556,7 +39834,7 @@ function setProjectPagesEditorDocument(context) {
     onCreateSubpage: createProjectSubpageFromEditor,
     onOpenSubpage: (subpageId) => {
       const child = getProjectSubpageById(pageNav.project, subpageId);
-      if (child) flushPageSave().then(() => openProjectPage(pageNav.project, child));
+      if (child) openProjectPage(pageNav.project, child);
     },
     onDeleteSubpage: (subpageId) => {
       const child = getProjectSubpageById(pageNav.project, subpageId);
@@ -39564,14 +39842,14 @@ function setProjectPagesEditorDocument(context) {
     },
     onOpenGlobalPage: (pageId) => {
       const target = getGlobalPageById(pageId);
-      if (target) flushPageSave().then(() => openGlobalPage(target));
+      if (target) openGlobalPage(target);
     },
     onCreateGlobalPage: createGlobalPageFromEditor,
     onSaveAsset: (dataUrl, filename) =>
-      window.pywebview.api.save_page_asset(pageEditorOwnerKey, dataUrl, filename || ""),
+      window.pywebview.api.save_page_asset(ownerKey, dataUrl, filename || ""),
     onGetAsset: (assetPath) => window.pywebview.api.get_page_asset(assetPath),
     onCreateWorkbook: (name) =>
-      window.pywebview.api.create_page_workbook(pageEditorOwnerKey, name || ""),
+      window.pywebview.api.create_page_workbook(ownerKey, name || ""),
     onLinkWorkbook: (path) => window.pywebview.api.link_page_workbook(path || ""),
     onChooseWorkbookFile: () =>
       window.pywebview.api.select_files({
@@ -39759,20 +40037,7 @@ function renderPageBreadcrumb(project, subpage) {
   }
 }
 function queuePageMiscSave() {
-  setPageSaveStatus("Saving...");
-  if (pageMiscSaveTimer) clearTimeout(pageMiscSaveTimer);
-  pageMiscSaveTimer = setTimeout(async () => {
-    pageMiscSaveTimer = null;
-    const ok = await persistActivePage();
-    setPageSaveStatus(ok ? "Saved" : "Save failed");
-    try {
-      if (pageNav.globalPage) renderGlobalPagesView();
-      else {
-        render();
-        renderPageChildLinks(pageNav.project, pageNav.subpage);
-      }
-    } catch (_) {}
-  }, 500);
+  pagePersistence.dirty();
 }
 
 function compareProjectSubpageOrder(a, b) {
@@ -39888,7 +40153,7 @@ function ensurePageViewReady() {
       if (wiki) {
         e.preventDefault();
         const target = getGlobalPageById(wiki.dataset.pageId);
-        if (target) flushPageSave().then(() => openGlobalPage(target));
+        if (target) openGlobalPage(target);
         return;
       }
       const link = e.target?.closest?.("a[href]");
@@ -40070,13 +40335,7 @@ function resetPageCanvasState() {
 function queuePageCanvasSave() {
   if (!pageEditorTarget) return;
   pageEditorTarget.updatedAt = new Date().toISOString();
-  setPageSaveStatus("Saving...");
-  if (pageSaveTimer) clearTimeout(pageSaveTimer);
-  pageSaveTimer = setTimeout(async () => {
-    pageSaveTimer = null;
-    const ok = await persistActivePage();
-    setPageSaveStatus(ok ? "Saved" : "Save failed");
-  }, 700);
+  pagePersistence.dirty();
 }
 
 function getCanvasWorldPoint(e) {

@@ -404,12 +404,13 @@ class WorkroomCadLaunchCommandTests(unittest.TestCase):
                 self.assertEqual(case["tool_id"], tool_id)
                 self.assertEqual({"activity_id": None}, kwargs)
                 self.assertIsInstance(command, list)
-                self.assertGreaterEqual(len(command), 6)
+                self.assertGreaterEqual(len(command), 7)
                 self.assertEqual("powershell.exe", command[0])
-                self.assertEqual("-ExecutionPolicy", command[1])
-                self.assertEqual("Bypass", command[2])
-                self.assertEqual("-File", command[3])
-                self.assertTrue(command[4].endswith(case["script_name"]))
+                self.assertEqual("-NoProfile", command[1])
+                self.assertEqual("-ExecutionPolicy", command[2])
+                self.assertEqual("Bypass", command[3])
+                self.assertEqual("-File", command[4])
+                self.assertTrue(command[5].endswith(case["script_name"]))
 
                 for expected_arg in case["expected_args"]:
                     self.assertIn(expected_arg, command)

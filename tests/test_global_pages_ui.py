@@ -97,7 +97,7 @@ class GlobalPagesUiTests(unittest.TestCase):
         )
         self.assertIn("return save({ silent: true });", persist_block)
         # Page edits flow through persistActivePage, not save() directly.
-        self.assertIn("const ok = await persistActivePage();", script)
+        self.assertIn("persist: persistActivePage,", script)
 
     def test_global_page_editor_branch(self):
         script = SCRIPT_JS_PATH.read_text(encoding="utf-8")

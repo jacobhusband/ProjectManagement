@@ -109,11 +109,11 @@ class ProjectSubpagesUiTests(unittest.TestCase):
             "function handlePageSlashBeforeInput(event) {",
         )
 
-        self.assertIn("const descendantIds = getProjectSubpageDescendantIds(project, subpage.id);", delete_block)
-        self.assertIn("if (!confirm(message)) return;", delete_block)
-        self.assertIn("const removeIds = new Set([subpage.id, ...descendantIds]);", delete_block)
+        self.assertIn("const descendants = getProjectSubpageDescendantIds(project, subpage.id);", delete_block)
+        self.assertIn("if (!await flushPageSave()) return;", delete_block)
+        self.assertIn("const removeIds = new Set([subpage.id, ...descendants]);", delete_block)
         self.assertIn(
-            "project.subpages = getProjectSubpages(project).filter((sp) => !removeIds.has(sp.id));",
+            "pages.splice(0, pages.length, ...pages.filter((page) => !removeIds.has(page.id)));",
             delete_block,
         )
         self.assertIn(

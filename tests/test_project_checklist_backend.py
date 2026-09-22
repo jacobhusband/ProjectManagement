@@ -190,6 +190,10 @@ class ProjectChecklistBackendTests(unittest.TestCase):
             self.assertEqual(1, version["data"]["version"])
 
 
+@unittest.skipUnless(
+    ELECTRICAL_COMMANDS_ROOT.is_dir(),
+    "Cross-repo contract test: needs the sibling ElectricalCommands checkout",
+)
 class ProjectChecklistMetadataTests(unittest.TestCase):
     def test_autocad_command_and_description_metadata_exist(self):
         command_file = (

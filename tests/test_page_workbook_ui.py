@@ -30,7 +30,7 @@ class PageWorkbookUiTests(unittest.TestCase):
         self.assertIn("function WorkbookDialog(", self.editor)
         self.assertIn("Add Excel workbook", self.editor)
         self.assertIn("Workbook name is required.", self.editor)
-        self.assertIn("insertPageWorkbook({", self.editor)
+        self.assertIn("insertContentAt(anchor.position,", self.editor)
         self.assertIn('data-workbook-action": "open"', self.editor)
         self.assertIn('data-workbook-action": "delete"', self.editor)
         self.assertIn("Unavailable on this device", self.editor)
@@ -65,7 +65,7 @@ class PageWorkbookUiTests(unittest.TestCase):
         self.assertIn("background: var(--bg-tertiary, #eef3f0);", self.styles)
 
     def test_bridge_and_cascade_cleanup_cover_managed_workbooks(self):
-        self.assertIn("create_page_workbook(pageEditorOwnerKey", self.script)
+        self.assertIn("create_page_workbook(ownerKey", self.script)
         self.assertIn("link_page_workbook(path", self.script)
         self.assertIn("Excel Files (*.xlsx;*.xlsm;*.xls;*.xlsb;*.csv)", self.script)
         self.assertIn("get_page_file_info(fileRef)", self.script)
@@ -73,9 +73,9 @@ class PageWorkbookUiTests(unittest.TestCase):
         self.assertIn("delete_page_file(fileRef)", self.script)
         self.assertIn("function getPageWorkbookRefs(pageTarget)", self.script)
         self.assertIn("async function deleteManagedPageWorkbooks(pageTargets)", self.script)
-        self.assertIn("const cleanupResult = await deleteManagedPageWorkbooks([page]);", self.script)
+        self.assertIn("globalPageTrash.push(entry);", self.script)
         self.assertIn("...getProjectSubpages(project)", self.script)
-        self.assertIn("currentSubpages.filter((sp) => removeIds.has(sp.id))", self.script)
+        self.assertIn("const removed = pages.filter((page) => removeIds.has(page.id));", self.script)
 
 
 if __name__ == "__main__":

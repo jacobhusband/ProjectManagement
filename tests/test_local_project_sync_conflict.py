@@ -178,6 +178,151 @@ class LocalProjectSyncConflictTests(unittest.TestCase):
         # Verify server file is deleted
         self.assertFalse(os.path.exists(server_test_file))
 
+    def _write(self, root, rel_path, content, mtime=None):
+        full_path = os.path.join(root, rel_path)
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        with open(full_path, "w") as f:
+            f.write(content)
+        if mtime is not None:
+            os.utime(full_path, (mtime, mtime))
+        return full_path
+
+    def _copy_to_local(self, rel_path):
+        result = self.api._apply_local_project_manager_direction(
+            self.local_dir, self.server_dir, [rel_path], direction="to_local"
+        )
+        self.assertEqual("success", result["status"])
+        return os.path.join(self.local_dir, rel_path)
+
+    def _candidates(self, comparison, key):
+        return {
+            os.path.normpath(entry["relativePath"]): entry
+            for entry in comparison.get(key, [])
+        }
+
+    def test_additive_only_folders_never_offer_deletions(self):
+        rel_path = os.path.join("Reports", "notes.txt")
+        self._write(self.server_dir, rel_path, "notes")
+        os.remove(self._copy_to_local(rel_path))
+
+        comparison = self.api._compare_local_project_manager_files(self.local_dir, self.server_dir)
+
+        self.assertNotIn(rel_path, self._candidates(comparison, "localToServerCandidates"))
+        restore = self._candidates(comparison, "serverToLocalCandidates")[rel_path]
+        self.assertEqual("Deleted locally", restore["directionLabel"])
+        self.assertFalse(restore["selectedByDefault"])
+
+    def test_managed_deletions_are_never_preselected(self):
+        rel_path = os.path.join("Electrical", "E01.00.dwg")
+        self._write(self.server_dir, rel_path, "sheet")
+        os.remove(self._copy_to_local(rel_path))
+
+        comparison = self.api._compare_local_project_manager_files(self.local_dir, self.server_dir)
+
+        deletion = self._candidates(comparison, "localToServerCandidates")[rel_path]
+        self.assertEqual("deleted", deletion["changeType"])
+        self.assertFalse(deletion["selectedByDefault"])
+
+    def test_file_deleted_on_server_is_not_reuploaded_by_default(self):
+        rel_path = os.path.join("Electrical", "old-sheet.dwg")
+        server_file = self._write(self.server_dir, rel_path, "obsolete")
+        self._copy_to_local(rel_path)
+        os.remove(server_file)
+
+        comparison = self.api._compare_local_project_manager_files(self.local_dir, self.server_dir)
+
+        upload = self._candidates(comparison, "localToServerCandidates")[rel_path]
+        self.assertEqual("Deleted on server", upload["directionLabel"])
+        self.assertFalse(upload["selectedByDefault"])
+
+    def test_no_deletions_are_offered_when_a_scan_is_incomplete(self):
+        rel_path = os.path.join("Electrical", "E02.00.dwg")
+        self._write(self.server_dir, rel_path, "lighting")
+        os.remove(self._copy_to_local(rel_path))
+        real_scan = self.api._scan_copy_project_files
+
+        def scan_with_local_error(root, **kwargs):
+            result = real_scan(root, **kwargs)
+            if os.path.normpath(root) == os.path.normpath(self.local_dir):
+                result = dict(result, scanErrors=[{"relativePath": "Electrical", "path": root, "error": "denied"}])
+            return result
+
+        with patch.object(self.api, "_scan_copy_project_files", side_effect=scan_with_local_error):
+            comparison = self.api._compare_local_project_manager_files(self.local_dir, self.server_dir)
+
+        reasons = [entry["reason"] for entry in comparison["localToServerCandidates"]]
+        self.assertNotIn("local_deleted", reasons)
+
+    def test_the_side_that_changed_wins_even_with_an_older_timestamp(self):
+        rel_path = os.path.join("Electrical", "panel.xlsx")
+        self._write(self.server_dir, rel_path, "v1", mtime=2_000_000_000)
+        local_file = self._copy_to_local(rel_path)
+        # Restore an older local version: its timestamp is older than the server's.
+        self._write(self.local_dir, rel_path, "older restore", mtime=1_900_000_000)
+
+        comparison = self.api._compare_local_project_manager_files(self.local_dir, self.server_dir)
+
+        self.assertIn(rel_path, self._candidates(comparison, "localToServerCandidates"))
+        self.assertNotIn(rel_path, self._candidates(comparison, "serverToLocalCandidates"))
+        self.assertTrue(os.path.exists(local_file))
+
+    def test_projects_copied_before_baselines_existed_still_detect_conflicts(self):
+        rel_path = os.path.join("Electrical", "E03.00.dwg")
+        self._write(self.server_dir, rel_path, "same", mtime=2_000_000_000)
+        self._write(self.local_dir, rel_path, "same", mtime=2_000_000_000)
+        self.assertFalse(os.path.exists(self.temp_metadata_file))
+
+        first = self.api._compare_local_project_manager_files(self.local_dir, self.server_dir)
+        self.assertEqual(1, len(first["equalFiles"]))
+        self.assertTrue(os.path.exists(self.temp_metadata_file))
+
+        self._write(self.local_dir, rel_path, "local edit", mtime=2_000_000_600)
+        self._write(self.server_dir, rel_path, "server edit!", mtime=2_000_000_300)
+        second = self.api._compare_local_project_manager_files(self.local_dir, self.server_dir)
+
+        self.assertEqual([rel_path], [os.path.normpath(c["relativePath"]) for c in second["conflictCandidates"]])
+        self.assertNotIn(rel_path, self._candidates(second, "localToServerCandidates"))
+
+    def test_same_timestamp_with_different_sizes_is_a_conflict_without_a_baseline(self):
+        rel_path = os.path.join("Electrical", "E04.00.dwg")
+        self._write(self.server_dir, rel_path, "server copy", mtime=2_000_000_000)
+        self._write(self.local_dir, rel_path, "a different local copy", mtime=2_000_000_010)
+
+        comparison = self.api._compare_local_project_manager_files(self.local_dir, self.server_dir)
+
+        self.assertEqual(1, comparison["conflictCandidateCount"])
+        self.assertEqual([], comparison["equalFiles"])
+
+    def test_keep_server_resolution_replaces_the_local_copy_after_backing_it_up(self):
+        rel_path = os.path.join("Electrical", "E05.00.dwg")
+        server_file = self._write(self.server_dir, rel_path, "base", mtime=2_000_000_000)
+        local_file = self._copy_to_local(rel_path)
+        self._write(self.local_dir, rel_path, "local edit", mtime=2_000_000_600)
+        self._write(self.server_dir, rel_path, "server edit!", mtime=2_000_000_300)
+        documents_root = os.path.join(self.temp_dir, "Documents")
+
+        with patch.object(main, "_get_windows_documents_dir", return_value=documents_root):
+            result = self.api.resolve_local_project_manager_conflict(
+                self.local_dir, self.server_dir, rel_path, "keep_server"
+            )
+
+        self.assertEqual("success", result["status"])
+        with open(local_file) as f:
+            self.assertEqual("server edit!", f.read())
+        self.assertTrue(result["backupPath"].startswith(documents_root))
+        with open(os.path.join(result["backupPath"], rel_path)) as f:
+            self.assertEqual("local edit", f.read())
+        comparison = self.api._compare_local_project_manager_files(self.local_dir, self.server_dir)
+        self.assertEqual(0, comparison["conflictCandidateCount"])
+        self.assertTrue(os.path.exists(server_file))
+
+    def test_conflict_resolution_rejects_paths_outside_the_project(self):
+        result = self.api.resolve_local_project_manager_conflict(
+            self.local_dir, self.server_dir, os.path.join("..", "outside.txt"), "keep_local"
+        )
+        self.assertEqual("error", result["status"])
+
+
 class LocalProjectManagerComparisonScopeTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -185,11 +330,15 @@ class LocalProjectManagerComparisonScopeTests(unittest.TestCase):
         self.server_dir = os.path.join(self.temp_dir, "server")
         os.makedirs(self.local_dir)
         os.makedirs(self.server_dir)
+        # Comparisons record sync baselines; keep them out of the real app data.
+        self.patcher = patch("main.SYNC_METADATA_FILE", os.path.join(self.temp_dir, "sync_metadata.json"))
+        self.patcher.start()
 
         self.api = Api.__new__(Api)
         self.api.get_user_settings = MagicMock(return_value={})
 
     def tearDown(self):
+        self.patcher.stop()
         shutil.rmtree(self.temp_dir)
 
     def _write(self, root, rel_path, content, mtime=None):

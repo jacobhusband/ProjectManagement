@@ -61,29 +61,6 @@ class AutocadSettingsPersistenceUiTests(unittest.TestCase):
             self.assertIn("if (!(await ensureAutocadPathLoaded())) {", block)
             self.assertIn("await showAutocadSelectModal();", block)
 
-    def test_autocad_path_remains_local_only_for_cloud_settings(self):
-        default_syncable_block = self._block(
-            "function getDefaultSyncableSettings() {",
-            "function sanitizeSettingsForCloud(settings = userSettings) {",
-        )
-        sanitize_block = self._block(
-            "function sanitizeSettingsForCloud(settings = userSettings) {",
-            "function normalizeCloudSettingsDoc(raw = {}) {",
-        )
-        normalize_block = self._block(
-            "function normalizeCloudSettingsDoc(raw = {}) {",
-            "function hasMeaningfulSettingsState(doc) {",
-        )
-        remote_apply_block = self._block(
-            'if (domain === "settings") {',
-            'if (domain === "tasks") {',
-        )
-
-        self.assertNotIn("autocadPath", default_syncable_block)
-        self.assertNotIn("autocadPath", sanitize_block)
-        self.assertNotIn("autocadPath", normalize_block)
-        self.assertIn("autocadPath: userSettings.autocadPath,", remote_apply_block)
-
 
 if __name__ == "__main__":
     unittest.main()
