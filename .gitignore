@@ -47,6 +47,7 @@ nul
 
 # Claude / Editor / OS
 .claude/worktrees/
+.claude/settings.local.json
 .vscode/
 .idea/
 .DS_Store
@@ -61,6 +62,8 @@ Thumbs.db
 dist/
 build/
 tmp/
+# Launcher compiled by scripts/build-launcher.cmd
+pm.exe
 
 # Environment
 .env
