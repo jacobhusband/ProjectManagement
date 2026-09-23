@@ -12,7 +12,10 @@ class CleanDrawingTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name) / 'Project'
+        # clean_drawings compares resolved paths. Resolve the fixture too, since
+        # %TEMP% can be an 8.3 alias such as C:\Users\RUNNER~1 on build machines.
+        base = Path(self.temp.name).resolve()
+        self.root = base / 'Project'
         (self.root / 'Electrical').mkdir(parents=True)
         (self.root / 'Xrefs').mkdir()
         self.tb = self.root / 'Xrefs' / 'x-TB.dwg'
@@ -25,7 +28,7 @@ class CleanDrawingTests(unittest.TestCase):
         self.pdfs = []
         self.images = []
         self.fail_operation = ''
-        self.work = Path(self.temp.name) / 'worker'
+        self.work = base / 'worker'
         self.work.mkdir()
         def comparison(original, reference, cleaned, output, **kwargs):
             Path(output).mkdir()

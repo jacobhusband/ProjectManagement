@@ -65,6 +65,12 @@ function Move-FormToPrimaryScreen {
 }
 
 function Show-DwgFileSelectionPrompt {
+  # Automated runs (tests, CI) set ACIES_NONINTERACTIVE=1. Nobody can answer a
+  # picker there, and it would open in the last folder PowerShell used.
+  if ($env:ACIES_NONINTERACTIVE -eq '1') {
+    Write-Host "PROGRESS: Skipped the file picker because ACIES_NONINTERACTIVE is set."
+    return $null
+  }
   # The picker runs inside a hidden-console child process, so a bare
   # OpenFileDialog.ShowDialog() has no owner window and Windows refuses to pull
   # it in front of the app that launched it. The dialog then sits behind the

@@ -15,6 +15,9 @@ concurrency:
 jobs:
   test:
     runs-on: windows-latest
+    env:
+      # The CAD scripts must never wait for a file picker on a build machine.
+      ACIES_NONINTERACTIVE: '1'
     steps:
       - name: Checkout
         uses: actions/checkout@v6

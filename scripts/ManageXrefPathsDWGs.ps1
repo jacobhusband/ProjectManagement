@@ -99,6 +99,12 @@ function Move-FormToPrimaryScreen {
 }
 
 function Show-DwgFileSelectionPrompt {
+  # Automated runs (tests, CI) set ACIES_NONINTERACTIVE=1. Nobody can answer a
+  # picker there, and it would open in the last folder PowerShell used.
+  if ($env:ACIES_NONINTERACTIVE -eq '1') {
+    Write-Host "PROGRESS: Skipped the file picker because ACIES_NONINTERACTIVE is set."
+    return @()
+  }
   $promptForm = New-Object System.Windows.Forms.Form
   $promptForm.Text = "Select DWG files to scan for XREFs"
   $promptForm.StartPosition = "CenterScreen"

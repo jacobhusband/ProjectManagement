@@ -1,3 +1,4 @@
+import os
 import shutil
 import subprocess
 import sys
@@ -6,6 +7,9 @@ import unittest
 import json
 import zipfile
 from pathlib import Path
+
+# The CAD scripts skip their file pickers when this is set, so no dialog can open during tests.
+os.environ["ACIES_NONINTERACTIVE"] = "1"
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -67,7 +71,7 @@ class RemoveXrefPathsBehaviorTests(unittest.TestCase):
         output = (result.stdout or "") + (result.stderr or "")
         return result, output
 
-    def _run_script_with_manifest(self, manifest_path, discipline_short="E"):
+    def _run_script_with_manifest(self, manifest_path, discipline_short="E", env=None):
         result = subprocess.run(
             [
                 self.powershell,
@@ -100,9 +104,21 @@ class RemoveXrefPathsBehaviorTests(unittest.TestCase):
             encoding="utf-8",
             errors="replace",
             timeout=60,
+            env=env,
         )
         output = (result.stdout or "") + (result.stderr or "")
         return result, output
+
+    def _same_path(self, expected, actual):
+        # The script reports long paths; %TEMP% may be an 8.3 alias (C:\Users\RUNNER~1).
+        self.assertEqual(Path(expected).resolve(), Path(actual).resolve())
+
+    def _short_path(self, path):
+        import ctypes
+
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = ctypes.windll.kernel32.GetShortPathNameW(str(path), buffer, len(buffer))
+        return buffer.value if 0 < length < len(buffer) else str(path)
 
     def _read_compare_pairs(self, output):
         marker = "PROGRESS: DWG_COMPARE_PAIR:"
@@ -133,8 +149,8 @@ class RemoveXrefPathsBehaviorTests(unittest.TestCase):
             self.assertIn("Archived existing file to A01-01 (E)_", output)
             compare_pairs = self._read_compare_pairs(output)
             self.assertEqual(1, len(compare_pairs), msg=output)
-            self.assertEqual(str(canonical_target), compare_pairs[0]["newPath"])
-            self.assertEqual(str(archived_targets[0]), compare_pairs[0]["oldPath"])
+            self._same_path(canonical_target, compare_pairs[0]["newPath"])
+            self._same_path(archived_targets[0], compare_pairs[0]["oldPath"])
             self.assertEqual("A01-01", compare_pairs[0]["label"])
 
     def test_manifest_file_source_stages_into_xrefs(self):
@@ -179,8 +195,8 @@ class RemoveXrefPathsBehaviorTests(unittest.TestCase):
             self.assertEqual(2, len(compare_pairs), msg=output)
             self.assertEqual({"A01-01", "A02-02"}, {pair["label"] for pair in compare_pairs})
             self.assertEqual(
-                {str(target) for target in targets},
-                {pair["newPath"] for pair in compare_pairs},
+                {target.resolve() for target in targets},
+                {Path(pair["newPath"]).resolve() for pair in compare_pairs},
             )
 
     def test_manifest_zip_entry_extracts_and_stages_into_project_xrefs(self):
@@ -213,6 +229,39 @@ class RemoveXrefPathsBehaviorTests(unittest.TestCase):
             self.assertFalse(list((project_root / "Xrefs").glob("__incoming__*.dwg")))
             self.assertIn("Preparing Arch ZIP source for Xrefs transfer: A06-06 plan.dwg", output)
             self.assertIn("Staged Arch ZIP source in Xrefs as __incoming__", output)
+
+    def test_manifest_zip_entry_stages_when_temp_is_a_short_path(self):
+        # Windows gives long profile names an 8.3 %TEMP% and .NET expands those
+        # names, so ZIP staging has to compare paths in the same long form.
+        with tempfile.TemporaryDirectory(prefix="acies-remove-xrefs-short-temp-") as temp_dir:
+            short_temp = self._short_path(temp_dir)
+            if short_temp.casefold() == str(temp_dir).casefold():
+                self.skipTest("This volume does not create 8.3 names")
+            project_root = Path(temp_dir) / "260250 Example"
+            arch_folder = project_root / "Arch"
+            arch_folder.mkdir(parents=True)
+            zip_path = arch_folder / "CAD.zip"
+            with zipfile.ZipFile(zip_path, "w") as archive:
+                archive.writestr("A07-07 plan.dwg", "short-temp-source")
+            manifest_path = project_root / "manifest.json"
+            manifest_path.write_text(
+                json.dumps([{
+                    "kind": "zipEntry",
+                    "zipPath": str(zip_path),
+                    "entryName": "A07-07 plan.dwg",
+                    "projectRoot": str(project_root),
+                }]),
+                encoding="utf-8",
+            )
+
+            result, output = self._run_script_with_manifest(
+                manifest_path, env={**os.environ, "TEMP": short_temp, "TMP": short_temp}
+            )
+
+            self.assertEqual(0, result.returncode, msg=output)
+            self.assertNotIn("escapes staging folder", output)
+            canonical_target = project_root / "Xrefs" / "A07-07 (E).dwg"
+            self.assertEqual("short-temp-source", canonical_target.read_text(encoding="utf-8"))
 
     def test_xrefs_source_is_archived_before_canonical_target_is_created(self):
         with tempfile.TemporaryDirectory(prefix="acies-remove-xrefs-source-") as temp_dir:

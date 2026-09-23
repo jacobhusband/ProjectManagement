@@ -137,7 +137,7 @@ class PageAssetBackendTests(unittest.TestCase):
                 # All asset files must remain under page_assets/
                 root = Path(temp_dir) / "page_assets"
                 for path in root.rglob("*.png"):
-                    self.assertIn(str(root), str(path.resolve()))
+                    self.assertIn(str(root.resolve()), str(path.resolve()))
 
     def test_get_page_asset_rejects_traversal(self):
         with tempfile.TemporaryDirectory(prefix="acies-page-assets-traversal-") as temp_dir:

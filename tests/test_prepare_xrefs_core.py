@@ -8,6 +8,9 @@ import tempfile
 import unittest
 import zipfile
 
+# The CAD scripts skip their file pickers when this is set, so no dialog can open during tests.
+os.environ["ACIES_NONINTERACTIVE"] = "1"
+
 ROOT = Path(__file__).resolve().parents[1]
 
 

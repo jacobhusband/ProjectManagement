@@ -181,6 +181,12 @@ function New-IncomingWorkingCopy {
 
 function Show-DwgFileDialog {
   param([string]$InitialDirectory = "")
+  # Automated runs (tests, CI) set ACIES_NONINTERACTIVE=1. Nobody can answer a
+  # picker there, and it would open in the last folder PowerShell used.
+  if ($env:ACIES_NONINTERACTIVE -eq '1') {
+    Write-Host "PROGRESS: Skipped the file picker because ACIES_NONINTERACTIVE is set."
+    return $null
+  }
 
   $dlg = New-Object System.Windows.Forms.OpenFileDialog
   $dlg.Title = "Select DWG files or ZIP archives"
@@ -202,6 +208,12 @@ function Show-DwgFileDialog {
 
 function Show-ZipDwgDialog {
   param([Parameter(Mandatory = $true)][string]$ZipPath)
+  # Automated runs (tests, CI) set ACIES_NONINTERACTIVE=1. Nobody can answer the
+  # ZIP entry list or folder picker there.
+  if ($env:ACIES_NONINTERACTIVE -eq '1') {
+    Write-Host "PROGRESS: Skipped the ZIP drawing picker because ACIES_NONINTERACTIVE is set."
+    return @()
+  }
 
   Add-Type -AssemblyName System.IO.Compression.FileSystem
   $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
@@ -389,6 +401,9 @@ function Resolve-SourceItemToWorkingSource {
       if (-not $extractDir) {
         $extractDir = Join-Path $TempRoot ([guid]::NewGuid().ToString("N"))
         New-Item -Path $extractDir -ItemType Directory -Force | Out-Null
+        # GetFullPath expands 8.3 names such as C:\Users\ADMINI~1 in %TEMP%. Compare
+        # entries against the same long form, or every entry looks like it escapes.
+        $extractDir = [IO.Path]::GetFullPath($extractDir)
       # Keep the dependency tree, not just the selected DWG. Validate every path
       # before writing so an archive cannot escape the temporary workspace.
       $destinations = @{}

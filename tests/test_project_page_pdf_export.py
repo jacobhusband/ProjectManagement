@@ -121,7 +121,7 @@ class ProjectPagePdfExportTests(unittest.TestCase):
                 })
 
             self.assertEqual("success", result["status"])
-            self.assertEqual(str(output_path.resolve()), result["path"])
+            self.assertEqual(output_path.resolve(), Path(result["path"]).resolve())
             self.assertGreater(result["sizeBytes"], 0)
             self.assertTrue(output_path.is_file())
 
@@ -156,7 +156,7 @@ class ProjectPagePdfExportTests(unittest.TestCase):
 
             expected_path = output_without_extension.with_suffix(".pdf")
             self.assertEqual("success", result["status"])
-            self.assertEqual(str(expected_path.resolve()), result["path"])
+            self.assertEqual(expected_path.resolve(), Path(result["path"]).resolve())
             self.assertTrue(expected_path.is_file())
 
 

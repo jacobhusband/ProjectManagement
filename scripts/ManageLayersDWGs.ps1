@@ -111,6 +111,12 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 function Show-DwgFileSelectionPrompt {
+  # Automated runs (tests, CI) set ACIES_NONINTERACTIVE=1. Nobody can answer a
+  # picker there, and it would open in the last folder PowerShell used.
+  if ($env:ACIES_NONINTERACTIVE -eq '1') {
+    Write-Host "PROGRESS: Skipped the file picker because ACIES_NONINTERACTIVE is set."
+    return $null
+  }
   $promptForm = New-Object System.Windows.Forms.Form
   $promptForm.Text = "Select DWG file(s)"
   $promptForm.StartPosition = "CenterScreen"

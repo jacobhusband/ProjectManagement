@@ -41,6 +41,8 @@ jobs:
       # Core Console skip themselves here.
       - name: Run Python tests
         shell: pwsh
+        env:
+          ACIES_NONINTERACTIVE: '1'
         run: |
           .\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
 
@@ -52,6 +54,8 @@ jobs:
 
       - name: Run JavaScript tests
         shell: pwsh
+        env:
+          ACIES_NONINTERACTIVE: '1'
         run: |
           node --test "tests/*.test.cjs" "project-pages-editor/src/*.test.js"
 

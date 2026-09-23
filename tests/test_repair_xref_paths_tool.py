@@ -1,9 +1,13 @@
+import os
 import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import main as main_module
+
+# The CAD scripts skip their file pickers when this is set, so no dialog can open during tests.
+os.environ["ACIES_NONINTERACTIVE"] = "1"
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
