@@ -3117,8 +3117,14 @@ TEMPLATE_DEFAULT_FILENAME_BY_KEY = {
     "planCheck": "Plan Check Comments",
 }
 
+# force=True: the ".env loaded" message above already made Python install a default
+# WARNING-level handler, which would otherwise turn this call into a no-op and drop
+# every INFO message.
 logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s')
+                    format='%(asctime)s - %(levelname)s - %(message)s', force=True)
+# HTTP clients log each request at INFO; keep those out of the app log.
+for _http_logger_name in ("httpx", "httpcore"):
+    logging.getLogger(_http_logger_name).setLevel(logging.WARNING)
 
 APP_LOG_FILE_NAME = "acies-scheduler.log"
 
@@ -3553,6 +3559,11 @@ def cb_update_excel_workbook(panel_data: PanelData, workbook_path: str, use_extr
 
     wb.save(workbook_path)
     return safe_name
+
+# File lists and manifests handed to CAD scripts live here. Nothing tracks when a
+# script finishes reading them, so files older than a day are pruned instead.
+CAD_HANDOFF_DIRNAME = "acies-scheduler-cad"
+CAD_HANDOFF_MAX_AGE_SECONDS = 24 * 60 * 60
 
 # --- API Class ---
 
@@ -4226,6 +4237,9 @@ class Api:
         Runs a script in a separate thread, captures its stdout, and sends
         progress updates to the frontend.
         """
+        # An argument list keeps DWG paths from being interpreted by a shell.
+        if not isinstance(command, list):
+            raise TypeError("CAD scripts must be launched with an argument list, not a shell string.")
         self._ensure_script_worker_state()
         if self._script_shutdown_event.is_set():
             return {
@@ -4259,40 +4273,21 @@ class Api:
                     startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                     startupinfo.wShowWindow = subprocess.SW_HIDE
 
-                # FIX: Handle both string and list commands
-                if isinstance(command, list):
-                    process = subprocess.Popen(
-                        command,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        encoding='utf-8',
-                        errors='replace',
-                        startupinfo=startupinfo
-                    )
-                    self._trace_cad_auto_select(
-                        'script_subprocess_spawn',
-                        tool_id=tool_id,
-                        command_type='argv',
-                        command=command,
-                    )
-                else:
-                    process = subprocess.Popen(
-                        command,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        encoding='utf-8',
-                        errors='replace',
-                        shell=True,
-                        startupinfo=startupinfo
-                    )
-                    self._trace_cad_auto_select(
-                        'script_subprocess_spawn',
-                        tool_id=tool_id,
-                        command_type='shell_string',
-                        command=command,
-                    )
+                process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    startupinfo=startupinfo
+                )
+                self._trace_cad_auto_select(
+                    'script_subprocess_spawn',
+                    tool_id=tool_id,
+                    command_type='argv',
+                    command=command,
+                )
 
                 with self._script_worker_lock:
                     self._script_processes.add(process)
@@ -7559,6 +7554,18 @@ Return ONLY the JSON object.
     def get_data_recovery_notices(self):
         """Returns, then clears, notices about data files restored from backups."""
         return {'status': 'success', 'notices': _consume_data_recovery_notices()}
+
+    def report_client_issue(self, payload=None):
+        """Writes a problem reported by the page, such as a blocked resource, to the app log."""
+        data = payload if isinstance(payload, dict) else {}
+        kind = str(data.get('kind') or 'issue')[:40]
+        details = {
+            str(key)[:40]: str(value)[:300]
+            for key, value in list(data.items())[:12]
+            if key != 'kind'
+        }
+        logging.warning(f"Page reported {kind}: {details}")
+        return {'status': 'success'}
 
     def delete_project(self, project_id="", project_name=""):
         """Deletes a project from the SQLite DB and checklist DB."""
@@ -16830,9 +16837,27 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
         file_paths.sort(key=lambda path: os.path.basename(path).lower())
         return file_paths
 
+    @staticmethod
+    def _get_cad_handoff_dir():
+        folder = os.path.join(tempfile.gettempdir(), CAD_HANDOFF_DIRNAME)
+        os.makedirs(folder, exist_ok=True)
+        cutoff = time.time() - CAD_HANDOFF_MAX_AGE_SECONDS
+        try:
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_file() and entry.stat().st_mtime < cutoff:
+                            os.remove(entry.path)
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        return folder
+
     def _write_files_list_temp(self, file_paths):
         temp_file = tempfile.NamedTemporaryFile(
-            mode='w', suffix='.txt', delete=False, encoding='utf-8')
+            mode='w', suffix='.txt', delete=False, encoding='utf-8',
+            prefix='dwg-list-', dir=self._get_cad_handoff_dir())
         for path in file_paths:
             temp_file.write(path + '\n')
         temp_file.close()
@@ -16936,7 +16961,8 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
         if not normalized_sources:
             return ''
         temp_file = tempfile.NamedTemporaryFile(
-            mode='w', suffix='.json', delete=False, encoding='utf-8')
+            mode='w', suffix='.json', delete=False, encoding='utf-8',
+            prefix='dwg-sources-', dir=self._get_cad_handoff_dir())
         json.dump(normalized_sources, temp_file, ensure_ascii=True)
         temp_file.close()
         return temp_file.name

@@ -13,6 +13,7 @@ a = Analysis(
     datas=[
         (os.path.join(project_root, 'VERSION'), '.'),
         (os.path.join(project_root, 'index.html'), '.'),
+        (os.path.join(project_root, 'app-bootstrap.js'), '.'),
         (os.path.join(project_root, 'styles.css'), '.'),
         (os.path.join(project_root, 'industry.css'), '.'),
         (os.path.join(project_root, 'modern-workspace.css'), '.'),

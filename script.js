@@ -2725,6 +2725,27 @@ function plainTextToPageHtml(text) {
     .join("");
 }
 
+// Remove anything executable from stored page HTML before it is placed in a live
+// editable element. The editors never write scripts, inline handlers or
+// javascript: links, so this only affects content that reached storage another way.
+function sanitizeStoredPageHtml(html) {
+  if (!html) return "";
+  const doc = new DOMParser().parseFromString(String(html), "text/html");
+  doc.body
+    .querySelectorAll("script, iframe, object, embed, base, meta")
+    .forEach((node) => node.remove());
+  doc.body.querySelectorAll("*").forEach((node) => {
+    Array.from(node.attributes).forEach((attribute) => {
+      const name = attribute.name.toLowerCase();
+      const isScriptUrl =
+        ["href", "src", "xlink:href", "action", "formaction"].includes(name) &&
+        /^\s*javascript:/i.test(attribute.value);
+      if (name.startsWith("on") || isScriptUrl) node.removeAttribute(attribute.name);
+    });
+  });
+  return doc.body.innerHTML;
+}
+
 // Extract readable plain text from page HTML (for search and list previews).
 function pageHtmlToPlainText(html) {
   if (!html) return "";
@@ -7056,6 +7077,55 @@ function closeDlg(id) {
     _aiMatchSnapshot = null;
   }
   document.getElementById(id).close();
+}
+
+// index.html buttons say what they do with data-close-dialog or data-click-action
+// instead of inline onclick handlers, which the page's Content-Security-Policy
+// refuses. Listening in the capture phase means a handler lower down that stops
+// propagation cannot swallow the click.
+function getDeclarativeClickAction(name) {
+  const actions = {
+    addDeliverable: () => addDeliverable(),
+    addRefRow: () => addRefRow(),
+    closeImagePreviewDialog: () => closeImagePreviewDialog(),
+    dismissSetupHelpLater: () => dismissSetupHelp("later"),
+    dismissSetupHelpNever: () => dismissSetupHelp("never"),
+    nextOnboardingStep: () => nextOnboardingStep(),
+    onDeleteActiveProjectFromPageView: () => onDeleteActiveProjectFromPageView(),
+    onDeleteCurrentProject: () => onDeleteCurrentProject(),
+    openWorkflowBuilder: () => openWorkflowBuilder(null),
+    prevOnboardingStep: () => prevOnboardingStep(),
+    showApiKeyHelp: () => showApiKeyHelp(),
+    skipOnboarding: () => skipOnboarding(),
+    startSetupHelp: () => startSetupHelp(),
+  };
+  return Object.hasOwn(actions, String(name)) ? actions[name] : null;
+}
+
+function handleDeclarativeClick(event) {
+  const target = event.target instanceof Element ? event.target : null;
+  const closeButton = target?.closest("[data-close-dialog]");
+  if (closeButton) {
+    closeDlg(closeButton.dataset.closeDialog);
+    return;
+  }
+  const action = getDeclarativeClickAction(target?.closest("[data-click-action]")?.dataset.clickAction);
+  if (action) action();
+}
+
+document.addEventListener("click", handleDeclarativeClick, true);
+
+// Send Content-Security-Policy violations to the app log, including the ones
+// app-bootstrap.js collected before the desktop bridge was ready.
+function startCspViolationReporting() {
+  const collector = window.aciesCspViolations;
+  if (!collector) return;
+  const report = (violation) => {
+    console.warn("Blocked by the Content-Security-Policy:", violation);
+    Promise.resolve(window.pywebview?.api?.report_client_issue?.(violation)).catch(() => {});
+  };
+  collector.report = report;
+  collector.pending.splice(0).forEach(report);
 }
 
 const debounce = (fn, delay) => {
@@ -33686,7 +33756,7 @@ function setScratchpadOpen(open) {
   initScratchpadBindings();
   if (open) {
     if (editor.innerHTML !== (scratchpadHtml || "")) {
-      editor.innerHTML = scratchpadHtml || "";
+      editor.innerHTML = sanitizeStoredPageHtml(scratchpadHtml);
     }
     panel.hidden = false;
     document.body.classList.add("scratchpad-open");
@@ -37531,6 +37601,7 @@ async function init() {
   try {
     if (!window.pywebview)
       await new Promise((r) => window.addEventListener("pywebviewready", r));
+    startCspViolationReporting();
     initEventListeners();
     initTabbedInterfaces();
     initProjectsBackToTop();
@@ -37806,7 +37877,9 @@ function prepareProjectPagesEditorMount() {
   return root;
 }
 function normalizeHtmlForProjectPagesEditor(html) {
-  const holder = document.createElement("div");
+  // Parse in an inert document so stored HTML cannot load images or run event
+  // handlers before the editor's schema sanitizes it.
+  const holder = document.implementation.createHTMLDocument("").body;
   holder.innerHTML = html || "";
   flattenLegacyPageItems(holder);
   normalizePageChecklistItems(holder);
@@ -39917,7 +39990,7 @@ function renderPageView() {
     }
     clearPageSelectedImage();
     if (editor) {
-      editor.innerHTML = globalPage.page.html || "";
+      editor.innerHTML = sanitizeStoredPageHtml(globalPage.page.html);
       flattenLegacyPageItems(editor);
       normalizePageChecklistItems(editor);
       normalizePageEditorImages(editor);
@@ -39981,7 +40054,7 @@ function renderPageView() {
 
   clearPageSelectedImage();
   if (editor) {
-    editor.innerHTML = target.page.html || "";
+    editor.innerHTML = sanitizeStoredPageHtml(target.page.html);
     flattenLegacyPageItems(editor);
     normalizePageChecklistItems(editor);
     normalizePageEditorImages(editor);

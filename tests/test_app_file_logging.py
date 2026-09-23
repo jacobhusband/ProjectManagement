@@ -59,6 +59,30 @@ _ensure_dotenv_stub()
 import main as main_module
 
 
+class AppLoggingSetupTests(unittest.TestCase):
+    def test_info_messages_are_kept_and_http_request_logs_are_not(self):
+        # A logging call during import used to lock the root logger at WARNING.
+        self.assertLessEqual(logging.getLogger().level, logging.INFO)
+        for name in ("httpx", "httpcore"):
+            self.assertEqual(logging.WARNING, logging.getLogger(name).level)
+
+    def test_problems_reported_by_the_page_are_logged_briefly(self):
+        api = main_module.Api.__new__(main_module.Api)
+        with self.assertLogs(level="WARNING") as captured:
+            result = api.report_client_issue({
+                "kind": "csp-violation",
+                "directive": "script-src-elem",
+                "sample": "x" * 5000,
+            })
+
+        self.assertEqual("success", result["status"])
+        self.assertEqual(1, len(captured.records))
+        message = captured.records[0].getMessage()
+        self.assertIn("csp-violation", message)
+        self.assertIn("script-src-elem", message)
+        self.assertLess(len(message), 1000)
+
+
 class AppFileLoggingTests(unittest.TestCase):
     def test_errors_and_uncaught_thread_exceptions_are_written_to_the_log_file(self):
         root_logger = logging.getLogger()

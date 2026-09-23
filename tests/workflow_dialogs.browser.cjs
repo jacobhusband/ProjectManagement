@@ -14,7 +14,9 @@ const extract = name => {
 (async () => {
   const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined });
   try {
-    const page = await browser.newPage();
+    // index.html's Content-Security-Policy would refuse the inline script injected below.
+    const context = await browser.newContext({ bypassCSP: true });
+    const page = await context.newPage();
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
     // Use the real document and workflow handlers, with only the desktop bridge stubbed.
@@ -26,7 +28,8 @@ const extract = name => {
       'renderWorkflowBuilderSteps', 'buildStepParamControl', 'updateWorkflowStepParam', 'addWorkflowStepFromSelect',
       'moveWorkflowStep', 'removeWorkflowStep', 'showWorkflowBuilderError', 'hideWorkflowBuilderError',
       'saveWorkflowFromBuilder', 'deleteWorkflowFromBuilder', 'renderWorkflowPreFlightSections',
-      'collectPreFlightInputs', 'openWorkflowPreFlight', 'closeWorkflowPreFlight', 'initWorkflowsUi'];
+      'collectPreFlightInputs', 'openWorkflowPreFlight', 'closeWorkflowPreFlight', 'initWorkflowsUi',
+      'getDeclarativeClickAction', 'handleDeclarativeClick'];
     await page.addScriptTag({ content: `
       let userSettings = { commandHotkeys: {} }, workflowToolDescriptors = null,
         workflowBuilderState = null, workflowPreFlightState = null;
@@ -41,6 +44,7 @@ const extract = name => {
         { toolId: 'second', displayName: 'Second tool', params: [], requiredInputs: [] }
       ] }) } };
       ${names.map(extract).join('\n')}
+      document.addEventListener('click', handleDeclarativeClick, true);
       initWorkflowsUi();
       document.getElementById('settingsDlg').showModal();
     ` });

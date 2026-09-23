@@ -31,12 +31,12 @@ class ProjectDeletionUiTests(unittest.TestCase):
         html = INDEX_HTML_PATH.read_text(encoding="utf-8")
         # Edit modal delete button
         self.assertIn('id="btnDeleteProject"', html)
-        self.assertIn('onclick="onDeleteCurrentProject()"', html)
+        self.assertIn('data-click-action="onDeleteCurrentProject"', html)
         self.assertIn('modal-full-only', html)
 
         # Page view topbar delete button
         self.assertIn('id="pageDeleteProjectBtn"', html)
-        self.assertIn('onclick="onDeleteActiveProjectFromPageView()"', html)
+        self.assertIn('data-click-action="onDeleteActiveProjectFromPageView"', html)
 
     def test_script_js_has_project_deletion_functions_and_wiring(self):
         js = SCRIPT_JS_PATH.read_text(encoding="utf-8")
