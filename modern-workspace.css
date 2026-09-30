@@ -10,7 +10,8 @@
 }
 
 /* Native action disclosures: compact chrome, readable labels, original buttons. */
-/* Keep the supplied letterforms; remove the dark ground with a luminance filter. */
+/* Keep the supplied letterforms; remove the dark ground with a luminance filter.
+   The bitmap is cropped to the wordmark (1110x390), so it fills the box exactly. */
 .brand-mark.supplied-logo {
   position: relative;
   display: block;
@@ -23,11 +24,11 @@
 }
 .brand-mark.supplied-logo img {
   position: absolute;
-  width: 159.82%;
+  width: 100%;
   max-width: none;
   height: auto;
-  left: -29.73%;
-  top: -64.1%;
+  left: 0;
+  top: 0;
   filter: url(#acies-logo-ink);
 }
 .app-loader .brand-mark.supplied-logo { width: min(320px, 75vw); }

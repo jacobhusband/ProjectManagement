@@ -20,7 +20,10 @@ namespace AciesLauncher
 
             string venvPythonW = Path.Combine(baseDir, ".venv", "Scripts", "pythonw.exe");
             string venvPython = Path.Combine(baseDir, ".venv", "Scripts", "python.exe");
-            string mainPy = Path.Combine(baseDir, "main.py");
+            // launch.py imports main so Python can cache its bytecode; running main.py
+            // directly recompiles all of it on every start. Fall back for older checkouts.
+            string launchPy = Path.Combine(baseDir, "launch.py");
+            string entryPy = File.Exists(launchPy) ? launchPy : Path.Combine(baseDir, "main.py");
 
             string pythonExe = "pythonw.exe";
             if (File.Exists(venvPythonW))
@@ -32,7 +35,7 @@ namespace AciesLauncher
                 pythonExe = venvPython;
             }
 
-            string arguments = "\"" + mainPy + "\"";
+            string arguments = "\"" + entryPy + "\"";
             if (args != null && args.Length > 0)
             {
                 arguments += " " + string.Join(" ", args);

@@ -11291,14 +11291,14 @@ function renderGoogleAuthUi() {
   renderHeaderDisciplineSwitcher();
 }
 
-async function loadGoogleAuthState({ silent = false } = {}) {
+async function loadGoogleAuthState({ silent = false, refresh = true } = {}) {
   if (!window.pywebview?.api?.get_google_auth_state) {
     googleAuthState = normalizeGoogleAuthState();
     renderGoogleAuthUi();
     return googleAuthState;
   }
   try {
-    const response = await window.pywebview.api.get_google_auth_state();
+    const response = await window.pywebview.api.get_google_auth_state(refresh);
     if (response?.status !== "success") {
       throw new Error(response?.message || "Failed to load Google sign-in state.");
     }
@@ -11312,6 +11312,26 @@ async function loadGoogleAuthState({ silent = false } = {}) {
   }
   renderGoogleAuthUi();
   return googleAuthState;
+}
+
+// Renewing an expiring Google token is a network call, so it runs once the app is on
+// screen instead of holding up the first render. The stored record already says who
+// is signed in.
+async function refreshGoogleAuthStateInBackground() {
+  if (googleAuthBusy || !googleAuthState.signedIn) return;
+  await loadGoogleAuthState({ silent: true });
+  // The backend may have replaced the stored record, or cleared it after a revoked
+  // grant. Copy it over only this key so a later settings save does not write the old
+  // record back, without touching settings edited in the meantime.
+  try {
+    const stored = await window.pywebview.api.get_user_settings();
+    userSettings.googleAuth =
+      stored?.googleAuth && typeof stored.googleAuth === "object"
+        ? stored.googleAuth
+        : null;
+  } catch (e) {
+    console.warn("Could not re-read Google sign-in from settings:", e);
+  }
 }
 
 function openGoogleAccountDialog() {
@@ -33928,7 +33948,41 @@ function renderStats() {
   renderStatsChart(filteredDeliverables, start, end, currentStatsAggregation);
 }
 
+// Chart.js is only needed by the Stats dialog, so it loads the first time that opens
+// instead of at startup. It ships with the app (vendor/README.md records its version
+// and hash), so the dialog works offline.
+const CHART_JS_URL = "vendor/chart.umd.min.js?v=4.5.1";
+let chartJsPromise = null;
+
+function loadChartJs() {
+  if (window.Chart) return Promise.resolve(window.Chart);
+  if (!chartJsPromise) {
+    chartJsPromise = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = CHART_JS_URL;
+      script.onload = () => resolve(window.Chart);
+      script.onerror = () => {
+        script.remove();
+        chartJsPromise = null; // let the next open try again
+        reject(new Error("Could not load the chart library."));
+      };
+      document.head.appendChild(script);
+    });
+  }
+  return chartJsPromise;
+}
+
 function renderStatsChart(projects, start, end, aggregation) {
+  if (!window.Chart) {
+    // First open of the dialog: fetch Chart.js, then draw with the same arguments.
+    loadChartJs()
+      .then(() => renderStatsChart(projects, start, end, aggregation))
+      .catch((e) => {
+        console.warn("Stats chart unavailable:", e);
+        toast("Could not load the chart library. Reopen Stats to try again.");
+      });
+    return;
+  }
   const canvas = document.getElementById("statsChart");
   const ctx = canvas.getContext("2d");
 
@@ -37607,7 +37661,7 @@ async function init() {
     initProjectsBackToTop();
     updateStickyOffsets();
     refreshAppUpdateStatus();
-    await loadGoogleAuthState({ silent: true });
+    await loadGoogleAuthState({ silent: true, refresh: false });
     await loadUserSettings();
     initThemeFromPreferences();
     const [
@@ -37674,6 +37728,7 @@ async function init() {
       setTimeout(showProjectDataLoadError, 300);
     }
     prefetchBundles();
+    void refreshGoogleAuthStateInBackground();
   } finally {
     hideAppLoader();
   }

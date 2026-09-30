@@ -22,8 +22,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-import openpyxl
-from openpyxl.styles import Font, PatternFill
+# openpyxl takes ~0.7s to import, so the functions that need it import it themselves
+# instead of the app paying for it at startup.
 
 try:
     from apps.ProjectManagement.database import (
@@ -777,6 +777,8 @@ def _read_workbook_with_excel(path: str) -> Dict[str, Any]:
 
 
 def _read_workbook_with_openpyxl(path: str) -> Dict[str, Any]:
+    import openpyxl
+
     formula_book = openpyxl.load_workbook(path, data_only=False)
     data_book = openpyxl.load_workbook(path, data_only=True)
     panels: List[Dict[str, Any]] = []
@@ -1089,6 +1091,8 @@ def _write_with_excel(path: str, writes: List[Dict[str, Any]]) -> None:
 
 
 def _write_with_openpyxl(path: str, writes: List[Dict[str, Any]]) -> None:
+    import openpyxl
+
     workbook = openpyxl.load_workbook(path, data_only=False)
     try:
         for write in writes:
@@ -1197,6 +1201,9 @@ def _unique_conflict_path(path: str) -> str:
 
 
 def _highlight_with_openpyxl(path: str, changes: List[Dict[str, Any]]) -> None:
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill
+
     workbook = openpyxl.load_workbook(path, data_only=False)
     yellow = PatternFill(fill_type="solid", fgColor="FFF2CC")
     try:

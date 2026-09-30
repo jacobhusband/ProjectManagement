@@ -18,17 +18,39 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
-try:
-    import pymupdf as fitz
-except ImportError:  # pragma: no cover - compatibility with older PyMuPDF builds
-    import fitz  # type: ignore
+_fitz_module = None
+_vision_modules_cache = None
 
-try:
-    import cv2
-    import numpy as np
-except ImportError:  # pragma: no cover - surfaced as an actionable runtime error
-    cv2 = None
-    np = None
+
+def _load_fitz():
+    """Imports PyMuPDF on first use; loading it at startup delayed the app window."""
+    global _fitz_module
+    if _fitz_module is None:
+        try:
+            import pymupdf as module
+        except ImportError:  # pragma: no cover - compatibility with older PyMuPDF builds
+            import fitz as module  # type: ignore
+        _fitz_module = module
+    return _fitz_module
+
+
+def _load_vision_modules():
+    """Returns (cv2, numpy) on first use, or (None, None) when OpenCV is not installed."""
+    global _vision_modules_cache
+    if _vision_modules_cache is None:
+        try:
+            import cv2
+            import numpy as np
+            _vision_modules_cache = (cv2, np)
+        except ImportError:  # pragma: no cover - surfaced as an actionable runtime error
+            _vision_modules_cache = (None, None)
+    return _vision_modules_cache
+
+
+def preload_dependencies() -> None:
+    """Imports PyMuPDF, OpenCV and NumPy ahead of the first symbol count."""
+    _load_fitz()
+    _load_vision_modules()
 
 
 DEFAULT_RENDER_DPI = 120
@@ -111,6 +133,7 @@ def _encode_png(path: str) -> str:
 
 
 def _read_grayscale(path: str):
+    cv2, np = _load_vision_modules()
     if cv2 is None or np is None:
         raise SymbolCounterError(
             "Symbol matching is unavailable. Install the Project Management requirements and restart the app."
@@ -125,6 +148,7 @@ def _read_grayscale(path: str):
 
 def _trim_template(template):
     """Remove excess white border while retaining a small checking margin."""
+    _, np = _load_vision_modules()
     ink = 255 - template
     ys, xs = np.where(ink > 18)
     if not len(xs) or not len(ys):
@@ -172,6 +196,7 @@ def _non_maximum_suppression(candidates: list[tuple], iou_threshold: float = 0.2
 
 
 def _variant_templates(template, allow_rotations: bool, allow_scale_tolerance: bool):
+    cv2, _ = _load_vision_modules()
     angles = (0, 90, 180, 270) if allow_rotations else (0,)
     scales = (0.92, 1.0, 1.08) if allow_scale_tolerance else (1.0,)
     variants = []
@@ -200,6 +225,7 @@ def _variant_templates(template, allow_rotations: bool, allow_scale_tolerance: b
 
 
 def _match_page(target_gray, template_gray, threshold: float, rotations: bool, scale_tolerance: bool):
+    cv2, np = _load_vision_modules()
     target_ink = cv2.GaussianBlur(255 - target_gray, (3, 3), 0.45)
     candidates: list[tuple] = []
 
@@ -278,7 +304,7 @@ class SymbolCounterService:
             if not source.is_file():
                 raise SymbolCounterError(f"Drawing file not found: {source}")
             try:
-                document = fitz.open(str(source))
+                document = _load_fitz().open(str(source))
             except Exception as exc:
                 raise SymbolCounterError(f"Could not open {source.name}: {exc}") from exc
             try:
@@ -348,6 +374,7 @@ class SymbolCounterService:
         if target.is_file() and target.stat().st_size > 0:
             return str(target)
         target.parent.mkdir(parents=True, exist_ok=True)
+        fitz = _load_fitz()
         document = fitz.open(page.document_path)
         temp_path = target.with_name(f".{target.stem}-{uuid.uuid4().hex}.tmp.png")
         try:
@@ -377,6 +404,7 @@ class SymbolCounterService:
         }
 
     def count(self, session_id: Any, request: dict[str, Any]) -> dict[str, Any]:
+        cv2, np = _load_vision_modules()
         if cv2 is None or np is None:
             raise SymbolCounterError(
                 "Symbol matching dependencies are missing. Install the Project Management requirements and restart."

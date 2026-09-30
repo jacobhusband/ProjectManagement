@@ -11,7 +11,7 @@
     }
 
     // Keep anything the policy blocks until script.js can pass it to the app log.
-    // Early violations (fonts, Chart.js) happen before the desktop bridge is ready.
+    // Early violations (fonts) happen before the desktop bridge is ready.
     const collector = { pending: [], report: null };
     const seen = new Set();
     window.aciesCspViolations = collector;
@@ -29,5 +29,13 @@
         seen.add(key);
         if (typeof collector.report === 'function') collector.report(violation);
         else collector.pending.push(violation);
+    });
+
+    // Stylesheets marked data-async-stylesheet ship with media="print", which keeps them
+    // from blocking the first paint. Switch each to "all" as soon as it has loaded.
+    document.querySelectorAll('link[data-async-stylesheet]').forEach((link) => {
+        const apply = () => { link.media = 'all'; };
+        if (link.sheet) apply();
+        else link.addEventListener('load', apply, { once: true });
     });
 })();

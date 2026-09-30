@@ -1,0 +1,4 @@
+# Vendored upstream files must stay byte-identical, or the hashes recorded in
+# vendor/README.md (and checked by tests/test_startup_performance.py) stop matching.
+# With core.autocrlf=true, checkouts on Windows would otherwise rewrite their line endings.
+vendor/*.js -text

@@ -4,26 +4,25 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <!-- Scripts may only come from the app's own files and the pinned Chart.js build.
+    <!-- Scripts may only come from the app's own files (Chart.js is vendored under vendor/).
          Inline scripts and inline event handlers are refused, so injected markup cannot
          run code. Buttons use data-click-action / data-close-dialog (see script.js). -->
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: file: https:; media-src 'self' data: blob: file:; connect-src 'self' https://raw.githubusercontent.com; frame-src 'self' file:; object-src 'none'; base-uri 'none'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: file: https:; media-src 'self' data: blob: file:; connect-src 'self' https://raw.githubusercontent.com; frame-src 'self' file:; object-src 'none'; base-uri 'none'" />
     <title>Projects</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;700&family=Barlow+Condensed:wght@400;500;600&display=swap" rel="stylesheet">
-    <script src="app-bootstrap.js?v=20260923-csp"></script>
+    <!-- Fonts only restyle text, so they must not hold up the first paint: media="print"
+         keeps these sheets from blocking rendering and app-bootstrap.js switches them to
+         "all" once they arrive. -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" media="print" data-async-stylesheet>
+    <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;700&family=Barlow+Condensed:wght@400;500;600&display=swap" rel="stylesheet" media="print" data-async-stylesheet>
+    <script src="app-bootstrap.js?v=20260929-fast-start"></script>
     <link rel="stylesheet" href="styles.css?v=20260922-review-fixes" />
     <link rel="stylesheet" href="symbol_counter.css?v=20260818-delete-actions" />
     <link rel="stylesheet" href="industry.css?v=20260909-cmd-add-deliverable" />
-    <link rel="stylesheet" href="modern-workspace.css?v=20260909-deliverables" />
+    <link rel="stylesheet" href="modern-workspace.css?v=20260929-fast-start" />
     <link rel="stylesheet" href="deliverables-workspace.css?v=20260909" />
     <link rel="stylesheet" href="project-pages-editor/dist/project-pages-editor-project-pages-editor.css?v=20260918-notes-reliability" />
-    <!-- Pinned to the exact build that the unversioned URL served on 2026-09-23. -->
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"
-        integrity="sha384-jb8JQMbMoBUzgWatfe6COACi2ljcDdZQ2OxczGA3bGNeWe+6DChMTBJemed7ZnvJ"
-        crossorigin="anonymous"></script>
 </head>
 
 <body data-active-tab="projects" data-projects-layout-width="wide">
@@ -44,7 +43,7 @@
     <div id="appLoader" class="app-loader" role="status" aria-live="polite" aria-label="Loading">
         <div class="app-loader-content">
             <span class="brand-mark app-loader-mark supplied-logo" aria-hidden="true">
-                <img src="assets/acies-modern-logo.png" alt="" width="1774" height="887" />
+                <img src="assets/acies-modern-logo.png" alt="" width="1110" height="390" />
             </span>
             <div class="app-loader-dots" aria-hidden="true">
                 <span></span>
@@ -57,7 +56,7 @@
         <div class="header-start">
             <div class="brand">
                 <span class="brand-mark supplied-logo" role="img" aria-label="ACIES Engineering">
-                    <img src="assets/acies-modern-logo.png" alt="" width="1774" height="887" />
+                    <img src="assets/acies-modern-logo.png" alt="" width="1110" height="390" />
                 </span>
             </div>
         </div>
@@ -3538,7 +3537,7 @@
     </section>
     <div id="updateCheckIndicator" class="corner-status" hidden>Checking for updates...</div>
     <script src="project-pages-editor/dist/project-pages-editor.js?v=20260918-save-queue-export"></script>
-    <script src="script.js?v=20260923-csp"></script>
+    <script src="script.js?v=20260929-fast-start"></script>
     <script src="industry-projects.js?v=20260909-deliverables"></script>
     <script src="industry-shell.js?v=20260909-modern-dialogs"></script>
     <script src="symbol_counter_ui.js?v=20260818-delete-actions"></script>

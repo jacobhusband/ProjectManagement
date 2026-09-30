@@ -1,5 +1,3 @@
-from google.genai import types
-from google import genai
 import webview
 import json
 import os
@@ -23,7 +21,6 @@ import datetime
 import threading
 import secrets
 import hashlib
-import requests  # Added for GitHub API calls
 import zipfile   # Added for extracting bundles
 import math
 import random
@@ -32,7 +29,7 @@ import base64
 from typing import List
 import importlib
 import uuid
-from contextlib import closing
+from contextlib import closing, contextmanager
 from urllib.parse import parse_qs, urlencode, urlparse, unquote
 
 try:
@@ -101,24 +98,70 @@ def _patch_numpy_aliases():
     return changed
 
 
-_patch_numpy_aliases()
+class _LazyModule:
+    """Stands in for a module that is slow to import and needed by few features.
 
-try:
-    import openpyxl
-except AttributeError as _exc:
-    _msg = str(_exc)
-    if "numpy" in _msg:
+    The real import runs on first attribute access, or earlier through preload(), so
+    it stays off the application startup path. google.genai (~1.6s), openpyxl (~0.7s)
+    and requests (~0.2s) made up most of the time before the window could open.
+    """
+
+    def __init__(self, loader):
+        self._loader = loader
+        self._module = None
+
+    def preload(self):
+        module = self._module
+        if module is None:
+            module = self._module = self._loader()
+        return module
+
+    def __getattr__(self, name):
+        if name in ("_loader", "_module"):
+            raise AttributeError(name)
+        return getattr(self.preload(), name)
+
+
+# Each loader keeps a literal import statement so PyInstaller still bundles the module.
+def _import_genai():
+    from google import genai as module
+    return module
+
+
+def _import_genai_types():
+    from google.genai import types as module
+    return module
+
+
+def _import_requests():
+    import requests as module
+    return module
+
+
+def _import_openpyxl():
+    _patch_numpy_aliases()
+    try:
+        import openpyxl as module
+    except AttributeError as exc:
+        if "numpy" not in str(exc):
+            raise
         _patch_numpy_aliases()
-        for _name in ("openpyxl.compat.numbers", "openpyxl.compat", "openpyxl"):
-            sys.modules.pop(_name, None)
+        for name in ("openpyxl.compat.numbers", "openpyxl.compat", "openpyxl"):
+            sys.modules.pop(name, None)
         importlib.invalidate_caches()
-        import openpyxl
-    else:
-        raise
-from openpyxl.worksheet.copier import WorksheetCopy
+        import openpyxl as module
+    return module
+
+
+genai = _LazyModule(_import_genai)
+types = _LazyModule(_import_genai_types)
+requests = _LazyModule(_import_requests)  # GitHub API calls
+openpyxl = _LazyModule(_import_openpyxl)
+
 from pydantic import BaseModel, Field
 from PIL import Image as PILImage, ImageOps, UnidentifiedImageError
 from lighting_plan import LightingPlanValidationError, analyze_lighting_plan
+import symbol_counter as symbol_counter_module
 from symbol_counter import SymbolCounterError, SymbolCounterService
 
 
@@ -2208,6 +2251,20 @@ def _open_lighting_schedule_db():
     return conn
 
 
+@contextmanager
+def _lighting_schedule_db_scope(conn=None):
+    """Yields the caller's connection, or opens and closes one for the block.
+
+    Opening the schedule database re-runs its schema setup and closing it checkpoints
+    the WAL file, so code that visits every project passes one connection through.
+    """
+    if conn is not None:
+        yield conn
+        return
+    with closing(_open_lighting_schedule_db()) as owned:
+        yield owned
+
+
 def _normalize_lighting_schedule_record(row):
     if row is None:
         return None
@@ -2237,12 +2294,12 @@ def _normalize_lighting_schedule_record(row):
     }
 
 
-def _get_lighting_schedule_record(project_id):
+def _get_lighting_schedule_record(project_id, conn=None):
     resolved_id = _resolve_lighting_schedule_project_id(project_id)
     if not resolved_id:
         return None
 
-    with closing(_open_lighting_schedule_db()) as conn:
+    with _lighting_schedule_db_scope(conn) as conn:
         row = conn.execute(
             """
             SELECT project_id, schedule_json, target_dwg_path, table_handle, version,
@@ -2657,11 +2714,11 @@ def _export_lighting_plan_instructions(project_id, output_path=None):
     }
 
 
-def _migrate_project_lighting_schedules(projects):
+def _migrate_project_lighting_schedules(projects, conn=None):
     if not isinstance(projects, list) or not projects:
         return
 
-    with closing(_open_lighting_schedule_db()) as conn:
+    with _lighting_schedule_db_scope(conn) as conn:
         for project in projects:
             if not isinstance(project, dict):
                 continue
@@ -2721,33 +2778,36 @@ def _overlay_projects_with_lighting_schedule_records(projects):
     if not isinstance(projects, list):
         return projects
 
-    _migrate_project_lighting_schedules(projects)
-    for project in projects:
-        if not isinstance(project, dict):
-            continue
+    # One connection for every project: opening one per project took ~1.6s for 194
+    # projects, and this runs each time the app loads or edits tasks.json.
+    with closing(_open_lighting_schedule_db()) as conn:
+        _migrate_project_lighting_schedules(projects, conn)
+        for project in projects:
+            if not isinstance(project, dict):
+                continue
 
-        project_id = _resolve_lighting_schedule_project_id(project)
-        if not project_id:
-            continue
+            project_id = _resolve_lighting_schedule_project_id(project)
+            if not project_id:
+                continue
 
-        record = _get_lighting_schedule_record(project_id)
-        if not record:
-            continue
+            record = _get_lighting_schedule_record(project_id, conn)
+            if not record:
+                continue
 
-        existing_schedule = _normalize_lighting_schedule_payload(
-            project.get("lightingSchedule")
-        )
-        project["lightingSchedule"] = {
-            **existing_schedule,
-            "rows": record["schedule"]["rows"],
-            "generalNotes": record["schedule"]["generalNotes"],
-            "notes": record["schedule"]["notes"],
-            "targetDwgPath": record["targetDwgPath"],
-            "_storeVersion": record["version"],
-            "_storeUpdatedAtUtc": record["updatedAtUtc"],
-            "_storeUpdatedBy": record["updatedBy"],
-            "_tableHandle": record["tableHandle"],
-        }
+            existing_schedule = _normalize_lighting_schedule_payload(
+                project.get("lightingSchedule")
+            )
+            project["lightingSchedule"] = {
+                **existing_schedule,
+                "rows": record["schedule"]["rows"],
+                "generalNotes": record["schedule"]["generalNotes"],
+                "notes": record["schedule"]["notes"],
+                "targetDwgPath": record["targetDwgPath"],
+                "_storeVersion": record["version"],
+                "_storeUpdatedAtUtc": record["updatedAtUtc"],
+                "_storeUpdatedBy": record["updatedBy"],
+                "_tableHandle": record["tableHandle"],
+            }
     return projects
 
 
@@ -3448,6 +3508,8 @@ def cb_ensure_template_sheet(wb):
         return
     if not CB_TEMPLATE_PATH.exists():
         raise ValueError("Panel schedule template not found.")
+    from openpyxl.worksheet.copier import WorksheetCopy
+
     template_wb = openpyxl.load_workbook(CB_TEMPLATE_PATH)
     try:
         source = template_wb["TEMPLATE"] if "TEMPLATE" in template_wb.sheetnames else template_wb.active
@@ -4826,11 +4888,16 @@ class Api:
             raise RuntimeError("Google sign-in completed without an email address.")
         return payload
 
-    def get_google_auth_state(self):
+    def get_google_auth_state(self, refresh=True):
+        """Returns who is signed in, renewing an expiring token first unless refresh is False.
+
+        Renewing is a network round trip, so startup reads the stored record with
+        refresh=False and renews afterwards.
+        """
         try:
-            auth_record = self._refresh_google_auth_record_if_needed(
-                self._load_google_auth_record()
-            )
+            auth_record = self._load_google_auth_record()
+            if refresh:
+                auth_record = self._refresh_google_auth_record_if_needed(auth_record)
             return {
                 "status": "success",
                 "auth": self._sanitize_google_auth_record(auth_record),
@@ -19446,13 +19513,47 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
         return new_projects
 
 
-# --- Main Application Setup ---
-if __name__ == '__main__':
+def _preload_slow_modules(stop_event, delay_seconds=2.0):
+    """Imports the lazily loaded libraries once the window has had time to appear.
+
+    Startup no longer waits for them, but without this the first AI request, Excel
+    export or symbol count would pay their combined import time (~2.5s) on demand.
+    """
+    if stop_event.wait(delay_seconds):
+        return
+    loaders = (
+        ("google.genai", genai.preload),
+        ("google.genai.types", types.preload),
+        ("requests", requests.preload),
+        ("openpyxl", openpyxl.preload),
+        ("symbol counter dependencies", symbol_counter_module.preload_dependencies),
+    )
+    started = time.monotonic()
+    for name, load in loaders:
+        if stop_event.is_set():
+            return
+        try:
+            load()
+        except Exception as exc:
+            logging.warning("Could not preload %s: %s", name, exc)
+    logging.info("Preloaded slow modules in %.2fs", time.monotonic() - started)
+
+
+def run():
+    """Opens the desktop window and blocks until it is closed."""
+    # Module-level helpers read these, so keep them as module globals.
+    global api, window
     _configure_file_logging()
     logging.info(f"Starting ACIES Scheduler {APP_VERSION}")
     # Ensure current working directory is set to ProjectManagement folder so relative paths (styles.css, script.js, assets) resolve properly
     os.chdir(str(BASE_DIR))
     api = Api()
+    threading.Thread(
+        target=_preload_slow_modules,
+        args=(api._application_closing,),
+        name='preload-slow-modules',
+        daemon=True,
+    ).start()
     index_html_path = str(BASE_DIR / 'index.html')
     window = webview.create_window(
         'ACIES Desktop Application',
@@ -19496,3 +19597,8 @@ if __name__ == '__main__':
         )
         logging.shutdown()
         os._exit(0)
+
+
+# --- Main Application Setup ---
+if __name__ == '__main__':
+    run()

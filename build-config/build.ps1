@@ -213,6 +213,7 @@ try {
         (Join-Path $bundleInternal "script.js"),
         (Join-Path $bundleInternal "symbol_counter.css"),
         (Join-Path $bundleInternal "symbol_counter_ui.js"),
+        (Join-Path $bundleInternal "vendor\chart.umd.min.js"),
         (Join-Path $bundleInternal "CircuitBreakerAI\ElectricalPanels\Template.xlsx"),
         (Join-Path $bundleInternal "WireSizerApplication\dist\index.html"),
         (Join-Path $bundleInternal "project-pages-editor\dist\project-pages-editor.js"),
