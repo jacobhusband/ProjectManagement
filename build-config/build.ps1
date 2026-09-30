@@ -129,6 +129,12 @@ try {
     Assert-PathExists -Path $requirementsPath -Message "requirements.txt not found at $requirementsPath."
     Assert-PathExists -Path $pyInstallerSpecPath -Message "PyInstaller spec not found at $pyInstallerSpecPath."
     Assert-PathExists -Path $envPath -Message "Required build configuration file not found at $envPath. Copy .env.example to .env, fill in the required values, and rebuild."
+    # PyInstaller copies .env into the installer, and the installer is published publicly, so
+    # anyone can read it. The release workflow leaves the Gemini key out; a local .env used for
+    # running from source usually has one, so say so before it ends up in a build.
+    if ((Get-Content -Raw -LiteralPath $envPath) -match '(?m)^\s*GOOGLE_API_KEY\s*=\s*["'']?[^"''\s]') {
+        Write-Warning ".env contains GOOGLE_API_KEY, so it will be bundled into this build. Do not publish or share this installer; the release workflow builds without it."
+    }
     Write-Host "Using Python: $venvPython" -ForegroundColor Gray
     Write-Host "Using PyInstaller spec: $pyInstallerSpecPath" -ForegroundColor Gray
     Ensure-HeifBuildDependencies -PythonPath $venvPython -RequirementsPath $requirementsPath

@@ -62,16 +62,18 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
 
+      # The installer is published on a public release, so anyone can unpack it and read
+      # this file. It therefore carries only the Google sign-in client, whose secret
+      # Google does not treat as confidential for desktop apps. It must never carry a
+      # Gemini API key: each user enters their own in the app (onboarding or Settings).
       - name: Create release .env
         shell: pwsh
         env:
-          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_OAUTH_CLIENT_ID: ${{ vars.GOOGLE_OAUTH_CLIENT_ID }}
         run: |
           $envFile = Join-Path $PWD ".env"
           $entries = [ordered]@{
-            GOOGLE_API_KEY = [string]$env:GOOGLE_API_KEY
             GOOGLE_OAUTH_CLIENT_ID = [string]$env:GOOGLE_OAUTH_CLIENT_ID
             GOOGLE_CLIENT_SECRET = [string]$env:GOOGLE_CLIENT_SECRET
           }
@@ -93,10 +95,26 @@ jobs:
           name: acies-scheduler-setup
           path: dist/setup/acies-scheduler-setup.exe
 
+      # GitHub's generated notes only list merged pull requests, so a release made from
+      # direct commits would have almost none. Write release-notes/<tag>.md (for example
+      # release-notes/v2.1.0.md) before tagging and it becomes the top of the release
+      # page, with the generated notes below it.
+      - name: Find release notes
+        id: notes
+        shell: pwsh
+        run: |
+          $path = "release-notes/$env:GITHUB_REF_NAME.md"
+          if (Test-Path -LiteralPath $path) {
+            "path=$path" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          } else {
+            Write-Host "::warning title=No release notes::$path was not found, so this release only has the generated notes."
+          }
+
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/setup/acies-scheduler-setup.exe
+          body_path: ${{ steps.notes.outputs.path }}
           generate_release_notes: true
           name: ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
