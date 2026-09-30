@@ -6,6 +6,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_JS_PATH = REPO_ROOT / "script.js"
 INDEX_HTML_PATH = REPO_ROOT / "index.html"
 STYLES_CSS_PATH = REPO_ROOT / "styles.css"
+INDUSTRY_JS_PATH = REPO_ROOT / "industry-projects.js"
 
 
 class DeliverableHardDueUiTests(unittest.TestCase):
@@ -39,7 +40,8 @@ class DeliverableHardDueUiTests(unittest.TestCase):
         script = SCRIPT_JS_PATH.read_text(encoding="utf-8")
 
         for expected in (
-            "function getEffectiveDueStr(deliverable) {",
+            "function getActiveDueField(deliverable, now = new Date()) {",
+            "function getEffectiveDueStr(deliverable, now = new Date()) {",
             "function getHardDueStr(deliverable) {",
             "function deliverableDueState(deliverable) {",
             "function isDeliverableHardDueMissed(deliverable) {",
@@ -57,14 +59,29 @@ class DeliverableHardDueUiTests(unittest.TestCase):
         self.assertIn("!isFinished(deliverable)", state_block)
         self.assertIn("return dueState(getEffectiveDueStr(deliverable));", state_block)
 
+        active_block = self._block(
+            script,
+            "function getActiveDueField(",
+            "function isEarlierDay(",
+        )
+        # Soft date shows until it passes, then the hard date takes over; a soft
+        # date that is not before the hard date never shows.
+        self.assertIn('if (!soft) return hard ? "hardDue" : "";', active_block)
+        self.assertIn('if (!hard) return "due";', active_block)
+        self.assertIn(
+            'if (!softDate || !isEarlierDay(softDate, hardDate)) return "hardDue";',
+            active_block,
+        )
+        self.assertIn(
+            'return isEarlierDay(softDate, now) ? "hardDue" : "due";', active_block
+        )
+
         effective_block = self._block(
             script,
             "function getEffectiveDueStr(",
             "function getHardDueStr(",
         )
-        # Internal date wins, hard date is the fallback.
-        self.assertIn('String(deliverable?.due || "").trim()', effective_block)
-        self.assertIn('String(deliverable?.hardDue || "").trim()', effective_block)
+        self.assertIn("getActiveDueField(deliverable, now)", effective_block)
 
     def test_scheduling_logic_uses_effective_due_date(self):
         script = SCRIPT_JS_PATH.read_text(encoding="utf-8")
@@ -111,7 +128,7 @@ class DeliverableHardDueUiTests(unittest.TestCase):
         )
         self.assertIn("if (!hardUrgent) {", pin_block)
 
-    def test_deliverable_card_renders_a_separate_hard_badge(self):
+    def test_deliverable_card_renders_one_tagged_due_badge(self):
         script = SCRIPT_JS_PATH.read_text(encoding="utf-8")
 
         self.assertIn("function createDeliverableDueBadges(deliverable, project) {", script)
@@ -120,30 +137,75 @@ class DeliverableHardDueUiTests(unittest.TestCase):
             "function createDeliverableDueBadges(",
             "function createExpandToggle(",
         )
-        self.assertIn('field: "due",', badges_block)
-        self.assertIn('field: "hardDue",', badges_block)
-        self.assertIn('stateClass: missed ? "hard critical" : "hard",', badges_block)
-        self.assertIn("const hardDue = getHardDueStr(deliverable);", badges_block)
-        self.assertIn("Past hard deadline", badges_block)
+        self.assertIn("const field = getActiveDueField(deliverable);", badges_block)
+        self.assertIn("if (!field) return [];", badges_block)
+        self.assertNotIn('field: "hardDue",', badges_block)
 
-    def test_badge_calendar_writes_to_the_field_it_was_opened_from(self):
+        state_block = self._block(
+            script,
+            "function getDueBadgeStateClass(",
+            "function createDeliverableDueBadge(",
+        )
+        self.assertIn(
+            'return isDeliverableHardDueMissed(deliverable) ? "hard critical" : "hard";',
+            state_block,
+        )
+
+        badge_block = self._block(
+            script,
+            "function createDeliverableDueBadge(",
+            "function createDeliverableDueBadges(",
+        )
+        # The Soft / Hard tag is what tells the user which date is showing.
+        self.assertIn(
+            "badge.append(createDueKindTag(field), document.createTextNode(text));",
+            badge_block,
+        )
+        self.assertIn("describeDeliverableDue(deliverable)", badge_block)
+        self.assertIn(
+            'const DUE_FIELD_LABELS = Object.freeze({ due: "Soft", hardDue: "Hard" });',
+            script,
+        )
+
+    def test_badge_calendar_can_set_either_date(self):
         script = SCRIPT_JS_PATH.read_text(encoding="utf-8")
         calendar_block = self._block(
             script,
             "function showCalendarForDeliverableBadge(",
             "function renderInlineCalendar(",
         )
-        self.assertIn('field = "due"', calendar_block)
-        self.assertIn("deliverable[field] = formatDueDateShort(selectedDate);", calendar_block)
-        self.assertNotIn("deliverable.due = formatDueDateShort(", calendar_block)
+        # Opens on the shown date, with a Soft / Hard switch and a Clear button.
+        self.assertIn(
+            'let activeField = field || getActiveDueField(deliverable) || "due";',
+            calendar_block,
+        )
+        self.assertIn("className: 'calendar-due-kind-switch',", calendar_block)
+        self.assertIn('["due", "hardDue"].forEach((key) => {', calendar_block)
+        self.assertIn('clearBtn.onclick = () => commit("");', calendar_block)
+        # Every write goes through the soft-before-hard guard.
+        self.assertIn(
+            "if (!applyDeliverableDueDate(deliverable, activeField, value)) return;",
+            calendar_block,
+        )
+        self.assertNotIn("deliverable[field] = formatDueDateShort(", calendar_block)
+
+        apply_block = self._block(
+            script,
+            "function applyDeliverableDueDate(",
+            "function deliverableDueState(",
+        )
+        self.assertIn('deliverable.due = "";', apply_block)
+        self.assertIn("The soft due date must be before the hard due date", apply_block)
 
     def test_edit_modal_exposes_a_hard_deadline_input(self):
         html = INDEX_HTML_PATH.read_text(encoding="utf-8")
 
-        self.assertIn('<label class="label">Internal Due Date</label>', html)
-        self.assertIn('<label class="label">Hard Deadline</label>', html)
+        self.assertIn('<label class="label">Soft Due Date</label>', html)
+        self.assertIn('<label class="label">Hard Due Date</label>', html)
         self.assertIn('<input class="d-hard-due" placeholder="MM/DD/YYYY" />', html)
-        self.assertIn("Must-finish date. Leave blank if this can be pushed.", html)
+        self.assertIn("Earlier target that can slip. Shows until it passes.", html)
+        self.assertIn("Must-finish date. Shows once the soft date passes.", html)
+        self.assertNotIn("Internal Due Date", html)
 
     def test_modal_populates_validates_and_saves_hard_due(self):
         script = SCRIPT_JS_PATH.read_text(encoding="utf-8")
@@ -174,20 +236,49 @@ class DeliverableHardDueUiTests(unittest.TestCase):
         )
         self.assertIn("hardDue,", read_form_block)
 
-    def test_internal_date_after_hard_deadline_warns_without_blocking(self):
+    def test_soft_date_not_before_hard_date_blocks_the_save(self):
         script = SCRIPT_JS_PATH.read_text(encoding="utf-8")
         order_block = self._block(
             script,
             "function validateDeliverableDateOrder(",
             "function validateAllDueDates(",
         )
-        self.assertIn("if (!due || !hardDue || due <= hardDue) return true;", order_block)
-        self.assertIn("dueInput.classList.add('input-warning');", order_block)
         self.assertIn(
-            "'Warning: Internal date is after the hard deadline'", order_block
+            "if (!due || !hardDue || isEarlierDay(due, hardDue)) return true;",
+            order_block,
         )
-        # Warning only - never blocks the save.
-        self.assertNotIn("return false;", order_block)
+        self.assertIn("dueInput.classList.add('input-error');", order_block)
+        self.assertIn("'Soft due date must be before the hard due date'", order_block)
+        self.assertIn("return false;", order_block)
+
+        validate_all_block = self._block(
+            script,
+            "function validateAllDueDates(",
+            "function showCalendarForInput(",
+        )
+        self.assertIn("if (!validateDeliverableDateOrder(card)) {", validate_all_block)
+
+    def test_modal_hides_a_soft_date_on_the_same_day_as_the_hard_date(self):
+        script = SCRIPT_JS_PATH.read_text(encoding="utf-8")
+        self.assertIn(
+            'card.querySelector(".d-due").value = redundantSoft ? "" : deliverable.due || "";',
+            script,
+        )
+
+    def test_register_shows_one_due_column(self):
+        html = INDEX_HTML_PATH.read_text(encoding="utf-8")
+        industry = INDUSTRY_JS_PATH.read_text(encoding="utf-8")
+
+        self.assertIn('<th class="reg-th">Due</th>', html)
+        self.assertNotIn('<th class="reg-th">Internal</th>', html)
+        self.assertNotIn('<th class="reg-th">External</th>', html)
+
+        self.assertIn(
+            "function createRegisterDueField(deliverable, project, state) {", industry
+        )
+        self.assertIn("return [code, due, statusCol, actions];", industry)
+        self.assertNotIn('"Internal"', industry)
+        self.assertNotIn('"External"', industry)
 
     def test_hard_and_critical_badge_styles_exist(self):
         css = STYLES_CSS_PATH.read_text(encoding="utf-8")
@@ -196,6 +287,9 @@ class DeliverableHardDueUiTests(unittest.TestCase):
         self.assertIn(".deliverable-due-badge.hard.critical,", css)
         self.assertIn(".deliverable-due-badge.critical {", css)
         self.assertIn(".deliverable-summary-due {", css)
+        self.assertIn(".due-kind--soft {", css)
+        self.assertIn(".due-kind--hard {", css)
+        self.assertIn(".calendar-due-kind-switch {", css)
 
     def test_note_level_due_date_ui_stays_removed(self):
         script = SCRIPT_JS_PATH.read_text(encoding="utf-8")

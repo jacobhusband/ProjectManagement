@@ -4,7 +4,10 @@
 import os
 import shutil
 import sys
-import fitz  # PyMuPDF
+try:
+    import pymupdf as fitz  # PyMuPDF
+except ImportError:  # PyMuPDF older than 1.24.3
+    import fitz
 
 
 def clamp(value, lo, hi):

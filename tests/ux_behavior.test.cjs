@@ -24,7 +24,7 @@ function context(extra = {}) {
     isFinished: (d) => (d.statuses || []).some(s => ['Complete', 'Delivered'].includes(s)),
     ...extra,
   });
-  for (const name of ['parseDueStr', 'getWeekStartDate', 'getEffectiveDueStr', 'getHardDueStr',
+  for (const name of ['parseDueStr', 'getWeekStartDate', 'isEarlierDay', 'getActiveDueField', 'getEffectiveDueStr', 'getHardDueStr',
     'deliverableNeedsAttention', 'filterPanelScheduleProjects', 'toggleProjectAttentionView']) {
     vm.runInContext(extract(name), scope);
   }
@@ -44,13 +44,68 @@ test('attention includes overdue and this-week work, but excludes finished, unda
   }
 });
 
-test('a hard deadline cannot be hidden by a later internal target', () => {
+test('a hard date cannot be hidden by a later soft date', () => {
   const c = context();
   const now = new Date('2026-09-04T12:00:00');
   assert.equal(c.deliverableNeedsAttention({ hardDue: '2026-09-04' }, now), true);
   assert.equal(c.deliverableNeedsAttention({ due: '2026-10-01', hardDue: '2026-09-01' }, now), true);
-  assert.equal(c.deliverableNeedsAttention({ due: '2026-09-01', hardDue: '2026-10-01' }, now), true);
   assert.equal(c.deliverableNeedsAttention({ hardDue: '09/04/26' }, now), true);
+});
+
+test('a missed soft date hands over to the hard date instead of counting as overdue', () => {
+  const c = context();
+  const now = new Date('2026-09-04T12:00:00');
+  assert.equal(c.deliverableNeedsAttention({ due: '2026-09-01', hardDue: '2026-10-01' }, now), false);
+  assert.equal(c.deliverableNeedsAttention({ due: '2026-09-01', hardDue: '2026-09-05' }, now), true);
+  assert.equal(c.deliverableNeedsAttention({ due: '2026-09-01' }, now), true);
+});
+
+test('the soft date shows until it passes, then the hard date', () => {
+  const c = context();
+  const now = new Date('2026-09-04T09:00:00');
+  const cases = [
+    [{}, '', ''],
+    [{ due: '2026-09-10' }, 'due', '2026-09-10'],
+    [{ hardDue: '2026-09-20' }, 'hardDue', '2026-09-20'],
+    [{ due: '2026-09-10', hardDue: '2026-09-20' }, 'due', '2026-09-10'],
+    // The soft date's own day still shows it; the day after hands over.
+    [{ due: '09/04/26', hardDue: '2026-09-20' }, 'due', '09/04/26'],
+    [{ due: '2026-09-03', hardDue: '2026-09-20' }, 'hardDue', '2026-09-20'],
+    // A passed soft date with no hard date keeps showing (as overdue).
+    [{ due: '2026-09-01' }, 'due', '2026-09-01'],
+    // A soft date on or after the hard date is ignored.
+    [{ due: '2026-09-20', hardDue: '2026-09-20' }, 'hardDue', '2026-09-20'],
+    [{ due: '2026-09-25', hardDue: '2026-09-20' }, 'hardDue', '2026-09-20'],
+    // An unreadable date never beats a readable one.
+    [{ due: 'soon', hardDue: '2026-09-20' }, 'hardDue', '2026-09-20'],
+    [{ due: '2026-09-10', hardDue: 'tbd' }, 'due', '2026-09-10'],
+  ];
+  for (const [deliverable, field, value] of cases) {
+    const label = JSON.stringify(deliverable);
+    assert.equal(c.getActiveDueField(deliverable, now), field, label);
+    assert.equal(c.getEffectiveDueStr(deliverable, now), value, label);
+  }
+});
+
+test('writing a date keeps the soft date before the hard date', () => {
+  const toasts = [];
+  const c = context({ toast: (message) => toasts.push(message), humanDate: (s) => s });
+  vm.runInContext(extract('applyDeliverableDueDate'), c);
+
+  const deliverable = { due: '09/10/2026', hardDue: '09/20/2026' };
+  assert.equal(c.applyDeliverableDueDate(deliverable, 'due', '09/20/2026'), false);
+  assert.equal(deliverable.due, '09/10/2026');
+  assert.equal(c.applyDeliverableDueDate(deliverable, 'due', '09/15/2026'), true);
+  assert.equal(deliverable.due, '09/15/2026');
+
+  // Moving the hard date onto or before the soft date clears the soft date.
+  assert.equal(c.applyDeliverableDueDate(deliverable, 'hardDue', '09/15/2026'), true);
+  assert.deepEqual({ ...deliverable }, { due: '', hardDue: '09/15/2026' });
+
+  // Clearing always works.
+  assert.equal(c.applyDeliverableDueDate(deliverable, 'hardDue', ''), true);
+  assert.equal(deliverable.hardDue, '');
+  assert.equal(toasts.length, 2);
 });
 
 test('attention follows the local week across a year boundary', () => {

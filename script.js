@@ -305,8 +305,38 @@ const activityTrayState = {
   hasAutoExpanded: false,
   initialized: false,
   timingTimerId: null,
-  nextQueueSequence: 1,
-  launchingQueuedActivityId: "",
+};
+// Activities for the same project take turns so two tools never work on its files
+// at once, while different projects run side by side. Each project is a lane; so is
+// each tool below, because it keeps its working files in one fixed place and a
+// second run would overwrite the first run's files.
+const activityLaneState = {
+  holders: new Map(),
+  waiting: [],
+  granting: false,
+  grantAgain: false,
+};
+const ACTIVITY_SINGLE_RUN_TOOL_IDS = new Map([
+  ["toolManageLayers", "toolManageLayers"],
+  ["toolCleanXrefs", "toolCleanXrefs"],
+  // Workflow steps name the same tools without the "tool" prefix.
+  ["manageLayers", "toolManageLayers"],
+  ["cleanXrefs", "toolCleanXrefs"],
+]);
+const ACTIVITY_HISTORY_LIMIT = 200;
+const ACTIVITY_HISTORY_STATUS_LABELS = Object.freeze({
+  success: "Succeeded",
+  warning: "Finished with warnings",
+  error: "Failed",
+  cancelled: "Cancelled",
+});
+const activityHistoryState = {
+  entries: [],
+  query: "",
+  loaded: false,
+  canSave: false,
+  loadPromise: null,
+  initialized: false,
 };
 const activeToolActivityIds = new Map();
 const activeDwgCompareLaunches = new Set();
@@ -2751,6 +2781,13 @@ function pageHtmlToPlainText(html) {
   if (!html) return "";
   try {
     const doc = new DOMParser().parseFromString(String(html), "text/html");
+    // textContent joins adjacent blocks with no gap ("minimumPrimary"), so
+    // separate paragraphs, list items, cells and line breaks first.
+    doc.body
+      ?.querySelectorAll(
+        "p, div, li, br, h1, h2, h3, h4, h5, h6, blockquote, pre, tr, td, th, dt, dd, hr"
+      )
+      .forEach((node) => node.after(" "));
     return (doc.body?.textContent || "").replace(/\s+/g, " ").trim();
   } catch (_) {
     return "";
@@ -3761,7 +3798,7 @@ function clearTemplateToolRunState(toolId) {
   if (!toolId) return;
   const card = document.getElementById(toolId);
   if (!card) return;
-  card.classList.remove("running");
+  syncToolCardRunning(toolId);
   const statusEl = card.querySelector(".tool-card-status");
   if (statusEl) statusEl.textContent = "";
 }
@@ -4283,7 +4320,13 @@ async function syncLocalProjectManagerProjectPath(
   return true;
 }
 
+// One Work Locally window at a time, because the window keeps a single state; the
+// copies it starts can run side by side for different projects.
+let localProjectManagerChoosing = false;
+
 async function runLocalProjectManager(launchContext = null) {
+  if (localProjectManagerChoosing) return;
+  localProjectManagerChoosing = true;
   const activityId = beginActivity({
     toolId: "toolCopyProjectLocally",
     message: "Preparing Work Locally...",
@@ -4320,6 +4363,7 @@ async function runLocalProjectManager(launchContext = null) {
       preview,
       resolvedLaunchContext
     );
+    localProjectManagerChoosing = false;
     if (!managerResult) {
       acceptActivity(activityId);
       return;
@@ -4332,6 +4376,11 @@ async function runLocalProjectManager(launchContext = null) {
           ""
       ).trim(),
     });
+    const waitForTurn = () =>
+      waitForToolTurn(activityId, "toolCopyProjectLocally", resolvedLaunchContext, [
+        managerResult.serverProjectPath,
+        managerResult.localProjectPath,
+      ]);
 
     if (managerResult.action === "sync") {
       const serverSelectedRelativePaths = Array.isArray(
@@ -4348,6 +4397,7 @@ async function runLocalProjectManager(launchContext = null) {
         acceptActivity(activityId);
         return;
       }
+      if (!(await waitForTurn())) return;
 
       let copyToLocalResult = null;
       let syncResult = null;
@@ -4475,6 +4525,7 @@ async function runLocalProjectManager(launchContext = null) {
       acceptActivity(activityId);
       return;
     }
+    if (!(await waitForTurn())) return;
 
     updateActivity(activityId, {
       message: "Copying selected folders...",
@@ -4535,6 +4586,8 @@ async function runLocalProjectManager(launchContext = null) {
   } catch (e) {
     const message = e?.message || "Failed to run Work Locally.";
     failActivity(activityId, { message });
+  } finally {
+    localProjectManagerChoosing = false;
   }
 }
 
@@ -4596,8 +4649,6 @@ async function handleTemplateToolSave(templateKey, label, options = {}) {
   const toolId = String(
     options?.toolId || getTemplateToolIdForKey(templateKey)
   ).trim();
-  const card = toolId ? document.getElementById(toolId) : null;
-  if (card?.classList.contains("running")) return;
   const activityId = beginActivity({
     activityId: createActivityId(toolId || `template_${templateKey}`),
     toolId,
@@ -4607,9 +4658,6 @@ async function handleTemplateToolSave(templateKey, label, options = {}) {
     rerunLaunchContext: launchContext,
     rerunDefaultPath: getLaunchContextProjectRoot(launchContext),
   });
-  if (card) {
-    card.classList.add("running");
-  }
 
   try {
     updateActivity(activityId, {
@@ -4666,6 +4714,10 @@ async function handleTemplateToolSave(templateKey, label, options = {}) {
   updateActivity(activityId, {
     rerunDefaultPath: String(selection.path || "").trim(),
   });
+  if (!(await waitForToolTurn(activityId, toolId, launchContext, [selection.path]))) {
+    clearTemplateToolRunState(toolId);
+    return;
+  }
 
   const templateOptions = { templateKey };
 
@@ -4802,9 +4854,11 @@ function createTimesheetRow(entry, index) {
   const nameInput = el("input", {
     value: entry.projectName || "",
     placeholder: "--",
+    title: entry.projectName || "",
   });
   nameInput.oninput = (e) => {
     entry.projectName = e.target.value;
+    nameInput.title = e.target.value;
     saveTimesheets();
   };
   nameCell.appendChild(nameInput);
@@ -4838,13 +4892,15 @@ function createTimesheetRow(entry, index) {
   row.appendChild(pmCell);
 
   // Service Description (auto-filled from deliverable, editable)
-  const descCell = el("td");
+  const descCell = el("td", { className: "ts-desc-col" });
   const descInput = el("input", {
     value: entry.serviceDescription || entry.deliverableName || "",
     placeholder: "Description",
+    title: entry.serviceDescription || entry.deliverableName || "",
   });
   descInput.oninput = (e) => {
     entry.serviceDescription = e.target.value;
+    descInput.title = e.target.value;
     saveTimesheets();
   };
   descCell.appendChild(descInput);
@@ -7188,20 +7244,91 @@ function dueState(dueStr) {
   return "ok";
 }
 
-// The date that drives scheduling. The internal date wins; a deliverable that only
-// has a hard deadline falls back to it so it still sorts, filters, and shows up in
-// the week view instead of silently dropping out of every dated list.
-function getEffectiveDueStr(deliverable) {
-  const internal = String(deliverable?.due || "").trim();
-  return internal || String(deliverable?.hardDue || "").trim();
+// A deliverable stores two dates but shows one. `due` is the soft due date (an
+// earlier target that can slip) and `hardDue` is the hard due date (must finish).
+// The soft date shows until it passes, then the hard date takes over. A soft date
+// on or after the hard date adds nothing, so the hard date wins outright.
+// Returns "due" | "hardDue" | "".
+function getActiveDueField(deliverable, now = new Date()) {
+  const soft = String(deliverable?.due || "").trim();
+  const hard = getHardDueStr(deliverable);
+  if (!soft) return hard ? "hardDue" : "";
+  if (!hard) return "due";
+  const hardDate = parseDueStr(hard);
+  if (!hardDate) return "due";
+  const softDate = parseDueStr(soft);
+  if (!softDate || !isEarlierDay(softDate, hardDate)) return "hardDue";
+  return isEarlierDay(softDate, now) ? "hardDue" : "due";
+}
+
+function isEarlierDay(a, b) {
+  const left = new Date(a);
+  const right = new Date(b);
+  left.setHours(0, 0, 0, 0);
+  right.setHours(0, 0, 0, 0);
+  return left < right;
+}
+
+// The date that drives scheduling — the same single date every surface shows — so
+// sorting, filters and the week view follow the soft → hard hand-off.
+function getEffectiveDueStr(deliverable, now = new Date()) {
+  const field = getActiveDueField(deliverable, now);
+  return field ? String(deliverable[field] || "").trim() : "";
 }
 
 function getHardDueStr(deliverable) {
   return String(deliverable?.hardDue || "").trim();
 }
 
-// "critical" | "overdue" | "dueSoon" | "ok" — a missed hard deadline outranks a
-// slipped internal target.
+const DUE_FIELD_LABELS = Object.freeze({ due: "Soft", hardDue: "Hard" });
+
+// Tooltip copy for the single shown date, naming the date that is hidden.
+function describeDeliverableDue(deliverable, now = new Date()) {
+  const field = getActiveDueField(deliverable, now);
+  if (!field) return "No due date set.";
+  const show = (value) => humanDate(value) || value;
+  const soft = String(deliverable?.due || "").trim();
+  const hard = getHardDueStr(deliverable);
+  if (field === "due") {
+    return hard
+      ? `Soft due date ${show(soft)}. Hard due date ${show(hard)} shows once it passes.`
+      : `Soft due date ${show(soft)}.`;
+  }
+  if (!soft) return `Hard due date ${show(hard)}.`;
+  const softDate = parseDueStr(soft);
+  const hardDate = parseDueStr(hard);
+  return softDate && hardDate && isEarlierDay(softDate, hardDate)
+    ? `Hard due date ${show(hard)}. Soft due date ${show(soft)} has passed.`
+    : `Hard due date ${show(hard)}. Soft due date ${show(soft)} is not before it, so it is ignored.`;
+}
+
+// Writes one of the two dates, keeping the soft date before the hard date. A soft
+// date on or after the hard date is refused; a hard date that lands on or before
+// the soft date clears the soft date. Returns false when nothing was written.
+function applyDeliverableDueDate(deliverable, field, value) {
+  const next = String(value || "").trim();
+  const nextDate = parseDueStr(next);
+  if (field === "hardDue") {
+    deliverable.hardDue = next;
+    const softDate = parseDueStr(String(deliverable.due || "").trim());
+    if (nextDate && softDate && !isEarlierDay(softDate, nextDate)) {
+      deliverable.due = "";
+      toast("Soft due date cleared — it was not before the new hard due date.");
+    }
+    return true;
+  }
+  const hard = getHardDueStr(deliverable);
+  const hardDate = parseDueStr(hard);
+  if (nextDate && hardDate && !isEarlierDay(nextDate, hardDate)) {
+    toast(`The soft due date must be before the hard due date (${humanDate(hard)}).`);
+    return false;
+  }
+  deliverable.due = next;
+  return true;
+}
+
+// "critical" | "overdue" | "dueSoon" | "ok" — a missed hard due date outranks a
+// missed soft-only date.
 function deliverableDueState(deliverable) {
   const hard = parseDueStr(getHardDueStr(deliverable));
   if (hard && !isFinished(deliverable)) {
@@ -7320,8 +7447,8 @@ function validateDueDateInput(inputElement) {
   return true;
 }
 
-// Non-blocking nudge when the internal target sits after the hard deadline —
-// still a legal state, just almost certainly a mistake.
+// The soft date only means something while it comes before the hard date, so a
+// soft date on or after the hard date blocks the save.
 function validateDeliverableDateOrder(card) {
   if (!card) return true;
   const dueInput = card.querySelector('.d-due');
@@ -7330,18 +7457,19 @@ function validateDeliverableDateOrder(card) {
 
   const due = parseDueStr(dueInput.value.trim());
   const hardDue = parseDueStr(hardDueInput.value.trim());
-  if (!due || !hardDue || due <= hardDue) return true;
+  if (!due || !hardDue || isEarlierDay(due, hardDue)) return true;
 
-  // Leave hard errors from validateDueDateInput in place.
-  if (dueInput.classList.contains('input-error')) return true;
+  // Leave format errors from validateDueDateInput in place.
+  if (dueInput.classList.contains('input-error')) return false;
 
-  dueInput.classList.add('input-warning');
+  dueInput.classList.remove('input-warning');
+  dueInput.classList.add('input-error');
   const validationMsg = dueInput.parentElement.querySelector('.date-validation-msg');
   if (validationMsg) {
-    validationMsg.textContent = 'Warning: Internal date is after the hard deadline';
-    validationMsg.className = 'date-validation-msg warning';
+    validationMsg.textContent = 'Soft due date must be before the hard due date';
+    validationMsg.className = 'date-validation-msg error';
   }
-  return true;
+  return false;
 }
 
 function validateAllDueDates() {
@@ -7350,6 +7478,12 @@ function validateAllDueDates() {
 
   inputs.forEach(input => {
     if (!validateDueDateInput(input)) {
+      allValid = false;
+    }
+  });
+
+  document.querySelectorAll('.deliverable-card').forEach(card => {
+    if (!validateDeliverableDateOrder(card)) {
       allValid = false;
     }
   });
@@ -7565,17 +7699,21 @@ function showCalendarForInput(inputElement, onSelectCallback) {
   }, 100);
 }
 
+// Opens on the date the deliverable is showing; the Soft / Hard switch picks which
+// of its two dates the next click (or Clear) writes.
 function showCalendarForDeliverableBadge(
   anchorElement,
   deliverable,
   project,
-  field = "due"
+  field = ""
 ) {
   if (!anchorElement || !deliverable) return;
 
   // Remove any existing calendar
   const existingCalendar = document.getElementById('inlineCalendarPicker');
   if (existingCalendar) existingCalendar.remove();
+
+  let activeField = field || getActiveDueField(deliverable) || "due";
 
   // Always open to the current month/day.
   const openDate = new Date();
@@ -7586,20 +7724,64 @@ function showCalendarForDeliverableBadge(
     id: 'inlineCalendarPicker'
   });
 
+  const commit = async (value) => {
+    if (!applyDeliverableDueDate(deliverable, activeField, value)) return;
+    await save();
+    render();
+    calendarContainer.remove();
+  };
+
   // Render calendar
   const calendar = renderInlineCalendar(
     openDate.getFullYear(),
     openDate.getMonth(),
-    async (selectedDate) => {
-      deliverable[field] = formatDueDateShort(selectedDate);
-      await save();
-      render();
-      calendarContainer.remove();
-    },
+    (selectedDate) => commit(formatDueDateShort(selectedDate)),
     () => {
       calendarContainer.remove();
     }
   );
+
+  const switcher = el('div', {
+    className: 'calendar-due-kind-switch',
+    role: 'group',
+    'aria-label': 'Which due date to set',
+  });
+  const clearBtn = el('button', {
+    className: 'btn ghost',
+    textContent: 'Clear',
+    type: 'button',
+  });
+  clearBtn.onclick = () => commit("");
+  const syncSwitch = () => {
+    switcher.querySelectorAll('button').forEach((button) => {
+      const isActive = button.dataset.field === activeField;
+      button.classList.toggle('is-active', isActive);
+      button.setAttribute('aria-pressed', String(isActive));
+    });
+    const current = String(deliverable[activeField] || "").trim();
+    clearBtn.hidden = !current;
+    clearBtn.title = `Clear the ${DUE_FIELD_LABELS[activeField].toLowerCase()} due date`;
+  };
+  ["due", "hardDue"].forEach((key) => {
+    const value = String(deliverable[key] || "").trim();
+    const button = el('button', {
+      type: 'button',
+      className: `calendar-due-kind calendar-due-kind--${key === "hardDue" ? "hard" : "soft"}`,
+    });
+    button.dataset.field = key;
+    button.append(
+      el('span', { className: 'calendar-due-kind__label', textContent: `${DUE_FIELD_LABELS[key]} due` }),
+      el('span', { className: 'calendar-due-kind__value', textContent: value ? humanDate(value) || value : 'Not set' })
+    );
+    button.onclick = () => {
+      activeField = key;
+      syncSwitch();
+    };
+    switcher.appendChild(button);
+  });
+  syncSwitch();
+  calendar.prepend(switcher);
+  calendar.querySelector('.calendar-footer')?.prepend(clearBtn);
 
   calendarContainer.appendChild(calendar);
 
@@ -8711,8 +8893,8 @@ function toast(msg, duration = 2500) {
     textContent: msg,
     style: `
             position: fixed;
-            bottom: 24px;
-            left: 50%;
+            inset: auto auto 24px 50%;
+            margin: 0;
             transform: translateX(-50%);
             background: var(--surface);
             backdrop-filter: blur(12px);
@@ -8731,6 +8913,11 @@ function toast(msg, duration = 2500) {
   });
 
   document.body.append(t);
+  // As a popover the message joins the top layer, so it shows above an open modal dialog.
+  if (typeof t.showPopover === "function") {
+    t.popover = "manual";
+    t.showPopover();
+  }
   setTimeout(() => {
     t.style.opacity = "0";
     t.style.transform = "translateX(-50%) translateY(10px)";
@@ -8849,7 +9036,7 @@ function updateActivityTimingDurations(now = Date.now()) {
     const isTerminal = isTerminalActivityStatus(activity.status);
     const isQueued = isQueuedActivityStatus(activity.status);
     if (isQueued) {
-      node.textContent = "Waiting for earlier activities";
+      node.textContent = "Waiting to start";
       return;
     }
     const endedAt = isTerminal
@@ -9016,15 +9203,9 @@ function canRerunActivity(activity) {
   return isRerunnableToolId(activity.toolId);
 }
 
-function canQueueActivity(activity) {
-  return canRerunActivity(activity) && Boolean(getActivityRerunLaunchContext(activity));
-}
-
 function canCancelActivity(activity) {
   if (!activity || isTerminalActivityStatus(activity.status)) return false;
-  if (isQueuedActivityStatus(activity.status)) {
-    return activity.id !== activityTrayState.launchingQueuedActivityId;
-  }
+  if (isQueuedActivityStatus(activity.status)) return true;
   return (
     isRunningActivityStatus(activity.status) &&
     ACTIVITY_CANCELLABLE_TOOL_IDS.has(String(activity.toolId || "").trim()) &&
@@ -9032,82 +9213,136 @@ function canCancelActivity(activity) {
   );
 }
 
-function getQueuedActivities() {
-  return activityTrayState.items
-    .filter((item) => isQueuedActivityStatus(item?.status))
-    .sort(
-      (left, right) =>
-        Number(left?.queueSequence || 0) - Number(right?.queueSequence || 0)
-    );
+// A project is identified by its number wherever its folder lives, so the server
+// copy and a local copy share one lane. Folders without a project number use the
+// folder itself, and a drawing uses the folder it is in.
+function getProjectActivityLane(rawPath) {
+  const path = normalizeWindowsPath(rawPath);
+  if (!path) return "";
+  const projectId = String(
+    findActivityProjectForPath(path)?.id || parseProjectFromPath(path)?.id || ""
+  ).trim();
+  if (projectId) return `project:${projectId.toLowerCase()}`;
+  const folder = /\.dwg$/i.test(path) ? getWindowsPathParent(path) : path;
+  return folder ? `folder:${folder.toLowerCase()}` : "";
 }
 
-function scheduleNextQueuedActivity() {
-  window.setTimeout(() => {
-    void launchNextQueuedActivity();
-  }, 0);
-}
-
-async function launchNextQueuedActivity() {
-  if (activityTrayState.launchingQueuedActivityId) return false;
-  if (activityTrayState.items.some((item) => isRunningActivityStatus(item?.status))) {
-    return false;
-  }
-  const nextActivity = getQueuedActivities()[0];
-  if (!nextActivity) return false;
-
-  const toolId = String(nextActivity.toolId || "").trim();
-  activityTrayState.launchingQueuedActivityId = nextActivity.id;
-  updateActivity(nextActivity.id, {
-    status: ACTIVITY_STATUS.QUEUED,
-    message: "Starting queued activity...",
-    progress: 3,
-    cancelRequested: false,
+// The lanes an activity needs: every project it works in, taken from its launch
+// context and any folders or drawings it was given, plus any single-run tools.
+function getActivityLanes({ toolIds = [], launchContext = null, paths = [] } = {}) {
+  const lanes = new Set();
+  const projectId = String(launchContext?.projectId || "").trim();
+  if (projectId) lanes.add(`project:${projectId.toLowerCase()}`);
+  [
+    getLaunchContextProjectRoot(launchContext),
+    ...(Array.isArray(launchContext?.cadFilePaths) ? launchContext.cadFilePaths : []),
+    ...paths,
+  ].forEach((path) => {
+    const lane = getProjectActivityLane(path);
+    if (lane) lanes.add(lane);
   });
-
-  const didLaunch = launchSharedToolCard(
-    toolId,
-    getActivityRerunLaunchContext(nextActivity)
-  );
-  if (!didLaunch) {
-    activityTrayState.launchingQueuedActivityId = "";
-    completeActivity(nextActivity.id, {
-      status: ACTIVITY_STATUS.WARNING,
-      message: `${nextActivity.label || "Tool"} is unavailable and was skipped.`,
-    });
-    return false;
-  }
-  return true;
+  toolIds.forEach((toolId) => {
+    const singleRunToolId = ACTIVITY_SINGLE_RUN_TOOL_IDS.get(String(toolId || "").trim());
+    if (singleRunToolId) lanes.add(`tool:${singleRunToolId}`);
+  });
+  return [...lanes];
 }
 
-function enqueueActivityRerun(activityId) {
-  const sourceActivity = getActivityById(activityId);
-  if (!canQueueActivity(sourceActivity)) {
-    toast("This activity cannot be queued.");
-    return false;
-  }
-  const queuedId = createActivityId(sourceActivity.toolId || "queued-tool");
-  const queueSequence = activityTrayState.nextQueueSequence++;
-  upsertActivity(
-    {
-      ...sourceActivity,
-      id: queuedId,
-      status: ACTIVITY_STATUS.QUEUED,
-      message: "Queued — waiting for earlier activities.",
-      progress: 0,
-      queueSequence,
-      createdAt: Date.now(),
-      startedAt: 0,
-      endedAt: 0,
-      cancelRequested: false,
-      openFolderPath: "",
-      combinedPdfPath: "",
-      dwgComparePairs: [],
-    },
-    { autoExpandReason: "update" }
+// Resolves true once the activity holds every lane it needs, straight away when they
+// are free, or false if the activity was removed or finished while it waited. Waiting
+// activities get their lanes in the order they asked for them.
+function waitForActivityLanes(activityId, lanes = []) {
+  const keys = [...new Set(lanes.filter(Boolean))];
+  if (!activityId || !keys.length) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    activityLaneState.waiting.push({ activityId, lanes: keys, resolve, message: "" });
+    grantActivityLanes();
+  });
+}
+
+// Call after the tool's own prompts and before it touches any files, so a run that
+// has to wait is ready to go unattended when its turn comes.
+function waitForToolTurn(activityId, toolId, launchContext = null, paths = []) {
+  return waitForActivityLanes(
+    activityId,
+    getActivityLanes({ toolIds: [toolId], launchContext, paths })
   );
-  toast(`${sourceActivity.label || "Tool"} added to the queue.`);
-  scheduleNextQueuedActivity();
-  return true;
+}
+
+function releaseActivityLanes(activityId) {
+  activityLaneState.holders.forEach((holderId, lane) => {
+    if (holderId === activityId) activityLaneState.holders.delete(lane);
+  });
+  if (activityLaneState.waiting.length) grantActivityLanes();
+}
+
+function describeActivityLaneWait(blockerId, lane) {
+  const blocker = getActivityById(blockerId);
+  const title = blocker ? getActivityDisplayTitle(blocker) : "another activity";
+  if (lane.startsWith("tool:")) {
+    return `Waiting for the other ${title} run to finish. ${title} runs one at a time.`;
+  }
+  const projectName = String(blocker?.projectName || "").trim();
+  return `Waiting for ${title} to finish on ${projectName || "this project"}.`;
+}
+
+function grantActivityLanes() {
+  // Granting updates activities, which can finish or remove others and so ask for
+  // another pass; run that pass after this one instead of inside it.
+  if (activityLaneState.granting) {
+    activityLaneState.grantAgain = true;
+    return;
+  }
+  activityLaneState.granting = true;
+  try {
+    do {
+      activityLaneState.grantAgain = false;
+      // Lanes that are held, or promised to an earlier waiter so later ones cannot jump it.
+      const claimed = new Map(activityLaneState.holders);
+      const granted = [];
+      const blocked = [];
+      activityLaneState.waiting.forEach((waiter) => {
+        const activity = getActivityById(waiter.activityId);
+        if (!activity || isTerminalActivityStatus(activity.status)) {
+          waiter.resolve(false);
+          return;
+        }
+        const blockedLane = waiter.lanes.find((lane) => claimed.has(lane));
+        if (blockedLane) {
+          blocked.push({ waiter, blockerId: claimed.get(blockedLane), blockedLane });
+          waiter.lanes.forEach((lane) => {
+            if (!claimed.has(lane)) claimed.set(lane, waiter.activityId);
+          });
+          return;
+        }
+        waiter.lanes.forEach((lane) => {
+          activityLaneState.holders.set(lane, waiter.activityId);
+          claimed.set(lane, waiter.activityId);
+        });
+        granted.push(waiter);
+      });
+      activityLaneState.waiting = blocked.map(({ waiter }) => waiter);
+
+      granted.forEach((waiter) => {
+        if (waiter.message) {
+          updateActivity(waiter.activityId, {
+            status: ACTIVITY_STATUS.RUNNING,
+            message: "Starting...",
+            startedAt: Date.now(),
+          });
+        }
+        waiter.resolve(true);
+      });
+      blocked.forEach(({ waiter, blockerId, blockedLane }) => {
+        const message = describeActivityLaneWait(blockerId, blockedLane);
+        if (message === waiter.message) return;
+        waiter.message = message;
+        updateActivity(waiter.activityId, { status: ACTIVITY_STATUS.QUEUED, message });
+      });
+    } while (activityLaneState.grantAgain);
+  } finally {
+    activityLaneState.granting = false;
+  }
 }
 
 function getActivityById(activityId) {
@@ -9118,6 +9353,18 @@ function setToolCardRunning(toolId, isRunning) {
   const card = document.getElementById(String(toolId || "").trim());
   if (!card) return;
   card.classList.toggle("running", Boolean(isRunning));
+}
+
+// A tool can run for several projects at once, so its card shows running while any run is.
+function syncToolCardRunning(toolId) {
+  const normalizedToolId = String(toolId || "").trim();
+  if (!normalizedToolId) return;
+  setToolCardRunning(
+    normalizedToolId,
+    activityTrayState.items.some(
+      (item) => item.toolId === normalizedToolId && isRunningActivityStatus(item.status)
+    )
+  );
 }
 
 function bindToolActivity(toolId, activityId) {
@@ -9147,7 +9394,7 @@ function sortActivityItems(items = []) {
     const rightRank = rank(right);
     if (leftRank !== rightRank) return leftRank - rightRank;
     if (leftRank === 1) {
-      return Number(left?.queueSequence || 0) - Number(right?.queueSequence || 0);
+      return Number(left?.createdAt || 0) - Number(right?.createdAt || 0);
     }
     return Number(right?.updatedAt || 0) - Number(left?.updatedAt || 0);
   });
@@ -9174,6 +9421,21 @@ function maybeExpandActivityTray(reason = "update") {
   if (reason === "error") {
     toggleActivityTrayCollapsed(false, { force: true });
   }
+}
+
+function getActivityDisplayTitle(activity) {
+  const workflowTitle = String(activity?.workflowTitle || "").trim();
+  return String(activity?.toolId || "").trim() === "toolWorkflow" && workflowTitle
+    ? `Workflow: ${workflowTitle}`
+    : activity?.label || "Activity";
+}
+
+function getActivityStatusIcon(status) {
+  if (status === ACTIVITY_STATUS.QUEUED) return "#";
+  if (status === ACTIVITY_STATUS.SUCCESS) return "✓";
+  if (status === ACTIVITY_STATUS.WARNING) return "!";
+  if ([ACTIVITY_STATUS.ERROR, ACTIVITY_STATUS.CANCELLED].includes(status)) return "×";
+  return "•";
 }
 
 function renderActivityTray() {
@@ -9205,22 +9467,8 @@ function renderActivityTray() {
 
   items.forEach((item) => {
     const status = String(item.status || ACTIVITY_STATUS.RUNNING).trim().toLowerCase();
-    const workflowTitle = String(item.workflowTitle || "").trim();
     const projectName = String(item.projectName || "").trim();
-    const activityTitle =
-      String(item.toolId || "").trim() === "toolWorkflow" && workflowTitle
-        ? `Workflow: ${workflowTitle}`
-        : item.label || "Activity";
-    const iconText =
-      status === ACTIVITY_STATUS.QUEUED
-        ? "#"
-        : status === ACTIVITY_STATUS.SUCCESS
-        ? "✓"
-        : status === ACTIVITY_STATUS.WARNING
-          ? "!"
-          : [ACTIVITY_STATUS.ERROR, ACTIVITY_STATUS.CANCELLED].includes(status)
-            ? "×"
-            : "•";
+    const activityTitle = getActivityDisplayTitle(item);
 
     const card = el("article", {
       className: "activity-card",
@@ -9228,7 +9476,7 @@ function renderActivityTray() {
     });
     const icon = el("div", {
       className: `activity-card-icon ${status}`,
-      textContent: iconText,
+      textContent: getActivityStatusIcon(status),
       title: status,
     });
     const content = el("div", { className: "activity-card-content" });
@@ -9250,15 +9498,12 @@ function renderActivityTray() {
         })
       );
     }
-    const queuedPosition = isQueuedActivityStatus(status)
-      ? getQueuedActivities().findIndex((queued) => queued.id === item.id) + 1
-      : 0;
     header.append(
       titleGroup,
       el("div", {
         className: "activity-card-percent",
-        textContent: queuedPosition
-          ? `Queued #${queuedPosition}`
+        textContent: isQueuedActivityStatus(status)
+          ? "Queued"
           : `${clampActivityProgress(item.progress, 0)}%`,
       })
     );
@@ -9292,7 +9537,7 @@ function renderActivityTray() {
       el("span", {
         className: "activity-card-timing-item activity-card-duration",
         textContent: isQueued
-          ? "Waiting for earlier activities"
+          ? "Waiting to start"
           : `${isTerminal ? "Duration" : "Elapsed"}: ${formatActivityDuration(
               startedAt,
               isTerminal ? endedAt : Date.now()
@@ -9324,18 +9569,20 @@ function renderActivityTray() {
         })
       );
     }
-    if (canQueueActivity(item)) {
+    // A rerun waits for its project, so while this run is going it starts once it ends.
+    if (isRunningActivityStatus(status) && canRerunActivity(item)) {
       actions.appendChild(
         el("button", {
           className: "activity-card-action queue",
           type: "button",
           textContent: "Queue Again",
+          title: "Run this tool again for the same project once this run finishes",
           "data-activity-action": "queue",
           "data-activity-id": item.id,
           onclick: (event) => {
             event.preventDefault();
             event.stopPropagation();
-            enqueueActivityRerun(item.id);
+            void handleActivityTrayRerun(item.id);
           },
         })
       );
@@ -9473,7 +9720,7 @@ function renderActivityTray() {
 }
 
 async function handleActivityTrayOpenFolder(activityId) {
-  const activity = getActivityById(activityId);
+  const activity = getActivityRecordById(activityId);
   if (!activity?.openFolderPath) {
     toast("Unable to open folder.");
     return false;
@@ -9495,7 +9742,7 @@ async function handleActivityTrayOpenFolder(activityId) {
 }
 
 async function handleActivityTrayDwgCompare(activityId, pairIndex = 0) {
-  const activity = getActivityById(activityId);
+  const activity = getActivityRecordById(activityId);
   const normalizedIndex = Number(pairIndex) || 0;
   const pair = normalizeDwgComparePairs(activity?.dwgComparePairs)[normalizedIndex];
   if (!pair) {
@@ -9542,7 +9789,7 @@ function handleActivityTrayReviewCanvasPanel(activityId) {
 }
 
 async function handleActivityTrayCopyCombinedPdf(activityId) {
-  const activity = getActivityById(activityId);
+  const activity = getActivityRecordById(activityId);
   if (!activity?.combinedPdfPath) {
     toast("Unable to copy combined PDF.");
     return false;
@@ -9567,7 +9814,7 @@ async function handleActivityTrayCopyCombinedPdf(activityId) {
 }
 
 async function handleActivityTrayOpenCombinedPdf(activityId) {
-  const activity = getActivityById(activityId);
+  const activity = getActivityRecordById(activityId);
   if (!activity?.combinedPdfPath) {
     toast("Unable to open combined PDF.");
     return false;
@@ -9632,18 +9879,14 @@ async function handleActivityTrayCancel(activityId) {
 }
 
 async function handleActivityTrayRerun(activityId) {
-  const activity = getActivityById(activityId);
+  const activity = getActivityRecordById(activityId);
   if (!canRerunActivity(activity)) {
     toast("Unable to rerun this tool.");
     return false;
   }
   const toolId = String(activity.toolId || "").trim();
   const label = getToolActivityLabel(toolId, activity.label || "Tool");
-  const card = document.getElementById(toolId);
-  if (activeToolActivityIds.has(toolId) || card?.classList.contains("running")) {
-    toast(`${label} is already running.`);
-    return false;
-  }
+  // A rerun for a project that is busy waits its turn instead of being refused.
   const launchContext = getActivityRerunLaunchContext(activity);
   const didLaunch = launchSharedToolCard(toolId, launchContext);
   if (!didLaunch) {
@@ -9658,20 +9901,16 @@ function handleActivityTrayAccept(activityId) {
 }
 
 function clearAllActivityNotifications() {
-  activityTrayState.items
-    .filter((item) => isTerminalActivityStatus(item?.status))
-    .forEach((item) => {
-      if (item?.toolId) {
-        const activeId = activeToolActivityIds.get(item.toolId);
-        releaseToolActivity(item.toolId, item.id);
-        if (!activeId || activeId === item.id) {
-          setToolCardRunning(item.toolId, false);
-        }
-      }
-    });
+  const cleared = activityTrayState.items.filter((item) =>
+    isTerminalActivityStatus(item?.status)
+  );
   activityTrayState.items = activityTrayState.items.filter(
     (item) => !isTerminalActivityStatus(item?.status)
   );
+  cleared.forEach((item) => {
+    releaseToolActivity(item.toolId, item.id);
+    syncToolCardRunning(item.toolId);
+  });
   renderActivityTray();
 }
 
@@ -9725,7 +9964,7 @@ function initActivityTray() {
       );
       return;
     }
-    if (action === "rerun") {
+    if (action === "rerun" || action === "queue") {
       await handleActivityTrayRerun(activityId);
     }
   });
@@ -9818,10 +10057,6 @@ function upsertActivity(nextItem, { autoExpandReason = "update" } = {}) {
     cancelRequested: Boolean(
       incoming.cancelRequested ?? existing?.cancelRequested ?? false
     ),
-    queueSequence: Math.max(
-      Number(incoming.queueSequence ?? existing?.queueSequence ?? 0) || 0,
-      0
-    ),
     panelCount: Math.max(
       Number(incoming.panelCount ?? existing?.panelCount ?? 0) || 0,
       0
@@ -9848,19 +10083,26 @@ function upsertActivity(nextItem, { autoExpandReason = "update" } = {}) {
     activityTrayState.items.push(merged);
   }
 
+  // A run removed while it waited for its turn never started, so it has nothing to revisit.
+  if (
+    isTerminalActivityStatus(merged.status) &&
+    !(existing && isQueuedActivityStatus(existing.status))
+  ) {
+    recordActivityHistory(merged);
+  }
+
   if (merged.toolId && isRunningActivityStatus(merged.status)) {
     bindToolActivity(merged.toolId, merged.id);
-    setToolCardRunning(merged.toolId, true);
-  } else if (merged.toolId && isTerminalActivityStatus(merged.status)) {
-    const activeId = activeToolActivityIds.get(merged.toolId);
+  } else {
     releaseToolActivity(merged.toolId, merged.id);
-    if (!activeId || activeId === merged.id) {
-      setToolCardRunning(merged.toolId, false);
-    }
   }
+  syncToolCardRunning(merged.toolId);
 
   renderActivityTray();
   maybeExpandActivityTray(autoExpandReason);
+  if (isTerminalActivityStatus(merged.status)) {
+    releaseActivityLanes(merged.id);
+  }
   return merged;
 }
 
@@ -9884,20 +10126,7 @@ function beginActivity({
   startedAt = 0,
   endedAt = 0,
 } = {}) {
-  const queuedLaunch = getActivityById(activityTrayState.launchingQueuedActivityId);
-  const reuseQueuedActivity = Boolean(
-    !activityId &&
-      queuedLaunch &&
-      (isQueuedActivityStatus(queuedLaunch.status) ||
-        isRunningActivityStatus(queuedLaunch.status)) &&
-      String(queuedLaunch.toolId || "").trim() === String(toolId || "").trim()
-  );
-  const resolvedId = String(
-    activityId || (reuseQueuedActivity ? queuedLaunch.id : createActivityId(toolId || kind))
-  ).trim();
-  if (reuseQueuedActivity) {
-    activityTrayState.launchingQueuedActivityId = "";
-  }
+  const resolvedId = String(activityId || createActivityId(toolId || kind)).trim();
   return upsertActivity(
     {
       id: resolvedId,
@@ -9917,9 +10146,7 @@ function beginActivity({
       workflowTitle,
       canRerun,
       canCancel,
-      queueSequence: reuseQueuedActivity ? queuedLaunch.queueSequence : 0,
-      createdAt: reuseQueuedActivity ? queuedLaunch.createdAt : 0,
-      startedAt: startedAt || (reuseQueuedActivity ? queuedLaunch.startedAt : 0),
+      startedAt,
       endedAt,
     },
     { autoExpandReason: activityTrayState.items.length ? "update" : "first" }
@@ -9950,7 +10177,7 @@ function completeActivity(activityId, patch = {}) {
   const existing = getActivityById(activityId);
   if (!existing) return null;
   const nextStatus = String(patch.status || ACTIVITY_STATUS.SUCCESS).trim().toLowerCase();
-  const completed = upsertActivity(
+  return upsertActivity(
     {
       ...existing,
       ...patch,
@@ -9962,8 +10189,6 @@ function completeActivity(activityId, patch = {}) {
       autoExpandReason: nextStatus === ACTIVITY_STATUS.ERROR ? "error" : "update",
     }
   );
-  scheduleNextQueuedActivity();
-  return completed;
 }
 
 function failActivity(activityId, patch = {}) {
@@ -9977,15 +10202,478 @@ function failActivity(activityId, patch = {}) {
 function acceptActivity(activityId) {
   const existing = getActivityById(activityId);
   if (!existing) return;
-  if (existing.toolId) {
-    const activeId = activeToolActivityIds.get(existing.toolId);
-    releaseToolActivity(existing.toolId, activityId);
-    if (!activeId || activeId === activityId) {
-      setToolCardRunning(existing.toolId, false);
-    }
-  }
+  releaseToolActivity(existing.toolId, activityId);
   activityTrayState.items = activityTrayState.items.filter((item) => item.id !== activityId);
+  syncToolCardRunning(existing.toolId);
   renderActivityTray();
+  releaseActivityLanes(activityId);
+}
+
+// ===================== ACTIVITY HISTORY =====================
+// Finished activities are kept in activity_history.json after they are accepted
+// or cleared from the tray, so their folders, drawings and reruns stay available.
+
+function getActivityRecordById(activityId) {
+  return (
+    getActivityById(activityId) ||
+    activityHistoryState.entries.find((entry) => entry.id === activityId) ||
+    null
+  );
+}
+
+function normalizeActivityHistoryEntry(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const id = String(raw.id || "").trim();
+  const status = String(raw.status || "").trim().toLowerCase();
+  if (!id || !isTerminalActivityStatus(status)) return null;
+  const text = (value) => String(value || "").trim();
+  const endedAt = normalizeActivityTimestamp(
+    raw.endedAt,
+    normalizeActivityTimestamp(raw.updatedAt)
+  );
+  return {
+    id,
+    kind: text(raw.kind) || "tool",
+    toolId: text(raw.toolId),
+    label: text(raw.label) || "Activity",
+    projectName: text(raw.projectName),
+    message: text(raw.message),
+    status,
+    openFolderPath: text(raw.openFolderPath),
+    openFolderLabel: text(raw.openFolderLabel) || "Open Folder",
+    combinedPdfPath: text(raw.combinedPdfPath),
+    dwgComparePairs: normalizeDwgComparePairs(raw.dwgComparePairs),
+    workflowTitle: text(raw.workflowTitle),
+    rerunDefaultPath: text(raw.rerunDefaultPath),
+    rerunLaunchContext: deepCloneJson(raw.rerunLaunchContext, null),
+    canRerun: raw.canRerun !== false,
+    startedAt: normalizeActivityTimestamp(raw.startedAt, endedAt),
+    endedAt,
+  };
+}
+
+// Newest first; when an activity appears more than once, the earlier list wins.
+function mergeActivityHistoryEntries(...lists) {
+  const seen = new Set();
+  const merged = [];
+  lists.flat().forEach((raw) => {
+    const entry = normalizeActivityHistoryEntry(raw);
+    if (!entry || seen.has(entry.id)) return;
+    seen.add(entry.id);
+    merged.push(entry);
+  });
+  return merged
+    .sort((left, right) => right.endedAt - left.endedAt)
+    .slice(0, ACTIVITY_HISTORY_LIMIT);
+}
+
+function recordActivityHistory(activity) {
+  const entry = normalizeActivityHistoryEntry(activity);
+  if (!entry) return;
+  activityHistoryState.entries = mergeActivityHistoryEntries(
+    [entry],
+    activityHistoryState.entries
+  );
+  debouncedSaveActivityHistory();
+  renderActivityHistory();
+}
+
+async function saveActivityHistory() {
+  // Saving before the stored history has loaded, or after it failed to load,
+  // would replace it with only this session's activity.
+  if (!activityHistoryState.canSave || !window.pywebview?.api?.save_activity_history) {
+    return false;
+  }
+  try {
+    const result = await window.pywebview.api.save_activity_history({
+      entries: activityHistoryState.entries,
+    });
+    if (result?.status !== "success") {
+      throw new Error(result?.message || "Could not save activity history.");
+    }
+    return true;
+  } catch (error) {
+    console.warn("Could not save activity history:", error);
+    return false;
+  }
+}
+
+const debouncedSaveActivityHistory = debounce(saveActivityHistory, 500);
+
+function loadActivityHistory() {
+  if (activityHistoryState.loadPromise) return activityHistoryState.loadPromise;
+  activityHistoryState.loadPromise = (async () => {
+    let stored = [];
+    try {
+      const result = await window.pywebview?.api?.get_activity_history?.();
+      if (result?.status !== "success") {
+        throw new Error(result?.message || "Activity history is unavailable.");
+      }
+      stored = Array.isArray(result.entries) ? result.entries : [];
+      activityHistoryState.canSave = true;
+    } catch (error) {
+      console.warn("Activity history will not be saved this session:", error);
+    }
+    const recordedBeforeLoad = activityHistoryState.entries;
+    activityHistoryState.entries = mergeActivityHistoryEntries(recordedBeforeLoad, stored);
+    activityHistoryState.loaded = true;
+    if (recordedBeforeLoad.length) debouncedSaveActivityHistory();
+    renderActivityHistory();
+    return activityHistoryState.entries;
+  })();
+  return activityHistoryState.loadPromise;
+}
+
+function removeActivityHistoryEntry(activityId) {
+  const remaining = activityHistoryState.entries.filter((entry) => entry.id !== activityId);
+  if (remaining.length === activityHistoryState.entries.length) return false;
+  activityHistoryState.entries = remaining;
+  debouncedSaveActivityHistory();
+  renderActivityHistory();
+  return true;
+}
+
+function clearActivityHistory() {
+  if (!activityHistoryState.entries.length) return false;
+  if (!confirm("Clear all activity history? Your files and folders are not changed.")) {
+    return false;
+  }
+  activityHistoryState.entries = [];
+  debouncedSaveActivityHistory();
+  renderActivityHistory();
+  return true;
+}
+
+// The drawings a tool was run on, plus the new side of any old/new comparison.
+function getActivityHistoryDrawingPaths(entry) {
+  const seen = new Set();
+  const paths = [];
+  const cadFilePaths = entry?.rerunLaunchContext?.cadFilePaths;
+  [
+    ...(Array.isArray(cadFilePaths) ? cadFilePaths : []),
+    ...normalizeDwgComparePairs(entry?.dwgComparePairs).map((pair) => pair.newPath),
+  ].forEach((rawPath) => {
+    const path = String(rawPath || "").trim();
+    const key = normalizeWindowsPath(path).toLowerCase();
+    if (!/\.dwg$/i.test(path) || seen.has(key)) return;
+    seen.add(key);
+    paths.push(path);
+  });
+  return paths;
+}
+
+// The project folder, when it is not already the folder the activity opens.
+function getActivityHistoryProjectFolder(entry) {
+  const projectFolder = getLaunchContextProjectRoot(entry?.rerunLaunchContext);
+  if (!projectFolder) return "";
+  const openFolder = normalizeWindowsPath(entry?.openFolderPath).toLowerCase();
+  return normalizeWindowsPath(projectFolder).toLowerCase() === openFolder ? "" : projectFolder;
+}
+
+async function openActivityHistoryPath(rawPath, failureMessage) {
+  const path = String(rawPath || "").trim();
+  if (!path) {
+    toast(failureMessage);
+    return false;
+  }
+  if (!window.pywebview?.api?.open_path) {
+    toast("Open path is unavailable.");
+    return false;
+  }
+  try {
+    const result = await window.pywebview.api.open_path(path);
+    if (result && String(result.status || "").trim().toLowerCase() !== "success") {
+      throw new Error(result.message || failureMessage);
+    }
+    return true;
+  } catch (error) {
+    toast(error?.message || failureMessage);
+    return false;
+  }
+}
+
+function filterActivityHistoryEntries(entries, query) {
+  const tokens = String(query || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (!tokens.length) return entries;
+  return entries.filter((entry) => {
+    const haystack = [
+      getActivityDisplayTitle(entry),
+      entry.projectName,
+      entry.message,
+      ACTIVITY_HISTORY_STATUS_LABELS[entry.status] || entry.status,
+      entry.openFolderPath,
+      entry.combinedPdfPath,
+      ...getActivityHistoryDrawingPaths(entry).map(getWindowsPathLeaf),
+    ]
+      .join(" ")
+      .toLowerCase();
+    return tokens.every((token) => haystack.includes(token));
+  });
+}
+
+function getActivityHistoryDayLabel(timestamp, now = new Date()) {
+  const normalized = normalizeActivityTimestamp(timestamp);
+  if (!normalized) return "Earlier";
+  const date = new Date(normalized);
+  const startOfDay = (value) =>
+    new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
+  // Rounding absorbs the 23- and 25-hour days at daylight saving changes.
+  const daysAgo = Math.round((startOfDay(now) - startOfDay(date)) / 86400000);
+  if (daysAgo === 0) return "Today";
+  if (daysAgo === 1) return "Yesterday";
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    ...(date.getFullYear() === now.getFullYear() ? {} : { year: "numeric" }),
+  }).format(date);
+}
+
+function buildActivityHistoryItem(entry) {
+  const status = entry.status;
+  const title = getActivityDisplayTitle(entry);
+  const item = el("article", { className: "activity-history-item", "data-status": status });
+  item.appendChild(
+    el("div", {
+      className: `activity-card-icon ${status}`,
+      textContent: getActivityStatusIcon(status),
+      title: ACTIVITY_HISTORY_STATUS_LABELS[status] || status,
+    })
+  );
+
+  const content = el("div", { className: "activity-history-item-content" });
+  const endedAt = entry.endedAt
+    ? new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(
+        new Date(entry.endedAt)
+      )
+    : "";
+  content.appendChild(
+    el("div", { className: "activity-history-item-header" }, [
+      el("div", { className: "activity-history-item-title", textContent: title, title }),
+      el("div", { className: "activity-history-item-side" }, [
+        el("span", {
+          className: "activity-history-item-time",
+          textContent: endedAt,
+          title: `Ended: ${formatActivityDateTime(entry.endedAt)}`,
+        }),
+        el("button", {
+          type: "button",
+          className: "activity-history-remove",
+          textContent: "×",
+          title: "Remove from activity history",
+          "aria-label": `Remove ${title} from activity history`,
+          "data-history-action": "remove",
+          "data-activity-id": entry.id,
+        }),
+      ]),
+    ])
+  );
+  const meta = [
+    ACTIVITY_HISTORY_STATUS_LABELS[status] || status,
+    entry.projectName ? `Project: ${entry.projectName}` : "",
+    entry.endedAt ? `Duration: ${formatActivityDuration(entry.startedAt, entry.endedAt)}` : "",
+  ].filter(Boolean);
+  content.appendChild(
+    el("div", { className: "activity-history-item-meta", textContent: meta.join(" · ") })
+  );
+  if (entry.message) {
+    content.appendChild(
+      el("div", { className: "activity-history-item-message", textContent: entry.message })
+    );
+  }
+
+  const actions = el("div", { className: "activity-card-actions activity-history-actions" });
+  const addAction = (action, label, { title: actionTitle = "", modifier = "", data = {} } = {}) =>
+    actions.appendChild(
+      el("button", {
+        type: "button",
+        className: `activity-card-action${modifier ? ` ${modifier}` : ""}`,
+        textContent: label,
+        title: actionTitle,
+        "data-history-action": action,
+        "data-activity-id": entry.id,
+        ...data,
+      })
+    );
+  if (entry.openFolderPath) {
+    addAction("open", entry.openFolderLabel || "Open Folder", { title: entry.openFolderPath });
+  }
+  const projectFolder = getActivityHistoryProjectFolder(entry);
+  if (projectFolder) {
+    addAction("open-project-folder", "Open Project Folder", { title: projectFolder });
+  }
+  if (entry.combinedPdfPath) {
+    addAction("open-combined-pdf", "Open Combined PDF", { title: entry.combinedPdfPath });
+    addAction("copy-combined-pdf", "Copy Combined PDF", { title: entry.combinedPdfPath });
+  }
+  const comparePairs = entry.dwgComparePairs;
+  comparePairs.forEach((pair, pairIndex) => {
+    addAction(
+      "dwg-compare",
+      comparePairs.length === 1 ? "Compare Old vs New" : `Compare ${pair.label}`,
+      {
+        title: `Open AutoCAD modelspace comparison for ${pair.label}`,
+        modifier: "compare",
+        data: { "data-dwg-compare-index": String(pairIndex) },
+      }
+    );
+  });
+  const drawingPaths = getActivityHistoryDrawingPaths(entry);
+  if (drawingPaths.length === 1) {
+    addAction("open-drawing", "Open Drawing", {
+      title: drawingPaths[0],
+      data: { "data-drawing-index": "0" },
+    });
+  }
+  if (canRerunActivity(entry)) {
+    addAction("rerun", "Rerun", {
+      title: `Run ${title} again. It waits its turn if this project is busy.`,
+      modifier: "rerun",
+    });
+  }
+  if (actions.childNodes.length) content.appendChild(actions);
+
+  if (drawingPaths.length > 1) {
+    const drawingList = el(
+      "div",
+      { className: "activity-history-drawing-list" },
+      drawingPaths.map((path, index) =>
+        el("button", {
+          type: "button",
+          className: "activity-history-drawing",
+          textContent: getWindowsPathLeaf(path),
+          title: path,
+          "data-history-action": "open-drawing",
+          "data-activity-id": entry.id,
+          "data-drawing-index": String(index),
+        })
+      )
+    );
+    content.appendChild(
+      el("details", { className: "activity-history-drawings" }, [
+        el("summary", { textContent: `Drawings (${drawingPaths.length})` }),
+        drawingList,
+      ])
+    );
+  }
+
+  item.appendChild(content);
+  return item;
+}
+
+function renderActivityHistory() {
+  const dialog = document.getElementById("activityHistoryDlg");
+  const list = document.getElementById("activityHistoryList");
+  const empty = document.getElementById("activityHistoryEmpty");
+  const clearButton = document.getElementById("activityHistoryClearBtn");
+  if (!dialog?.open || !list || !empty) return;
+
+  const allEntries = activityHistoryState.entries;
+  const entries = filterActivityHistoryEntries(allEntries, activityHistoryState.query);
+  if (clearButton) clearButton.disabled = !allEntries.length;
+  empty.hidden = entries.length > 0;
+  empty.textContent = !activityHistoryState.loaded
+    ? "Loading activity history..."
+    : allEntries.length
+      ? "No activity matches your search."
+      : "Finished tools appear here, even after you clear them from the activity tray.";
+
+  const now = new Date();
+  const days = [];
+  entries.forEach((entry) => {
+    const label = getActivityHistoryDayLabel(entry.endedAt, now);
+    if (days.at(-1)?.label !== label) days.push({ label, entries: [] });
+    days.at(-1).entries.push(entry);
+  });
+  list.replaceChildren(
+    ...days.map((day) =>
+      el("section", { className: "activity-history-day", "aria-label": day.label }, [
+        el("h3", { className: "activity-history-day-label", textContent: day.label }),
+        ...day.entries.map(buildActivityHistoryItem),
+      ])
+    )
+  );
+}
+
+function openActivityHistory() {
+  initActivityHistory();
+  const dialog = document.getElementById("activityHistoryDlg");
+  if (!dialog) return;
+  const search = document.getElementById("activityHistorySearch");
+  activityHistoryState.query = "";
+  if (search) search.value = "";
+  if (!dialog.open) dialog.showModal();
+  renderActivityHistory();
+  void loadActivityHistory();
+  search?.focus();
+}
+
+async function handleActivityHistoryAction(button) {
+  const activityId = String(button.dataset.activityId || "").trim();
+  const action = String(button.dataset.historyAction || "").trim();
+  const entry = activityHistoryState.entries.find((candidate) => candidate.id === activityId);
+  if (!entry) return;
+  if (action === "open") {
+    await handleActivityTrayOpenFolder(activityId);
+    return;
+  }
+  if (action === "open-project-folder") {
+    await openActivityHistoryPath(getActivityHistoryProjectFolder(entry), "Unable to open folder.");
+    return;
+  }
+  if (action === "open-drawing") {
+    const drawingPath =
+      getActivityHistoryDrawingPaths(entry)[Number(button.dataset.drawingIndex || 0)];
+    await openActivityHistoryPath(drawingPath, "Unable to open drawing.");
+    return;
+  }
+  if (action === "open-combined-pdf") {
+    await handleActivityTrayOpenCombinedPdf(activityId);
+    return;
+  }
+  if (action === "copy-combined-pdf") {
+    await handleActivityTrayCopyCombinedPdf(activityId);
+    return;
+  }
+  if (action === "dwg-compare") {
+    await handleActivityTrayDwgCompare(activityId, Number(button.dataset.dwgCompareIndex || 0));
+    return;
+  }
+  if (action === "rerun") {
+    // Step aside once the tool starts so its own dialogs and pickers take over;
+    // stay open when it could not start so the reason stays in view.
+    if (await handleActivityTrayRerun(activityId)) closeDlg("activityHistoryDlg");
+    return;
+  }
+  if (action === "remove") {
+    removeActivityHistoryEntry(activityId);
+  }
+}
+
+function initActivityHistory() {
+  if (activityHistoryState.initialized) return;
+  activityHistoryState.initialized = true;
+  document.getElementById("activityHistoryBtn")?.addEventListener("click", () => {
+    openActivityHistory();
+  });
+  document.getElementById("activityTrayHistory")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openActivityHistory();
+  });
+  document.getElementById("activityHistorySearch")?.addEventListener("input", (event) => {
+    activityHistoryState.query = String(event.target?.value || "");
+    renderActivityHistory();
+  });
+  document.getElementById("activityHistoryClearBtn")?.addEventListener("click", () => {
+    clearActivityHistory();
+  });
+  document.getElementById("activityHistoryList")?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-history-action]");
+    if (!button) return;
+    event.preventDefault();
+    void handleActivityHistoryAction(button);
+  });
 }
 
 function getActivityIdForTool(toolId, { create = false, label = "" } = {}) {
@@ -11670,8 +12358,8 @@ function buildOutlookScanProjectContext(scanDate = "") {
           status: String(deliverable?.status || "").trim(),
         }))
         .sort((left, right) => {
-          const leftDue = parseDueStr(left?.due || left?.hardDue);
-          const rightDue = parseDueStr(right?.due || right?.hardDue);
+          const leftDue = parseDueStr(getEffectiveDueStr(left));
+          const rightDue = parseDueStr(getEffectiveDueStr(right));
           if (leftDue && rightDue && leftDue.getTime() !== rightDue.getTime()) {
             return leftDue - rightDue;
           }
@@ -12440,6 +13128,26 @@ function debouncedSave() {
   }, 500);
 }
 
+// Writes any debounced or running project save to disk. Call it before the
+// backend edits tasks.json and the page reloads it, or a pending edit would
+// either overwrite the backend's change or be dropped by the reload.
+async function flushPendingProjectSave() {
+  if (saveTimeout) {
+    clearTimeout(saveTimeout);
+    saveTimeout = null;
+    return save();
+  }
+  const pending = projectSaveFollowUp || projectSaveInFlight;
+  if (pending) {
+    try {
+      await pending;
+    } catch (e) {
+      return false;
+    }
+  }
+  return true;
+}
+
 async function refreshAppUpdateStatus({ manual = false } = {}) {
   const versionLabel = document.getElementById("appVersionLabel");
   const versionChip = document.getElementById("versionChip");
@@ -12889,13 +13597,13 @@ async function populateSettingsModal() {
         };
         const label = el("label", { className: "radio-label" }, [
           radio,
-          ` AutoCAD ${version.year}`,
+          version.year ? ` AutoCAD ${version.year}` : " AutoCAD",
         ]);
         container.appendChild(label);
       });
       if (response.versions.length === 0) {
         container.innerHTML =
-          '<p class="tiny muted">No AutoCAD versions detected in default location.</p>';
+          '<p class="tiny muted">No AutoCAD installation was found. Pick accoreconsole.exe from your AutoCAD folder instead.</p>';
       }
     } else {
       container.innerHTML =
@@ -12925,13 +13633,13 @@ async function populateAutocadSelectModal() {
         });
         const label = el("label", { className: "radio-label" }, [
           radio,
-          ` AutoCAD ${version.year}`,
+          version.year ? ` AutoCAD ${version.year}` : " AutoCAD",
         ]);
         container.appendChild(label);
       });
       if (response.versions.length === 0) {
         container.innerHTML =
-          '<p class="tiny muted">No AutoCAD versions detected in default location.</p>';
+          '<p class="tiny muted">No AutoCAD installation was found. Pick accoreconsole.exe from your AutoCAD folder instead.</p>';
       }
     } else {
       container.innerHTML =
@@ -17494,18 +18202,16 @@ function matchesDueFilter(deliverable, filter) {
   return true;
 }
 
-// Unfinished work due this week or earlier. A hard deadline counts even when the
-// internal target date is later, so it can never be hidden behind the target.
+// Unfinished work whose shown date is this week or earlier. The shown date is never
+// later than the hard date, so a hard date cannot hide behind a soft one; a missed
+// soft date hands over to the hard date instead of counting as overdue.
 function deliverableNeedsAttention(deliverable, now = new Date()) {
   if (isFinished(deliverable)) return false;
   const endOfWeek = getWeekStartDate(now);
   endOfWeek.setDate(endOfWeek.getDate() + 6);
   endOfWeek.setHours(23, 59, 59, 999);
-  return [getEffectiveDueStr(deliverable), getHardDueStr(deliverable)]
-    .some((value) => {
-      const due = parseDueStr(value);
-      return due !== null && due <= endOfWeek;
-    });
+  const due = parseDueStr(getEffectiveDueStr(deliverable, now));
+  return due !== null && due <= endOfWeek;
 }
 
 function toggleProjectAttentionView() {
@@ -21033,21 +21739,34 @@ function createCardHeader(deliverable, card, project) {
   return header;
 }
 
+// The Soft / Hard tag that marks which of a deliverable's two dates is showing.
+function createDueKindTag(field) {
+  return el("span", {
+    className: `due-kind due-kind--${field === "hardDue" ? "hard" : "soft"}`,
+    textContent: DUE_FIELD_LABELS[field] || "",
+  });
+}
+
+// Badge styling for the shown date: soft dates use the usual ok / due-soon /
+// overdue colours, hard dates the red outline (solid once missed).
+function getDueBadgeStateClass(deliverable, field, value) {
+  if (field === "hardDue") {
+    return isDeliverableHardDueMissed(deliverable) ? "hard critical" : "hard";
+  }
+  const ds = dueState(value);
+  return `soft ${ds === "overdue" ? "overdue" : ds === "dueSoon" ? "due-soon" : "ok"}`;
+}
+
 function createDeliverableDueBadge(deliverable, project, { field, stateClass, text, label }) {
   const badge = el("div", {
     className: `deliverable-due-badge ${isFinished(deliverable) ? "finished" : stateClass} is-clickable`,
-    textContent: text,
   });
+  badge.append(createDueKindTag(field), document.createTextNode(text));
   badge.setAttribute("role", "button");
   badge.setAttribute("tabindex", "0");
-  badge.setAttribute(
-    "title",
-    field === "hardDue"
-      ? "Hard deadline – must finish. Click to change."
-      : "Click to change due date"
-  );
+  badge.setAttribute("title", `${describeDeliverableDue(deliverable)} Click to change.`);
   badge.setAttribute("aria-label", isFinished(deliverable)
-    ? `${field === "hardDue" ? "Hard deadline" : "Target date"} ${text}. Finished deliverable. Click to change.`
+    ? `${describeDeliverableDue(deliverable)} Finished deliverable. Click to change.`
     : label);
   const handleOpen = (e) => {
     e.stopPropagation();
@@ -21063,43 +21782,22 @@ function createDeliverableDueBadge(deliverable, project, { field, stateClass, te
   return badge;
 }
 
-// Returns the internal-due badge, the hard-deadline badge, or both — a deliverable
-// can carry either date independently.
+// One badge for the date the deliverable is showing (soft until it passes, then
+// hard), tagged so it is clear which one it is. None when no date is set.
 function createDeliverableDueBadges(deliverable, project) {
-  const badges = [];
-
-  if (deliverable.due) {
-    const ds = dueState(deliverable.due);
-    badges.push(
-      createDeliverableDueBadge(deliverable, project, {
-        field: "due",
-        stateClass:
-          ds === "overdue" ? "overdue" : ds === "dueSoon" ? "due-soon" : "ok",
-        text: humanDate(deliverable.due).replace(/\//g, "/").toUpperCase(),
-        label:
-          ds === "overdue"
-            ? `Overdue – due ${humanDate(deliverable.due)}. Click to change due date.`
-            : `Due ${humanDate(deliverable.due)}. Click to change due date.`,
-      })
-    );
-  }
-
-  const hardDue = getHardDueStr(deliverable);
-  if (hardDue) {
-    const missed = isDeliverableHardDueMissed(deliverable);
-    badges.push(
-      createDeliverableDueBadge(deliverable, project, {
-        field: "hardDue",
-        stateClass: missed ? "hard critical" : "hard",
-        text: `🔒 ${humanDate(hardDue).replace(/\//g, "/").toUpperCase()}`,
-        label: missed
-          ? `Past hard deadline – ${humanDate(hardDue)}. Click to change hard deadline.`
-          : `Hard deadline ${humanDate(hardDue)}. Click to change hard deadline.`,
-      })
-    );
-  }
-
-  return badges;
+  const field = getActiveDueField(deliverable);
+  if (!field) return [];
+  const value = String(deliverable[field] || "").trim();
+  const stateClass = getDueBadgeStateClass(deliverable, field, value);
+  const late = / (overdue|critical)$/.test(stateClass);
+  return [
+    createDeliverableDueBadge(deliverable, project, {
+      field,
+      stateClass,
+      text: humanDate(value) || value,
+      label: `${late ? "Past due. " : ""}${describeDeliverableDue(deliverable)} Click to change.`,
+    }),
+  ];
 }
 
 function createExpandToggle(card) {
@@ -24808,7 +25506,7 @@ function onSaveProject() {
     if (hasError) {
       const firstErr = document.querySelector("#editDlg input.has-field-error");
       firstErr?.focus();
-      toast("Fill required fields to continue.", "error");
+      toast("Fill required fields to continue.");
       return;
     }
     const data = readForm();
@@ -24842,7 +25540,7 @@ function onSaveProject() {
       // Scroll to the invalid input
       firstInvalid.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
-    toast("Please fix invalid date formats before saving.", "error");
+    toast("Please fix the highlighted due dates before saving.");
     return;
   }
 
@@ -25136,7 +25834,12 @@ function addDeliverableCard(deliverable, options = {}) {
     };
   }
 
-  card.querySelector(".d-due").value = deliverable.due || "";
+  // A soft date on the same day as the hard date (left by the old "same as
+  // internal" shortcut) adds nothing and would fail the soft-before-hard check.
+  const softDate = parseDueStr(String(deliverable.due || "").trim());
+  const hardDate = parseDueStr(getHardDueStr(deliverable));
+  const redundantSoft = !!softDate && !!hardDate && softDate.toDateString() === hardDate.toDateString();
+  card.querySelector(".d-due").value = redundantSoft ? "" : deliverable.due || "";
   card.querySelector(".d-hard-due").value = deliverable.hardDue || "";
 
 
@@ -25194,6 +25897,11 @@ function addDeliverableCard(deliverable, options = {}) {
     const handleDateEdit = () => {
       autoFormatDateInput(dateInput);
       validateDueDateInput(dateInput);
+      // Moving the hard date can resolve a soft-before-hard error on the other input.
+      const softInput = card.querySelector('.d-due');
+      if (softInput && softInput !== dateInput && softInput.classList.contains('input-error')) {
+        validateDueDateInput(softInput);
+      }
       validateDeliverableDateOrder(card);
       refreshModalDeliverableSummary(card);
     };
@@ -25278,23 +25986,20 @@ function refreshModalDeliverableSummary(card) {
   const dueHost = summary.querySelector(".deliverable-summary-due");
   if (dueHost) {
     dueHost.replaceChildren();
-    const dueStr = (dueInput?.value || "").trim();
-    if (dueStr && parseDueStr(dueStr)) {
-      const ds = dueState(dueStr);
-      const cls = ds === "overdue" ? "overdue" : ds === "dueSoon" ? "due-soon" : "ok";
+    // Preview the single date the card will show, from the unsaved inputs.
+    const draft = {
+      due: (dueInput?.value || "").trim(),
+      hardDue: (hardDueInput?.value || "").trim(),
+      statuses: isCardFinished ? ["Complete"] : [],
+    };
+    const field = getActiveDueField(draft);
+    const value = field ? draft[field] : "";
+    if (value && parseDueStr(value)) {
       const badge = el("span", {
-        className: `deliverable-due-badge ${cls}`,
-        textContent: humanDate(dueStr),
+        className: `deliverable-due-badge ${getDueBadgeStateClass(draft, field, value)}`,
+        title: describeDeliverableDue(draft),
       });
-      dueHost.appendChild(badge);
-    }
-    const hardDueStr = (hardDueInput?.value || "").trim();
-    if (hardDueStr && parseDueStr(hardDueStr)) {
-      const missed = dueState(hardDueStr) === "overdue" && !isCardFinished;
-      const badge = el("span", {
-        className: `deliverable-due-badge hard${missed ? " critical" : ""}`,
-        textContent: `🔒 ${humanDate(hardDueStr)}`,
-      });
+      badge.append(createDueKindTag(field), document.createTextNode(humanDate(value)));
       dueHost.appendChild(badge);
     }
   }
@@ -35268,6 +35973,17 @@ async function runWorkflow(workflowId, explicitLaunchContext = null) {
     rerunDefaultPath: getLaunchContextProjectRoot(launchContext),
     canRerun: false,
   });
+  // Steps can be pointed at other folders, so the workflow waits for every project it touches.
+  const stepPaths = Object.values(stepInputs || {}).flatMap((entry) => [
+    entry?.projectFolder,
+    ...(Array.isArray(entry?.dwgFiles) ? entry.dwgFiles : []),
+  ]);
+  const lanes = getActivityLanes({
+    toolIds: (workflow.steps || []).map((step) => step?.toolId),
+    launchContext,
+    paths: stepPaths,
+  });
+  if (!(await waitForActivityLanes(activityId, lanes))) return;
   try {
     const result = await window.pywebview.api.run_workflow(
       workflowId,
@@ -35768,6 +36484,7 @@ function initEventListeners() {
   document.getElementById("projectsAttentionBtn")?.addEventListener("click", toggleProjectAttentionView);
   const scratchpadBtn = document.getElementById("scratchpadBtn");
   if (scratchpadBtn) scratchpadBtn.onclick = () => toggleScratchpad();
+  initActivityHistory();
   document.getElementById("settings_howToSetupBtn").onclick = () =>
     document.getElementById("apiKeyHelpDlg").showModal();
   const settingsGoogleAuthActionBtn = document.getElementById(
@@ -35914,6 +36631,21 @@ function initEventListeners() {
       normalizeProjectPathInput(pathInput);
     });
   }
+  const browseProjectPathBtn = document.getElementById("btnBrowseProjectPath");
+  if (pathInput && browseProjectPathBtn) {
+    browseProjectPathBtn.addEventListener("click", async () => {
+      // Start from the field's folder, or beside the most recently listed
+      // project so a new one lands among its siblings.
+      const lastProjectPath = [...db].reverse().find((project) => project?.path)?.path || "";
+      const startPath =
+        pathInput.value.trim() || lastProjectPath.replace(/[\\/][^\\/]*[\\/]?$/, "");
+      const chosen = await pickProjectFolder(startPath);
+      if (!chosen) return;
+      pathInput.value = chosen;
+      normalizeProjectPathInput(pathInput);
+      pathInput.focus();
+    });
+  }
 
   document.querySelectorAll(".projects-filter-dropdown").forEach((dropdown) => {
     const filterKey = dropdown.dataset.filterDropdown;
@@ -36012,9 +36744,8 @@ function initEventListeners() {
 
   document
     .getElementById("toolPublishDwgs")
-    .addEventListener("click", async (e) => {
+    .addEventListener("click", async () => {
       let launchContext = resolveCadLaunchContextForTool();
-      if (e.currentTarget.classList.contains("running")) return;
       if (!(await ensureAutocadPathLoaded())) {
         await showAutocadSelectModal();
         return;
@@ -36034,6 +36765,7 @@ function initEventListeners() {
         rerunLaunchContext: launchContext,
         rerunDefaultPath: getLaunchContextProjectRoot(launchContext),
       });
+      if (!(await waitForToolTurn(activityId, "toolPublishDwgs", launchContext))) return;
       try {
         const result = launchContext
           ? await window.pywebview.api.run_publish_script(launchContext, activityId)
@@ -36054,9 +36786,8 @@ function initEventListeners() {
 
   document
     .getElementById("toolManageLayers")
-    .addEventListener("click", async (e) => {
+    .addEventListener("click", async () => {
       let launchContext = resolveCadLaunchContextForTool();
-      if (e.currentTarget.classList.contains("running")) return;
       if (!(await ensureAutocadPathLoaded())) {
         await showAutocadSelectModal();
         return;
@@ -36076,6 +36807,7 @@ function initEventListeners() {
         rerunLaunchContext: launchContext,
         rerunDefaultPath: getLaunchContextProjectRoot(launchContext),
       });
+      if (!(await waitForToolTurn(activityId, "toolManageLayers", launchContext))) return;
       try {
         const result = launchContext
           ? await window.pywebview.api.run_manage_layers_script(
@@ -36099,9 +36831,8 @@ function initEventListeners() {
 
   document
     .getElementById("toolRepairXrefPaths")
-    .addEventListener("click", async (e) => {
+    .addEventListener("click", async () => {
       let launchContext = resolveCadLaunchContextForTool();
-      if (e.currentTarget.classList.contains("running")) return;
       if (!(await ensureAutocadPathLoaded())) {
         await showAutocadSelectModal();
         return;
@@ -36124,6 +36855,7 @@ function initEventListeners() {
         rerunLaunchContext: launchContext,
         rerunDefaultPath: getLaunchContextProjectRoot(launchContext),
       });
+      if (!(await waitForToolTurn(activityId, "toolRepairXrefPaths", launchContext))) return;
       try {
         const result = launchContext
           ? await window.pywebview.api.run_repair_xref_paths_script(
@@ -36147,9 +36879,8 @@ function initEventListeners() {
 
   document
     .getElementById("toolCleanXrefs")
-    .addEventListener("click", async (e) => {
+    .addEventListener("click", async () => {
       const launchContext = resolveCadLaunchContextForTool();
-      if (e.currentTarget.classList.contains("running")) return;
       if (!(await ensureAutocadPathLoaded())) {
         await showAutocadSelectModal();
         return;
@@ -36161,6 +36892,7 @@ function initEventListeners() {
         rerunLaunchContext: launchContext,
         rerunDefaultPath: getLaunchContextProjectRoot(launchContext),
       });
+      if (!(await waitForToolTurn(activityId, "toolCleanXrefs", launchContext))) return;
       try {
         const result = launchContext
           ? await window.pywebview.api.run_clean_xrefs_script(launchContext, activityId)
@@ -36179,7 +36911,7 @@ function initEventListeners() {
 
   document.getElementById("toolCleanDrawings")?.addEventListener("click", async (event) => {
     const button = event.currentTarget;
-    if (button.classList.contains("running") || button.dataset.cleanBusy) return;
+    if (button.dataset.cleanBusy) return;
     const launchContext = resolveCadLaunchContextForTool();
     if (!(await ensureAutocadPathLoaded())) {
       await showAutocadSelectModal();
@@ -36201,8 +36933,15 @@ function initEventListeners() {
       }
       updateActivity(activityId, { message: "Waiting for titleblock and drawing confirmation…", progress: 20 });
       const selection = await confirmCleanDrawingSelection(preview);
+      // Only the inspection and its dialog are one at a time; another project's
+      // clean can start while this one waits or runs.
+      delete button.dataset.cleanBusy;
+      button.removeAttribute("aria-busy");
       if (!selection) {
         completeActivity(activityId, { status: ACTIVITY_STATUS.CANCELLED, message: "Clean Drawings cancelled." });
+        return;
+      }
+      if (!(await waitForToolTurn(activityId, "toolCleanDrawings", launchContext, [preview.project]))) {
         return;
       }
       updateActivity(activityId, { message: "Inspecting selected drawings…", progress: 22 });
@@ -36280,7 +37019,6 @@ function initEventListeners() {
 
   if (backupDrawingsBtn) {
     const handler = async () => {
-      if (backupDrawingsBtn.classList.contains("running")) return;
       const activityId = beginActivity({
         toolId: "toolBackupDrawings",
         message: "Resolving project folder...",
@@ -36318,6 +37056,7 @@ function initEventListeners() {
         let selectedProjectPath = "";
 
         if (launchSource === "workroom" || hasContextProjectPath) {
+          if (!(await waitForToolTurn(activityId, "toolBackupDrawings", launchContext))) return;
           updateActivity(activityId, {
             message: "Resolving project folder...",
             progress: 18,
@@ -36350,6 +37089,12 @@ function initEventListeners() {
           }
         } else {
           selectedProjectPath = await selectProjectFolder();
+          if (
+            selectedProjectPath &&
+            !(await waitForToolTurn(activityId, "toolBackupDrawings", null, [selectedProjectPath]))
+          ) {
+            return;
+          }
         }
 
         if (selectedProjectPath) {
@@ -36419,8 +37164,6 @@ function initEventListeners() {
       } catch (e) {
         const message = e?.message || "Failed to create drawing backup.";
         failActivity(activityId, { message });
-      } finally {
-        backupDrawingsBtn.classList.remove("running");
       }
     };
 
@@ -36435,15 +37178,7 @@ function initEventListeners() {
 
   const copyProjectLocallyBtn = document.getElementById("toolCopyProjectLocally");
   if (copyProjectLocallyBtn) {
-    const handler = async () => {
-      if (copyProjectLocallyBtn.classList.contains("running")) return;
-      copyProjectLocallyBtn.classList.add("running");
-      try {
-        await runLocalProjectManager(resolveCadLaunchContextForTool());
-      } finally {
-        copyProjectLocallyBtn.classList.remove("running");
-      }
-    };
+    const handler = () => runLocalProjectManager(resolveCadLaunchContextForTool());
 
     copyProjectLocallyBtn.addEventListener("click", handler);
     copyProjectLocallyBtn.addEventListener("keydown", (e) => {
@@ -37508,42 +38243,46 @@ function initEventListeners() {
   document.getElementById("btnMarkOverdue").onclick = () => {
     document.getElementById("markOverdueDlg").showModal();
   };
-  document.getElementById("btnConfirmMarkOverdue").onclick = async () => {
+  // Both sweeps edit tasks.json in the backend, then reload it into the page.
+  async function runOverdueSweep(apiMethod, statusLabel, dialogId) {
     try {
-      const response =
-        await window.pywebview.api.mark_overdue_projects_complete();
-      if (response.status === "success") {
-        toast(`Marked ${response.count} deliverables as complete.`);
-        db = await load();
-        render();
+      if (!(await flushPendingProjectSave())) {
+        toast("Your latest changes could not be saved, so nothing was marked.", 5000);
+        return;
+      }
+      const response = await window.pywebview.api[apiMethod]();
+      if (response?.status === "success") {
+        const count = Number(response.count) || 0;
+        toast(
+          count
+            ? `Marked ${count} deliverable${count === 1 ? "" : "s"} as ${statusLabel}.`
+            : `No overdue deliverables needed to be marked ${statusLabel}.`
+        );
+        if (count) {
+          db = await load();
+          render();
+        }
       } else {
-        toast("Failed to mark deliverables as complete.");
+        toast(response?.message || `Failed to mark deliverables as ${statusLabel}.`, 5000);
       }
     } catch (e) {
-      toast("Error marking deliverables as complete.");
+      toast(`Error marking deliverables as ${statusLabel}.`);
+    } finally {
+      closeDlg(dialogId);
     }
-    closeDlg("markOverdueDlg");
-  };
+  }
+
+  document.getElementById("btnConfirmMarkOverdue").onclick = () =>
+    runOverdueSweep("mark_overdue_projects_complete", "complete", "markOverdueDlg");
   document.getElementById("btnMarkOverdueDelivered").onclick = () => {
     document.getElementById("markOverdueDeliveredDlg").showModal();
   };
-  document.getElementById("btnConfirmMarkOverdueDelivered").onclick =
-    async () => {
-      try {
-        const response =
-          await window.pywebview.api.mark_overdue_projects_delivered();
-        if (response.status === "success") {
-          toast(`Marked ${response.count} deliverables as delivered.`);
-          db = await load();
-          render();
-        } else {
-          toast("Failed to mark deliverables as delivered.");
-        }
-      } catch (e) {
-        toast("Error marking deliverables as delivered.");
-      }
-      closeDlg("markOverdueDeliveredDlg");
-    };
+  document.getElementById("btnConfirmMarkOverdueDelivered").onclick = () =>
+    runOverdueSweep(
+      "mark_overdue_projects_delivered",
+      "delivered",
+      "markOverdueDeliveredDlg"
+    );
 
   document.getElementById("btnDeleteAll").onclick = () => {
     document.getElementById("deleteConfirmInput").value = "";
@@ -37651,11 +38390,13 @@ async function init() {
     if (typeof debouncedSaveUserSettings?.flush === "function") {
       debouncedSaveUserSettings.flush();
     }
+    debouncedSaveActivityHistory.flush();
   });
   try {
     if (!window.pywebview)
       await new Promise((r) => window.addEventListener("pywebviewready", r));
     startCspViolationReporting();
+    void loadActivityHistory();
     initEventListeners();
     initTabbedInterfaces();
     initProjectsBackToTop();

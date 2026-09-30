@@ -8139,6 +8139,196 @@ dialog::backdrop {
   outline: none;
 }
 
+/* Activity history: finished activity kept after it leaves the tray */
+.activity-history-dialog {
+  width: min(760px, calc(100vw - 32px));
+}
+
+.activity-history-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.85rem 1.75rem;
+  border-bottom: 1px solid var(--glass-border);
+}
+
+.activity-history-search {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.activity-history-body {
+  height: min(560px, calc(100dvh - 240px));
+  max-height: none;
+}
+
+.activity-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.activity-history-empty {
+  margin: 0;
+  padding: 1rem;
+  border-radius: var(--radius);
+  border: 1px dashed var(--glass-border);
+  color: var(--muted);
+  font-size: 0.82rem;
+  text-align: center;
+}
+
+.activity-history-day {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.activity-history-day-label {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.activity-history-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.75rem;
+  padding: 0.8rem 0.9rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--glass-border);
+  background: var(--surface);
+}
+
+.activity-history-item[data-status="warning"] {
+  border-color: rgba(245, 158, 11, 0.3);
+}
+
+.activity-history-item[data-status="error"] {
+  border-color: rgba(244, 63, 94, 0.35);
+}
+
+.activity-history-item-content {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.activity-history-item-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.activity-history-item-side {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex-shrink: 0;
+}
+
+.activity-history-remove {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.activity-history-remove:hover,
+.activity-history-remove:focus-visible {
+  border-color: var(--glass-border);
+  color: var(--text);
+  outline: none;
+}
+
+.activity-history-item-title {
+  font-size: 0.86rem;
+  font-weight: 700;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.activity-history-item-time {
+  flex-shrink: 0;
+  font-size: 0.74rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.activity-history-item-meta {
+  font-size: 0.74rem;
+  line-height: 1.4;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.activity-history-item-message {
+  font-size: 0.79rem;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.activity-history-actions {
+  margin-top: 0.3rem;
+}
+
+.activity-history-drawings summary {
+  width: fit-content;
+  cursor: pointer;
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.activity-history-drawing-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin-top: 0.35rem;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.activity-history-drawing {
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent);
+  font-size: 0.76rem;
+  text-align: left;
+  padding: 0.25rem 0.45rem;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.activity-history-drawing:hover,
+.activity-history-drawing:focus-visible {
+  background: var(--hover-overlay);
+  outline: none;
+}
+
+.activity-history-footnote {
+  margin: 0;
+  padding: 0.7rem 1.75rem;
+  border-top: 1px solid var(--glass-border);
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);
@@ -8158,6 +8348,11 @@ dialog::backdrop {
 
   .activity-card {
     padding: 0.8rem;
+  }
+
+  .activity-history-toolbar,
+  .activity-history-footnote {
+    padding-inline: 1rem;
   }
 }
 
@@ -8830,12 +9025,64 @@ dialog::backdrop {
   border: 1px solid rgba(16, 185, 129, 0.35);
 }
 
-/* Hard deadline */
+/* Hard due date */
 .deliverable-due-badge.hard {
   background: transparent;
   color: var(--danger);
   border: 1px solid var(--danger);
-  gap: 3px;
+}
+
+/* Soft / Hard tag: marks which of a deliverable's two due dates is showing.
+   Soft is a dashed outline, hard is solid, so it reads without colour. */
+.due-kind {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 0 5px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 15px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.due-kind--soft {
+  border-style: dashed;
+  color: var(--text-secondary);
+}
+
+.due-kind--hard {
+  background: var(--text);
+  border-color: var(--text);
+  color: var(--bg);
+}
+
+.deliverable-due-badge {
+  gap: 5px;
+}
+
+.deliverable-due-badge .due-kind--soft {
+  color: inherit;
+}
+
+.deliverable-due-badge .due-kind--hard {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #ffffff;
+}
+
+.deliverable-due-badge.critical .due-kind--hard {
+  background: #ffffff;
+  border-color: #ffffff;
+  color: var(--danger);
+}
+
+.deliverable-due-badge.finished .due-kind--hard {
+  background: var(--text-secondary);
+  border-color: var(--text-secondary);
+  color: var(--bg-tertiary);
 }
 
 /* Critical */
@@ -10527,8 +10774,9 @@ dialog::backdrop {
   text-align: left !important;
 }
 
+/* Hours are short ("7.5"); the spare width goes to project name and description. */
 .ts-day-col {
-  width: 72px;
+  width: 60px;
 }
 
 .ts-total-col {
@@ -10578,7 +10826,7 @@ dialog::backdrop {
 
 .ts-hour-input {
   width: 100%;
-  min-width: 56px;
+  min-width: 46px;
   text-align: center !important;
   background: var(--bg-tertiary) !important;
   border: 1px solid var(--glass-border) !important;
@@ -10611,6 +10859,7 @@ dialog::backdrop {
   border: 1px solid transparent;
   border-radius: var(--radius-xs);
   text-align: inherit;
+  text-overflow: ellipsis;
   color: var(--text);
   font-size: 12px;
   font-family: var(--font-main);
@@ -11645,8 +11894,57 @@ dialog::backdrop {
 .calendar-footer {
   display: flex;
   justify-content: center;
+  gap: 8px;
   padding-top: 0.5rem;
   border-top: 1px solid var(--glass-border);
+}
+
+/* Soft / Hard switch on a deliverable's date picker */
+.calendar-due-kind-switch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.calendar-due-kind {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 6px 10px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-secondary);
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.calendar-due-kind--soft {
+  border-style: dashed;
+}
+
+.calendar-due-kind:hover {
+  border-color: var(--accent);
+}
+
+.calendar-due-kind.is-active {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  color: var(--text);
+}
+
+.calendar-due-kind__label {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.calendar-due-kind__value {
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ===== Input with Calendar Icon ===== */

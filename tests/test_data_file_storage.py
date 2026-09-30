@@ -280,5 +280,79 @@ class DataFileApiTests(unittest.TestCase):
         self.assertEqual({"checklists": []}, self.api.get_checklists())
 
 
+class OverdueSweepTests(unittest.TestCase):
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory(prefix="acies-overdue-")
+        self.tasks_file = str(Path(self._temp.name) / "tasks.json")
+        self.api = Api.__new__(Api)
+        main_module._DATA_FILE_VERIFIED_SIGNATURES.clear()
+        for patcher in (
+            patch.object(main_module, "TASKS_FILE", self.tasks_file),
+            patch.object(
+                main_module,
+                "_overlay_projects_with_lighting_schedule_records",
+                side_effect=lambda payload: payload,
+            ),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        past = (datetime.date.today() - datetime.timedelta(days=3)).isoformat()
+        future = (datetime.date.today() + datetime.timedelta(days=3)).isoformat()
+        self.projects = [{
+            "id": "250001",
+            "deliverables": [
+                {"name": "Overdue", "due": past, "status": "In progress",
+                 "tasks": [{"text": "a", "done": False}]},
+                {"name": "Hard deadline only", "hardDue": past, "status": "Waiting"},
+                {"name": "Already complete", "due": past, "status": "Complete"},
+                {"name": "Already delivered", "due": past, "status": "Delivered"},
+                {"name": "By others", "due": past, "statusTags": ["completed-by-others"]},
+                {"name": "Upcoming", "due": future, "status": "In progress"},
+                {"name": "UTC stamp", "due": past + "T08:00:00Z", "status": "In progress"},
+            ],
+        }]
+        Path(self.tasks_file).write_text(json.dumps(self.projects), encoding="utf-8")
+
+    def tearDown(self):
+        self._temp.cleanup()
+
+    def _statuses(self):
+        return {d["name"]: d.get("status") for d in _read_json(self.tasks_file)[0]["deliverables"]}
+
+    def test_complete_sweep_counts_only_deliverables_it_changes(self):
+        result = self.api.mark_overdue_projects_complete()
+
+        self.assertEqual({"status": "success", "count": 3}, result)
+        statuses = self._statuses()
+        self.assertEqual("Complete", statuses["Overdue"])
+        self.assertEqual("Complete", statuses["Hard deadline only"])
+        self.assertEqual("Complete", statuses["UTC stamp"])
+        self.assertEqual("Delivered", statuses["Already delivered"])
+        self.assertEqual("In progress", statuses["Upcoming"])
+        overdue = _read_json(self.tasks_file)[0]["deliverables"][0]
+        self.assertTrue(all(task["done"] for task in overdue["tasks"]))
+
+    def test_delivered_sweep_promotes_complete_work_but_skips_work_by_others(self):
+        result = self.api.mark_overdue_projects_delivered()
+
+        self.assertEqual({"status": "success", "count": 4}, result)
+        statuses = self._statuses()
+        self.assertEqual("Delivered", statuses["Already complete"])
+        self.assertNotEqual("Delivered", statuses["By others"])
+
+    def test_sweep_with_nothing_to_change_leaves_the_file_alone(self):
+        self.api.mark_overdue_projects_complete()
+        before = Path(self.tasks_file).read_bytes()
+
+        self.assertEqual({"status": "success", "count": 0}, self.api.mark_overdue_projects_complete())
+        self.assertEqual(before, Path(self.tasks_file).read_bytes())
+
+    def test_parse_due_str_returns_naive_datetimes_for_offset_stamps(self):
+        parsed = main_module.parse_due_str("2026-09-01T08:00:00Z")
+
+        self.assertIsNone(parsed.tzinfo)
+        self.assertLess(parsed, datetime.datetime.max)
+
+
 if __name__ == "__main__":
     unittest.main()

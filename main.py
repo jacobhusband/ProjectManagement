@@ -28,6 +28,7 @@ import re
 import base64
 from typing import List
 import importlib
+import itertools
 import uuid
 from contextlib import closing, contextmanager
 from urllib.parse import parse_qs, urlencode, urlparse, unquote
@@ -1101,9 +1102,10 @@ def parse_due_str(s):
         return None
     s = s.strip()
     try:
-        # Try ISO format first
-        return datetime.datetime.fromisoformat(s.replace('Z', '+00:00'))
-    except:
+        # Try ISO format first. Offsets are dropped so every result compares with
+        # the naive datetimes below and with datetime.max in sort keys.
+        return datetime.datetime.fromisoformat(s.replace('Z', '+00:00')).replace(tzinfo=None)
+    except ValueError:
         pass
     s = s.replace('.', '/').replace(' ', '')
     parts = s.split('/')
@@ -1114,29 +1116,53 @@ def parse_due_str(s):
                 yy = '20' + yy
             iso = f"{yy}-{mm.zfill(2)}-{dd.zfill(2)}T12:00:00"
             return datetime.datetime.fromisoformat(iso)
-        except:
+        except ValueError:
             pass
     try:
         return datetime.datetime.strptime(s, "%m/%d/%Y")
-    except:
+    except ValueError:
         pass
     return None
 
 
-def get_effective_due_str(deliverable):
-    """The date that drives scheduling, mirroring JS getEffectiveDueStr.
+def get_active_due_field(deliverable, today=None):
+    """Which stored date a deliverable shows, mirroring JS getActiveDueField.
 
-    The internal date wins; a deliverable carrying only a hard deadline falls
-    back to it so it is not skipped by date-driven sweeps and exports.
+    'due' is the soft due date and 'hardDue' the hard due date. The soft date
+    shows until it passes, then the hard date takes over; a soft date on or
+    after the hard date adds nothing, so the hard date wins outright.
+    Returns 'due', 'hardDue', or ''.
     """
     if not isinstance(deliverable, dict):
         return ''
-    internal = str(deliverable.get('due') or '').strip()
-    return internal or str(deliverable.get('hardDue') or '').strip()
+    soft = str(deliverable.get('due') or '').strip()
+    hard = get_hard_due_str(deliverable)
+    if not soft:
+        return 'hardDue' if hard else ''
+    if not hard:
+        return 'due'
+    hard_date = parse_due_str(hard)
+    if hard_date is None:
+        return 'due'
+    soft_date = parse_due_str(soft)
+    if soft_date is None or soft_date.date() >= hard_date.date():
+        return 'hardDue'
+    today = today or datetime.date.today()
+    return 'hardDue' if soft_date.date() < today else 'due'
+
+
+def get_effective_due_str(deliverable, today=None):
+    """The date that drives scheduling, mirroring JS getEffectiveDueStr.
+
+    The same single date the UI shows, so date-driven sweeps and exports follow
+    the soft -> hard hand-off.
+    """
+    field = get_active_due_field(deliverable, today)
+    return str(deliverable.get(field) or '').strip() if field else ''
 
 
 def get_hard_due_str(deliverable):
-    """The hard, must-finish deadline. Empty when the date can be pushed."""
+    """The hard, must-finish due date. Empty when the date can be pushed."""
     if not isinstance(deliverable, dict):
         return ''
     return str(deliverable.get('hardDue') or '').strip()
@@ -1537,6 +1563,8 @@ TIMESHEETS_FILE = get_app_data_path("timesheets.json")
 TEMPLATES_FILE = get_app_data_path("templates.json")
 CAD_AUTO_SELECT_TRACE_FILE = get_app_data_path("cad_auto_select_trace.log")
 CHECKLISTS_FILE = get_app_data_path("checklists.json")
+ACTIVITY_HISTORY_FILE = get_app_data_path("activity_history.json")
+ACTIVITY_HISTORY_LIMIT = 200
 SYNC_BACKUPS_DIR = os.path.join(get_app_data_dir(), "sync_backups")
 SYNC_METADATA_FILE = get_app_data_path("local_project_sync_metadata.json")
 LIGHTING_SCHEDULE_SYNC_FILE = "T24LightingFixtureSchedule.sync.json"
@@ -1675,8 +1703,8 @@ def _atomic_write_json_file(path, payload):
 
 
 # --- Durable storage for the app's primary data files ---
-# tasks.json, notes.json, timesheets.json, templates.json, checklists.json and
-# settings.json hold the user's working data. A save writes a complete temporary
+# tasks.json, notes.json, timesheets.json, templates.json, checklists.json,
+# activity_history.json and settings.json hold the user's working data. A save writes a complete temporary
 # file and swaps it in, so a crash or power loss leaves either the old or the new
 # version, never a truncated one. The previous good version is kept as <name>.bak
 # plus one snapshot per day under backups/. A file that cannot be parsed is copied
@@ -1897,6 +1925,21 @@ def _write_data_file_safely(path, payload):
                 )
         _atomic_write_bytes(path, content)
         _DATA_FILE_VERIFIED_SIGNATURES[_data_file_key(path)] = _data_file_signature(path)
+
+
+def _normalize_activity_history_entries(data):
+    """Keep the newest activity history entries that have an id.
+
+    Accepts the saved {'entries': [...]} shape or a bare list, newest first.
+    """
+    entries = data.get('entries') if isinstance(data, dict) else data
+    if not isinstance(entries, list):
+        return []
+    kept = [
+        entry for entry in entries
+        if isinstance(entry, dict) and str(entry.get('id') or '').strip()
+    ]
+    return kept[:ACTIVITY_HISTORY_LIMIT]
 
 
 # --- Local Project Manager sync baseline metadata ---
@@ -3626,6 +3669,100 @@ def cb_update_excel_workbook(panel_data: PanelData, workbook_path: str, use_extr
 # script finishes reading them, so files older than a day are pruned instead.
 CAD_HANDOFF_DIRNAME = "acies-scheduler-cad"
 CAD_HANDOFF_MAX_AGE_SECONDS = 24 * 60 * 60
+
+# --- AutoCAD discovery ---
+# The oldest AutoCAD release the CAD scripts and plugins still support. Keep in step
+# with scripts/AutoCadDiscovery.ps1, which the PowerShell scripts use when the app
+# does not pass them a Core Console path.
+AUTOCAD_MIN_YEAR = 2020
+_AUTOCAD_YEAR_RE = re.compile(r"AutoCAD\s+(\d{4})(?!\d)", re.IGNORECASE)
+
+
+def _registry_subkey_names(winreg, key):
+    index = 0
+    while True:
+        try:
+            yield winreg.EnumKey(key, index)
+        except OSError:
+            return
+        index += 1
+
+
+def _autocad_registry_installs():
+    """Yields (install folder, product name) for each AutoCAD Autodesk registered.
+
+    Autodesk records every install under HKLM\\SOFTWARE\\Autodesk\\AutoCAD\\<release>\\<product>,
+    so this finds AutoCAD on any drive and any future release.
+    """
+    if sys.platform != "win32":
+        return
+    import winreg
+    for view in (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY):
+        access = winreg.KEY_READ | view
+        try:
+            root = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Autodesk\AutoCAD", 0, access)
+        except OSError:
+            continue
+        with root:
+            for release in _registry_subkey_names(winreg, root):
+                try:
+                    release_key = winreg.OpenKey(root, release, 0, access)
+                except OSError:
+                    continue
+                with release_key:
+                    for product in _registry_subkey_names(winreg, release_key):
+                        try:
+                            with winreg.OpenKey(release_key, product, 0, access) as product_key:
+                                folder = winreg.QueryValueEx(product_key, "AcadLocation")[0]
+                                try:
+                                    name = winreg.QueryValueEx(product_key, "ProductName")[0]
+                                except OSError:
+                                    name = ""
+                        except OSError:
+                            continue
+                        if isinstance(folder, str) and folder.strip():
+                            yield folder.strip(), str(name or "")
+
+
+def _autocad_program_files_installs():
+    """Yields (install folder, folder name) for AutoCAD folders under Program Files."""
+    for env_name in ("ProgramW6432", "ProgramFiles"):
+        base = os.environ.get(env_name)
+        if not base:
+            continue
+        autodesk_dir = os.path.join(base, "Autodesk")
+        try:
+            entries = os.listdir(autodesk_dir)
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.lower().startswith("autocad 20"):
+                yield os.path.join(autodesk_dir, entry), entry
+
+
+def discover_autocad_installs():
+    """Lists the AutoCAD Core Consoles on this PC, newest release first.
+
+    Each item is {'year': 2025, 'path': '<folder>\\accoreconsole.exe'}; 'year' is 0
+    when the release could not be read from the folder or product name.
+    """
+    found = {}
+    sources = itertools.chain(_autocad_registry_installs(), _autocad_program_files_installs())
+    for folder, name in sources:
+        exe = os.path.abspath(os.path.join(folder, "accoreconsole.exe"))
+        if not os.path.isfile(exe):
+            continue
+        year = 0
+        for text in (os.path.basename(folder.rstrip("\\/")), name):
+            match = _AUTOCAD_YEAR_RE.search(text)
+            if match:
+                year = int(match.group(1))
+                break
+        if year and year < AUTOCAD_MIN_YEAR:
+            continue
+        found.setdefault(os.path.normcase(exe), {"year": year, "path": exe})
+    return sorted(found.values(), key=lambda item: (-item["year"], item["path"].lower()))
+
 
 # --- API Class ---
 
@@ -7095,20 +7232,12 @@ CURRENT_DELIVERABLES_IN_PERIOD:
             )
 
     def get_installed_autocad_versions(self):
-        """Scans for installed AutoCAD versions in the typical directory."""
-        versions = []
-        base_dir = r"C:\Program Files\Autodesk"
-        if not os.path.exists(base_dir):
-            return {'status': 'success', 'versions': []}
-
-        for year in range(2022, 2027):  # 2022 to 2026
-            folder_name = f"AutoCAD {year}"
-            folder_path = os.path.join(base_dir, folder_name)
-            exe_path = os.path.join(folder_path, "accoreconsole.exe")
-            if os.path.exists(exe_path):
-                versions.append({'year': year, 'path': exe_path})
-
-        return {'status': 'success', 'versions': versions}
+        """Lists the AutoCAD installations on this PC, newest first."""
+        try:
+            return {'status': 'success', 'versions': discover_autocad_installs()}
+        except Exception as e:
+            logging.error(f"Error detecting AutoCAD installations: {e}")
+            return {'status': 'error', 'message': str(e), 'versions': []}
 
     def _ensure_aiohttp(self):
         """
@@ -8983,6 +9112,34 @@ Return ONLY the JSON object.
             logging.error(f"Error saving checklists: {e}")
             return {'status': 'error', 'message': str(e)}
 
+    # ===================== ACTIVITY HISTORY API =====================
+
+    def get_activity_history(self):
+        """Returns finished activities, kept after they are cleared from the activity tray.
+
+        An unreadable file reports an error so the app never saves over it.
+        """
+        try:
+            data = _read_data_file_with_recovery(ACTIVITY_HISTORY_FILE)
+        except FileNotFoundError:
+            return {'status': 'success', 'entries': []}
+        except Exception as e:
+            logging.error(f"Error loading activity history from {ACTIVITY_HISTORY_FILE}: {e}")
+            return {'status': 'error', 'message': str(e), 'entries': []}
+        return {'status': 'success', 'entries': _normalize_activity_history_entries(data)}
+
+    def save_activity_history(self, data):
+        """Saves the newest activity history entries, keeping the previous version as a backup."""
+        try:
+            _write_data_file_safely(
+                ACTIVITY_HISTORY_FILE,
+                {'entries': _normalize_activity_history_entries(data)},
+            )
+            return {'status': 'success'}
+        except Exception as e:
+            logging.error(f"Error saving activity history: {e}")
+            return {'status': 'error', 'message': str(e)}
+
     def _find_expense_signature_row(self, worksheet):
         for row_idx in range(1, worksheet.max_row + 1):
             value = worksheet.cell(row=row_idx, column=1).value
@@ -10623,52 +10780,70 @@ Return ONLY the JSON object.
             logging.error(f"Error exporting expense sheet: {e}")
             return {'status': 'error', 'message': str(e)}
 
-    def mark_overdue_projects_complete(self):
-        """Marks all deliverables with due dates before today as complete."""
-        try:
+    # Statuses a sweep leaves alone: work finished by others, and work already at
+    # (or past) the status being applied.
+    _OVERDUE_SWEEP_SKIP_STATUSES = {
+        'Complete': ('Completed (by others)', 'Complete', 'Delivered'),
+        'Delivered': ('Completed (by others)', 'Delivered'),
+    }
+
+    def _mark_overdue_projects(self, target_status):
+        """Sets every unfinished deliverable due before today to target_status.
+
+        The load and save share the data-file lock, so a page save arriving
+        mid-sweep cannot land between them. Returns the number changed.
+        """
+        skip_statuses = self._OVERDUE_SWEEP_SKIP_STATUSES[target_status]
+        today = datetime.date.today()
+
+        def is_skipped(item):
+            if ('Completed (by others)' in (item.get('statuses') or [])
+                    or 'completed-by-others' in (item.get('statusTags') or [])):
+                return True
+            current = {
+                'status': item.get('status'),
+                'statuses': list(item.get('statuses') or []),
+                'statusTags': list(item.get('statusTags') or []),
+            }
+            sync_status_arrays(current)
+            return current['status'] in skip_statuses
+
+        with _get_data_file_lock(TASKS_FILE):
             tasks = self._load_tasks_for_update()
-            today = datetime.date.today()
             count = 0
             for task in tasks:
                 deliverables = task.get('deliverables')
                 if isinstance(deliverables, list):
-                    for deliverable in deliverables:
-                        if (deliverable.get('status') == 'Completed (by others)'
-                                or 'Completed (by others)' in (deliverable.get('statuses') or [])
-                                or 'completed-by-others' in (deliverable.get('statusTags') or [])):
-                            continue
-                        due_str = get_effective_due_str(deliverable)
-                        if due_str:
-                            due_date = parse_due_str(due_str)
-                            if due_date and due_date.date() < today:
-                                deliverable['statuses'] = ['Complete']
-                                deliverable['status'] = 'Complete'
-                                sync_status_arrays(deliverable)
-                                if isinstance(deliverable.get('tasks'), list):
-                                    for t in deliverable['tasks']:
-                                        t['done'] = True
-                                count += 1
+                    items = [
+                        (deliverable, get_effective_due_str(deliverable))
+                        for deliverable in deliverables
+                        if isinstance(deliverable, dict)
+                    ]
                 else:
-                    if (task.get('status') == 'Completed (by others)'
-                            or 'Completed (by others)' in (task.get('statuses') or [])
-                            or 'completed-by-others' in (task.get('statusTags') or [])):
+                    items = [(task, task.get('due', ''))]
+                for item, due_str in items:
+                    if not due_str or is_skipped(item):
                         continue
-                    due_str = task.get('due', '')
-                    if due_str:
-                        due_date = parse_due_str(due_str)
-                        if due_date and due_date.date() < today:
-                            task['statuses'] = ['Complete']
-                            task['status'] = 'Complete'
-                            sync_status_arrays(task)
-                            if isinstance(task.get('tasks'), list):
-                                for t in task['tasks']:
-                                    t['done'] = True
-                            count += 1
+                    due_date = parse_due_str(due_str)
+                    if not due_date or due_date.date() >= today:
+                        continue
+                    item['statuses'] = [target_status]
+                    item['status'] = target_status
+                    sync_status_arrays(item)
+                    if isinstance(item.get('tasks'), list):
+                        for t in item['tasks']:
+                            t['done'] = True
+                    count += 1
             if count > 0:
                 saved = self.save_tasks(tasks)
                 if saved.get('status') != 'success':
                     raise RuntimeError(saved.get('message') or 'Could not save projects.')
-            return {'status': 'success', 'count': count}
+            return count
+
+    def mark_overdue_projects_complete(self):
+        """Marks all deliverables with due dates before today as complete."""
+        try:
+            return {'status': 'success', 'count': self._mark_overdue_projects('Complete')}
         except Exception as e:
             logging.error(f"Error marking overdue projects: {e}")
             return {'status': 'error', 'message': str(e)}
@@ -10676,49 +10851,7 @@ Return ONLY the JSON object.
     def mark_overdue_projects_delivered(self):
         """Marks all deliverables with due dates before today as delivered."""
         try:
-            tasks = self._load_tasks_for_update()
-            today = datetime.date.today()
-            count = 0
-            for task in tasks:
-                deliverables = task.get('deliverables')
-                if isinstance(deliverables, list):
-                    for deliverable in deliverables:
-                        if (deliverable.get('status') == 'Completed (by others)'
-                                or 'Completed (by others)' in (deliverable.get('statuses') or [])
-                                or 'completed-by-others' in (deliverable.get('statusTags') or [])):
-                            continue
-                        due_str = get_effective_due_str(deliverable)
-                        if due_str:
-                            due_date = parse_due_str(due_str)
-                            if due_date and due_date.date() < today:
-                                deliverable['statuses'] = ['Delivered']
-                                deliverable['status'] = 'Delivered'
-                                sync_status_arrays(deliverable)
-                                if isinstance(deliverable.get('tasks'), list):
-                                    for t in deliverable['tasks']:
-                                        t['done'] = True
-                                count += 1
-                else:
-                    if (task.get('status') == 'Completed (by others)'
-                            or 'Completed (by others)' in (task.get('statuses') or [])
-                            or 'completed-by-others' in (task.get('statusTags') or [])):
-                        continue
-                    due_str = task.get('due', '')
-                    if due_str:
-                        due_date = parse_due_str(due_str)
-                        if due_date and due_date.date() < today:
-                            task['statuses'] = ['Delivered']
-                            task['status'] = 'Delivered'
-                            sync_status_arrays(task)
-                            if isinstance(task.get('tasks'), list):
-                                for t in task['tasks']:
-                                    t['done'] = True
-                            count += 1
-            if count > 0:
-                saved = self.save_tasks(tasks)
-                if saved.get('status') != 'success':
-                    raise RuntimeError(saved.get('message') or 'Could not save projects.')
-            return {'status': 'success', 'count': count}
+            return {'status': 'success', 'count': self._mark_overdue_projects('Delivered')}
         except Exception as e:
             logging.error(f"Error marking overdue projects delivered: {e}")
             return {'status': 'error', 'message': str(e)}
@@ -19513,6 +19646,129 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
         return new_projects
 
 
+# The CAD publish script merges, shrinks and strips PDFs with small Python helpers.
+# The installed app cannot assume the user has Python or PyMuPDF, so the build ships
+# acies-pdf-tools.exe (scripts/pdf_helper_runner.py) and the script is pointed at it.
+PDF_HELPER_ENV_VAR = "ACIES_PDF_PYTHON"
+PDF_HELPER_EXE_NAME = "acies-pdf-tools.exe"
+
+
+def resolve_pdf_helper_python():
+    """Returns the interpreter the PDF helper scripts should run with, or '' if none is known.
+
+    The installed app uses its bundled acies-pdf-tools.exe. A source run uses its own
+    Python, which already has PyMuPDF. That interpreter must be a console program:
+    PowerShell does not wait for, or read the output of, a windowed one such as pythonw.
+    """
+    if getattr(sys, "frozen", False):
+        helper = Path(sys.executable).resolve().parent / PDF_HELPER_EXE_NAME
+        return str(helper) if helper.is_file() else ""
+    interpreter = Path(sys.executable)
+    if interpreter.name.lower() == "pythonw.exe":
+        console = interpreter.with_name("python.exe")
+        if console.is_file():
+            interpreter = console
+    return str(interpreter) if interpreter.is_file() else ""
+
+
+def _export_pdf_helper_python():
+    """Lets the CAD scripts find the PDF helper interpreter. An existing setting wins."""
+    if str(os.environ.get(PDF_HELPER_ENV_VAR) or "").strip():
+        return
+    helper = resolve_pdf_helper_python()
+    if helper:
+        os.environ[PDF_HELPER_ENV_VAR] = helper
+    else:
+        logging.warning(
+            "No PDF helper interpreter was found; publishing will rely on 'python' being on PATH."
+        )
+
+
+# pywebview quietly falls back to the Internet Explorer engine when the Microsoft Edge
+# WebView2 Runtime or .NET Framework 4.6.2 is missing. This UI cannot run there, so the
+# window would open blank with no explanation. Check first and say what is missing.
+WEBVIEW2_DOWNLOAD_URL = "https://developer.microsoft.com/microsoft-edge/webview2/"
+DOTNET_FRAMEWORK_DOWNLOAD_URL = "https://dotnet.microsoft.com/download/dotnet-framework"
+_DOTNET_FRAMEWORK_MIN_RELEASE = 394802  # .NET Framework 4.6.2
+_WEBVIEW2_MIN_VERSION = (86, 0, 622, 0)  # oldest runtime pywebview accepts
+_WEBVIEW2_CLIENT_GUIDS = (
+    "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",  # Evergreen runtime
+    "{2CD8A007-E189-409D-A2C8-9AF4EF3C72AA}",  # Beta
+    "{0D50BFEC-CD6A-4F9A-964C-C7416E3ACB10}",  # Dev
+    "{65C35B14-6C1D-4122-AC46-7148CC9D6497}",  # Canary
+)
+
+
+def _read_registry_value(hive_name, subkey, value_name):
+    """Reads one Windows registry value, or returns None when it does not exist."""
+    try:
+        import winreg
+        with winreg.OpenKey(getattr(winreg, hive_name), subkey) as key:
+            return winreg.QueryValueEx(key, value_name)[0]
+    except Exception:
+        return None
+
+
+def _parse_dotted_version(text):
+    try:
+        return tuple(int(part) for part in str(text).strip().split("."))
+    except ValueError:
+        return ()
+
+
+def find_missing_windows_requirement():
+    """Returns (message, download_url) when the desktop window cannot run, else None."""
+    if sys.platform != "win32":
+        return None
+
+    release = _read_registry_value(
+        "HKEY_LOCAL_MACHINE",
+        r"SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full",
+        "Release",
+    )
+    if not isinstance(release, int) or release < _DOTNET_FRAMEWORK_MIN_RELEASE:
+        return (
+            "ACIES Scheduler needs Microsoft .NET Framework 4.6.2 or newer, which "
+            "is not installed on this PC.",
+            DOTNET_FRAMEWORK_DOWNLOAD_URL,
+        )
+
+    locations = (
+        ("HKEY_CURRENT_USER", r"SOFTWARE\Microsoft\EdgeUpdate\Clients"),
+        ("HKEY_LOCAL_MACHINE", r"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients"),
+    )
+    for guid in _WEBVIEW2_CLIENT_GUIDS:
+        for hive_name, base_key in locations:
+            build = _read_registry_value(hive_name, f"{base_key}\\{guid}", "pv")
+            if _parse_dotted_version(build) >= _WEBVIEW2_MIN_VERSION:
+                return None
+    return (
+        "ACIES Scheduler needs the Microsoft Edge WebView2 Runtime, which is not "
+        "installed on this PC. It is a free download from Microsoft.",
+        WEBVIEW2_DOWNLOAD_URL,
+    )
+
+
+def _show_startup_problem(message, download_url=None):
+    """Explains why the app cannot start. The windowed build has no console to print to."""
+    if sys.platform != "win32" or os.environ.get("ACIES_NONINTERACTIVE"):
+        return
+    import ctypes
+    mb_yesno, mb_iconerror, mb_setforeground, idyes = 0x4, 0x10, 0x10000, 6
+    if download_url:
+        text = f"{message}\n\nOpen the download page now? Install it, then start ACIES Scheduler again."
+        flags = mb_yesno | mb_iconerror | mb_setforeground
+    else:
+        text = message
+        flags = mb_iconerror | mb_setforeground
+    answer = ctypes.windll.user32.MessageBoxW(None, text, "ACIES Scheduler", flags)
+    if download_url and answer == idyes:
+        try:
+            os.startfile(download_url)
+        except OSError as exc:
+            logging.warning("Could not open %s: %s", download_url, exc)
+
+
 def _preload_slow_modules(stop_event, delay_seconds=2.0):
     """Imports the lazily loaded libraries once the window has had time to appear.
 
@@ -19545,6 +19801,13 @@ def run():
     global api, window
     _configure_file_logging()
     logging.info(f"Starting ACIES Scheduler {APP_VERSION}")
+    missing_requirement = find_missing_windows_requirement()
+    if missing_requirement:
+        message, download_url = missing_requirement
+        logging.critical("Cannot start: %s", message)
+        _show_startup_problem(message, download_url)
+        sys.exit(1)
+    _export_pdf_helper_python()
     # Ensure current working directory is set to ProjectManagement folder so relative paths (styles.css, script.js, assets) resolve properly
     os.chdir(str(BASE_DIR))
     api = Api()
@@ -19565,8 +19828,19 @@ def run():
         min_size=(1024, 768)
     )
     window.events.closing += api.begin_shutdown
+    page_loaded = threading.Event()
+    window.events.loaded += lambda: page_loaded.set()
     try:
         webview.start()
+    except Exception:
+        # Without a console the user would otherwise see nothing at all.
+        if not page_loaded.is_set():
+            logging.critical("The desktop window could not start", exc_info=True)
+            _show_startup_problem(
+                "ACIES Scheduler could not open its window. Details were saved to "
+                + os.path.join(get_app_data_dir(), "logs", APP_LOG_FILE_NAME)
+            )
+        raise
     finally:
         api.begin_shutdown()
         # Stop worker-owned subprocesses before Python begins interpreter shutdown.

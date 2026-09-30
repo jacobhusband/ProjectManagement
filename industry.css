@@ -470,7 +470,7 @@
    1a — Register rows (list view)
    ========================================================================== */
 #projects-panel {
-  --reg-cols: 6px 74px minmax(0, 1fr) 108px 92px 92px 128px 112px;
+  --reg-cols: 6px 74px minmax(0, 1fr) 108px 124px 128px 112px;
   --reg-gap: 14px;
 }
 
@@ -696,8 +696,16 @@
   color: var(--accent-hover);
 }
 
-.reg-field.is-external {
+.reg-field.is-hard {
   border-left-color: color-mix(in srgb, var(--text) 40%, transparent);
+}
+
+.reg-field .reg-val,
+.plate-rule-cell .reg-val {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
 }
 
 .reg-field.is-late {
@@ -897,7 +905,7 @@
 
 .reg-line {
   display: grid;
-  grid-template-columns: 108px 92px 92px 128px 112px;
+  grid-template-columns: 108px 124px 128px 112px;
   gap: var(--reg-gap);
   align-items: center;
   padding: 4px 0;
@@ -1154,7 +1162,7 @@
 
 .plate-rule {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   margin-top: 16px;
   border-top: 1px solid color-mix(in srgb, var(--text) 20%, transparent);
 }
@@ -1278,7 +1286,8 @@ body.scratchpad-open .cmd-dock {
 }
 
 .cmd-context {
-  flex: 0 1 auto;
+  /* Keep its text width up to the cap; the command input takes what's left. */
+  flex: 0 0 auto;
   max-width: 34%;
   min-width: 0;
   padding: 5px 9px;
@@ -1868,7 +1877,7 @@ body.scratchpad-open .cmd-dock {
 
 @media (max-width: 1100px) {
   #projects-panel {
-    --reg-cols: 6px 64px minmax(0, 1fr) 96px 84px 84px 118px 100px;
+    --reg-cols: 6px 64px minmax(0, 1fr) 96px 116px 118px 100px;
   }
 }
 

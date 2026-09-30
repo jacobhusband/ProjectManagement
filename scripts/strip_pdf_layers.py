@@ -5,7 +5,10 @@ import os
 import sys
 import tempfile
 
-import fitz  # PyMuPDF
+try:
+    import pymupdf as fitz  # PyMuPDF
+except ImportError:  # PyMuPDF older than 1.24.3
+    import fitz
 
 
 def _catalog_has_ocproperties(doc):

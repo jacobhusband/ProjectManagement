@@ -7,7 +7,12 @@ import os
 import time
 import heapq
 import json
-import fitz  # PyMuPDF library
+try:
+    # PlotDWGs.ps1 reads this script's stdout as the paper size, and importing PyMuPDF
+    # under its old "fitz" name now prints a deprecation warning there.
+    import pymupdf as fitz
+except ImportError:  # PyMuPDF older than 1.24.3
+    import fitz
 
 
 # Standard paper sizes in points (1 inch = 72 points)

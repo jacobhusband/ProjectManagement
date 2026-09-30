@@ -26,7 +26,8 @@ body[data-projects-view-mode="card"] #projects-panel > .panel.stack { border: 0;
 #projects-panel .plate-notes svg path { fill: none; stroke: currentColor; stroke-width: 1.6; }
 @media (max-width: 700px) {
 }
-#projects-panel { --reg-cols: minmax(220px, 1fr) 100px 90px 100px 150px 52px; --reg-gap: 16px; }
+/* Deliverable names flex with the Project column instead of clipping at a fixed width. */
+#projects-panel { --reg-cols: minmax(220px, 2fr) minmax(100px, 1fr) 124px 150px 52px; --reg-gap: 16px; }
 #projects-panel .panel-toolbar[hidden] { display: none; }
 #projects-panel .projects-filter-controls { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; padding: 20px 28px; }
 #projects-panel .projects-filter-controls > .nav-search { flex: 1 1 220px; width: auto; max-width: none; margin: 0; }
@@ -60,18 +61,20 @@ body[data-projects-view-mode="card"] #projects-panel > .panel.stack { border: 0;
 #projects-panel .reg-stamp[data-status="complete"],
 #projects-panel .reg-stamp[data-status="completed-by-others"],
 #projects-panel .reg-stamp[data-status="delivered"] { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--modern-ground)); }
+/* The only solid stamp is "N days late": use the same red as the list's late dates, not the brand green that also marks finished work. */
+#projects-panel .reg-stamp--solid { color: color-mix(in srgb, var(--danger) 70%, var(--text)); background: color-mix(in srgb, var(--danger) 12%, var(--modern-ground)); border-color: color-mix(in srgb, var(--danger) 45%, transparent); }
 #projects-panel .reg-row .reg-ico { display: inline-flex; gap: 6px; width: auto; min-width: 38px; padding: 5px; border: 0; opacity: 1; background: transparent; color: var(--modern-muted); font: 400 12px/1.4 var(--modern-font); }
 #projects-panel .reg-row .reg-ico::after { display: none; }
 #projects-panel .reg-row .reg-ico.has-count { color: var(--accent); }
 #projects-panel .reg-row .reg-ico svg,
 #projects-panel .reg-row .reg-ico svg path { fill: none; stroke: currentColor; stroke-width: 1.6; }
 #projects-panel .reg-multi { grid-column: 2 / -1; }
-#projects-panel .reg-line { grid-template-columns: 100px 90px 100px 150px 52px; }
+#projects-panel .reg-line { grid-template-columns: minmax(100px, 1fr) 124px 150px 52px; }
 .kanban-column--in-progress .kanban-column__label { color: var(--accent); }
 .st-progress[aria-pressed="true"], .deliverable-status-badge.inprogress { color: var(--text); background: color-mix(in srgb, var(--accent) 15%, var(--modern-ground)); }
 @media (max-width: 1100px) {
-  #projects-panel { --reg-cols: minmax(180px, 1fr) 80px 82px 90px 130px 44px; --reg-gap: 10px; }
-  #projects-panel .reg-line { grid-template-columns: 80px 82px 90px 130px 44px; }
+  #projects-panel { --reg-cols: minmax(180px, 2fr) minmax(80px, 1fr) 112px 130px 44px; --reg-gap: 10px; }
+  #projects-panel .reg-line { grid-template-columns: minmax(80px, 1fr) 112px 130px 44px; }
   #projects-panel .projects-filter-controls > .nav-search { flex-basis: 100%; }
 }
 @media (max-width: 760px) {

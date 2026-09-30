@@ -67,14 +67,12 @@ if ($AcadCore -and (Test-Path -Path $AcadCore)) {
 }
 else {
   $acadCore = $null
-  $years = 2026..2018
-  foreach ($year in $years) {
-    $possiblePath = "C:\Program Files\Autodesk\AutoCAD $year\accoreconsole.exe"
-    if (Test-Path -Path $possiblePath) {
-      $acadCore = $possiblePath
-      Write-Host "PROGRESS: Found AutoCAD $year Core Console."
-      break
-    }
+  . (Join-Path $PSScriptRoot 'AutoCadDiscovery.ps1')
+  $acadInstalls = @(Find-AcadCoreConsole)
+  if ($acadInstalls.Count) {
+    # Newest release first.
+    $acadCore = $acadInstalls[0].Path
+    Write-Host "PROGRESS: Found AutoCAD $($acadInstalls[0].Year) Core Console."
   }
 }
 

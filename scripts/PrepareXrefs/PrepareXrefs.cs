@@ -19,9 +19,17 @@ namespace Acies.PrepareXrefs
                 var source = Environment.GetEnvironmentVariable("ACIES_XREF_SOURCE");
                 var output = Environment.GetEnvironmentVariable("ACIES_XREF_OUTPUT");
                 var searchRoot = Environment.GetEnvironmentVariable("ACIES_XREF_SEARCH_ROOT");
-                var worker = new Worker(Path.GetDirectoryName(output), searchRoot,
-                    Environment.GetEnvironmentVariable("ACIES_XREF_PACKAGE") == "1");
-                worker.Process(source, output);
+                var package = Environment.GetEnvironmentVariable("ACIES_XREF_PACKAGE") == "1";
+                var worker = new Worker(Path.GetDirectoryName(output), searchRoot, package, true);
+                try { worker.Process(source, output); }
+                catch (BindFailedException problem)
+                {
+                    // A failed bind leaves the in-memory drawings unusable, so start over from the
+                    // originals with prefixed names, which some drawings need to bind at all.
+                    editor.WriteMessage("\nPROGRESS: WARNING: Binding with merged names failed (" + problem.Message + "). Retrying with prefixed names.\n");
+                    worker = new Worker(Path.GetDirectoryName(output), searchRoot, package, false);
+                    worker.Process(source, output);
+                }
                 // A success file, rather than Core Console's exit code, gates delivery.
                 File.WriteAllText(output + ".ready", "Prepared successfully");
                 editor.WriteMessage("\nACIES_XREF_PREPARED: " + worker.Bound + " bound; " + worker.Exploded + " modelspace references exploded.\n");
@@ -33,17 +41,34 @@ namespace Acies.PrepareXrefs
         }
     }
 
+    // A reference that cannot be faithfully bound and exploded. As a nested dependency it stays
+    // attached as an XREF; as the selected drawing it still fails, since nothing else can carry it.
+    internal sealed class UnbindableException : InvalidOperationException
+    {
+        public UnbindableException(string message) : base(message) { }
+    }
+
+    internal sealed class BindFailedException : InvalidOperationException
+    {
+        public BindFailedException(string message) : base(message) { }
+    }
+
     internal sealed class Worker
     {
         private readonly string temp;
         private readonly string searchRoot;
         private readonly bool package;
+        private readonly bool insertBind;
         private readonly Dictionary<string, string> completed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> active = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, string> unbindable = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public int Bound;
         public int Exploded;
 
-        public Worker(string temp, string searchRoot, bool package) { this.temp = temp; this.searchRoot = searchRoot; this.package = package; }
+        public Worker(string temp, string searchRoot, bool package, bool insertBind)
+        {
+            this.temp = temp; this.searchRoot = searchRoot; this.package = package; this.insertBind = insertBind;
+        }
 
         private bool Available(string candidate) => File.Exists(candidate) && (!package ||
             Path.GetFullPath(candidate).StartsWith(Path.GetFullPath(searchRoot).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar,
@@ -126,6 +151,9 @@ namespace Acies.PrepareXrefs
         {
             source = Path.GetFullPath(source);
             if (completed.TryGetValue(source, out var cached)) return cached;
+            if (unbindable.TryGetValue(source, out var reason)) throw new UnbindableException(reason);
+            // Only nested dependencies get bound; the selected drawing (explicit output) is just saved.
+            var nested = requestedOutput == null;
             if (!active.Add(source)) throw new InvalidOperationException("Circular XREF dependency: " + source);
             if (active.Count > 64) throw new InvalidOperationException("XREF nesting exceeds 64 drawings: " + source);
             var output = requestedOutput ?? Path.Combine(temp, Guid.NewGuid().ToString("N") + ".dwg");
@@ -157,22 +185,39 @@ namespace Acies.PrepareXrefs
                                 {
                                     var entity = tr.GetObject(entityId, OpenMode.ForRead);
                                     if ((entity is RasterImage && !(entity is Wipeout)) || entity is UnderlayReference)
-                                        throw new InvalidOperationException("External image or underlay in " + source + ". Prepare this drawing manually to preserve its supporting media.");
+                                        throw new UnbindableException("External image or underlay in " + source + ". Prepare this drawing manually to preserve its supporting media.");
+                                    // AutoCAD refuses to bind an XREF holding proxy (e.g. AEC) objects.
+                                    if (nested && entity is ProxyEntity)
+                                        throw new UnbindableException("Proxy objects in " + source + " cannot be bound.");
                                     if (entity is BlockReference insert && !insert.ExtensionDictionary.IsNull)
                                     {
                                         var dict = (DBDictionary)tr.GetObject(insert.ExtensionDictionary, OpenMode.ForRead);
                                         var definition = (BlockTableRecord)tr.GetObject(insert.BlockTableRecord, OpenMode.ForRead);
                                         if (definition.IsFromExternalReference && dict.Contains("ACAD_FILTER"))
-                                            throw new InvalidOperationException("Clipped XREF in " + source + ". Prepare this reference manually to preserve its clipping.");
+                                            throw new UnbindableException("Clipped XREF in " + source + ". Prepare this reference manually to preserve its clipping.");
                                     }
                                 }
                         }
                         tr.Commit();
                     }
 
-                    foreach (var item in refs)
+                    foreach (var item in refs.ToArray())
                     {
-                        var child = Process(item.Value);
+                        string child;
+                        try { child = Process(item.Value); }
+                        catch (UnbindableException problem)
+                        {
+                            // Keep the reference attached instead of losing its display. It resolves
+                            // by file name from Xrefs once the drawing is transferred there.
+                            var childPath = Path.GetFullPath(item.Value);
+                            active.Remove(childPath);
+                            unbindable[childPath] = problem.Message;
+                            refs.Remove(item.Key);
+                            var console = Application.DocumentManager.MdiActiveDocument.Editor;
+                            console.WriteMessage("\nPROGRESS: WARNING: Left XREF '" + Path.GetFileName(childPath) + "' attached: " + problem.Message + "\n");
+                            console.WriteMessage("\nACIES_XREF_KEPT: " + childPath + "\n");
+                            continue;
+                        }
                         using (var tr = db.TransactionManager.StartTransaction())
                         {
                             ((BlockTableRecord)tr.GetObject(item.Key, OpenMode.ForWrite)).PathName = child;
@@ -182,8 +227,9 @@ namespace Acies.PrepareXrefs
                     if (refs.Count > 0)
                     {
                         var ids = new ObjectIdCollection(refs.Keys.ToArray());
+                        // ReloadXrefs alone picks up the repointed paths. Following it with ResolveXrefs
+                        // makes BindXrefs fail with eWasErased on drawings that carry AEC objects.
                         db.ReloadXrefs(ids);
-                        db.ResolveXrefs(true, false);
                         using (var tr = db.TransactionManager.StartTransaction())
                         {
                             foreach (var id in refs.Keys)
@@ -193,7 +239,11 @@ namespace Acies.PrepareXrefs
                             }
                             tr.Commit();
                         }
-                        db.BindXrefs(ids, true); // Preserve separate layer/block names on collisions.
+                        try { db.BindXrefs(ids, insertBind); }
+                        catch (Autodesk.AutoCAD.Runtime.Exception error)
+                        {
+                            throw new BindFailedException(error.Message);
+                        }
                         using (var tr = db.TransactionManager.StartTransaction())
                         {
                             foreach (var id in refs.Keys)

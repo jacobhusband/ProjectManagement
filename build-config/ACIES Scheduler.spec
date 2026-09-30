@@ -36,6 +36,7 @@ a = Analysis(
         (os.path.join(project_root, 'scripts', 'ManageLayersDWGs.ps1'), 'scripts'),
         (os.path.join(project_root, 'scripts', 'ManageXrefPathsDWGs.ps1'), 'scripts'),
         (os.path.join(project_root, 'scripts', 'ListDwgXrefs.ps1'), 'scripts'),
+        (os.path.join(project_root, 'scripts', 'AutoCadDiscovery.ps1'), 'scripts'),
         (os.path.join(project_root, 'scripts', 'removeXREFPaths.ps1'), 'scripts'),
         (os.path.join(project_root, 'scripts', 'StripRefPaths.dll'), 'scripts'),
         (os.path.join(project_root, 'scripts', 'PrepareXrefs-bin'), 'scripts/PrepareXrefs-bin'),
@@ -75,10 +76,49 @@ exe = EXE(
     entitlements_file=None,
     icon=[os.path.join(project_root, 'assets', 'acies.ico')],
 )
+
+# Console helper the CAD scripts run in place of a system Python (see
+# scripts/pdf_helper_runner.py). It has to be a console program so PowerShell can
+# wait for it and read its output.
+helper_a = Analysis(
+    [os.path.join(project_root, 'scripts', 'pdf_helper_runner.py')],
+    pathex=[os.path.join(project_root, 'scripts')],
+    binaries=[],
+    datas=[],
+    hiddenimports=[],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    noarchive=False,
+    optimize=0,
+)
+helper_pyz = PYZ(helper_a.pure)
+helper_exe = EXE(
+    helper_pyz,
+    helper_a.scripts,
+    [],
+    exclude_binaries=True,
+    name='acies-pdf-tools',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console=True,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=[os.path.join(project_root, 'assets', 'acies.ico')],
+)
 coll = COLLECT(
     exe,
     a.binaries,
     a.datas,
+    helper_exe,
+    helper_a.binaries,
+    helper_a.datas,
     strip=False,
     upx=True,
     upx_exclude=[],

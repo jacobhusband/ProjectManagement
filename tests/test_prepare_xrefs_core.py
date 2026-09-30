@@ -141,6 +141,43 @@ class PrepareXrefsCoreTests(unittest.TestCase):
 (close f)''', target)
             self.assertEqual(['1', '(10.0 2.0 0.0)'], report.read_text().splitlines())
 
+    def test_reference_with_external_image_stays_attached_and_sheet_still_processes(self):
+        # Title blocks carry the ACIES logo as an external image. Such a reference cannot be
+        # bound safely, but it must not fail every sheet that uses it.
+        png = bytes.fromhex(
+            '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489'
+            '0000000d49444154789c6360f8cfc000000301010018dd8db00000000049454e44ae426082')
+        with tempfile.TemporaryDirectory(prefix='acies-xref-image-') as temporary:
+            project = Path(temporary)
+            arch = project / 'Arch'
+            arch.mkdir()
+            (arch / 'logo.png').write_bytes(png)
+            self.fixture(arch, 'title.dwg',
+                '(command "_.LINE" "0,0" "1,0" "")\n'
+                '(command "_.-IMAGE" "_Attach" "logo.png" "0,0" 1 0)')
+            self.fixture(arch, 'leaf.dwg', '(command "_.LINE" "0,0" "1,0" "")')
+            source = self.fixture(arch, 'A04-04.dwg',
+                '(command "_.-XREF" "_Attach" "leaf.dwg" "10,0" 1 1 0)\n'
+                '(command "_.-XREF" "_Attach" "title.dwg" "0,0" 1 1 0)')
+            output = self.run_tool(source)
+            self.assertIn("Left XREF 'title.dwg' attached", output)
+            self.assertIn('ACIES_XREF_PREPARED: 1 bound; 1 modelspace references exploded.', output)
+            self.assertIn('Copied attached XREF to Xrefs: title.dwg', output)
+            self.assertNotIn('failed to process', output)
+            target = project / 'Xrefs/A04-04 (E).dwg'
+            self.assertTrue(target.is_file(), output)
+            self.assertTrue((project / 'Xrefs/title.dwg').is_file())
+            report = project / 'kept.txt'
+            self.core(project, f'''(setq f (open "{report.as_posix()}" "w"))
+(prin1 (cdr (assoc 70 (tblsearch "BLOCK" "title"))) f)
+(write-line "" f)
+(prin1 (if (tblsearch "BLOCK" "leaf") (logand 4 (cdr (assoc 70 (tblsearch "BLOCK" "leaf")))) -1) f)
+(close f)''', target)
+            flags = report.read_text().splitlines()
+            # title stays an XREF (flag 4 set); leaf was bound into an ordinary block (flag 4 clear).
+            self.assertEqual(4, int(flags[0]) & 4)
+            self.assertIn(int(flags[1]), (0, -1))
+
 
 if __name__ == '__main__':
     unittest.main()

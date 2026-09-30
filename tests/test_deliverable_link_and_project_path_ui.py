@@ -38,6 +38,22 @@ class DeliverableLinkAndProjectPathUiTests(unittest.TestCase):
             "return findWorkroomProjectRootById(projectPath) || projectPath;", script
         )
 
+    def test_project_path_has_a_browse_button_that_normalizes_the_choice(self):
+        html = INDEX_HTML_PATH.read_text(encoding="utf-8")
+        script = SCRIPT_JS_PATH.read_text(encoding="utf-8")
+
+        self.assertIn('<input id="f_path" placeholder="e.g. M:\\Projects\\..." />', html)
+        self.assertIn('id="btnBrowseProjectPath"', html)
+        self.assertIn('document.getElementById("btnBrowseProjectPath")', script)
+        self.assertIn("const chosen = await pickProjectFolder(startPath);", script)
+
+    def test_overdue_sweeps_flush_pending_saves_first(self):
+        script = SCRIPT_JS_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("async function flushPendingProjectSave() {", script)
+        self.assertIn("if (!(await flushPendingProjectSave())) {", script)
+        self.assertIn('runOverdueSweep("mark_overdue_projects_complete"', script)
+
     def test_deliverable_and_work_item_attachment_wiring_exists(self):
         script = SCRIPT_JS_PATH.read_text(encoding="utf-8")
 

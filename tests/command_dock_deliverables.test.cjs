@@ -23,7 +23,7 @@ function setup(settings = {}) {
     runCommandDockItem: item => { dock.ran = item; },
   });
   vm.runInContext([
-    ...['parseDueStr', 'getEffectiveDueStr', 'compareDeliverablesByDueDesc'].map(n => extract(appSource, n)),
+    ...['parseDueStr', 'isEarlierDay', 'getActiveDueField', 'getEffectiveDueStr', 'getHardDueStr', 'compareDeliverablesByDueDesc'].map(n => extract(appSource, n)),
     ...['getCommandDockProjectDeliverables', 'selectDeliverableForCommands', 'selectProjectForCommands'].map(n => extract(dockSource, n)),
   ].join('\n'), context);
   return { context, dock };

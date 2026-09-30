@@ -61,6 +61,14 @@ class GlobalPagesUiTests(unittest.TestCase):
         self.assertIn("pages.filter((p) => globalPageMatchesSearch(p, query));", render_block)
         self.assertIn("createGlobalPageCard(page, query)", render_block)
 
+    def test_plain_text_separates_blocks_so_previews_do_not_run_together(self):
+        script = SCRIPT_JS_PATH.read_text(encoding="utf-8")
+        start = script.index("function pageHtmlToPlainText(html) {")
+        helper = script[start:script.index("\n}\n", start)]
+
+        self.assertIn('"p, div, li, br, h1, h2, h3, h4, h5, h6, blockquote, pre, tr, td, th, dt, dd, hr"', helper)
+        self.assertIn('.forEach((node) => node.after(" "));', helper)
+
     def test_page_search_results_highlight_matches(self):
         script = SCRIPT_JS_PATH.read_text(encoding="utf-8")
         card_block = self._block(

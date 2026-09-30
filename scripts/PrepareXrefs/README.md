@@ -15,10 +15,22 @@ are delivered. Stored relative paths are tried first; stale paths can fall back
 to an unambiguous filename in the source tree. ZIP dependencies must come from
 the extracted archive, not another existing drawing on the computer.
 
-Unloaded, missing, ambiguous, circular, clipped, or unbindable references fail
-that drawing with a progress error. External images and underlays also require
-manual preparation. These cases are not silently detached or exploded without
-preserving their display. Other selected drawings continue processing.
+Unloaded, missing, ambiguous, or circular references fail that drawing with a
+progress error. Other selected drawings continue processing.
+
+A referenced drawing that cannot be bound faithfully is left attached as an XREF
+with a `WARNING` progress line, and the wrapper copies it to Xrefs when no file of
+that name is there yet (an existing file is never replaced). This covers drawings
+holding external images or underlays (title blocks with the ACIES logo), clipped
+XREFs, and proxy objects, which AutoCAD cannot bind in Core Console. The same
+conditions in the selected drawing itself still fail it, since nothing else can
+carry them.
+
+Binding first merges symbol names (Insert style). If AutoCAD rejects that
+(`eInvalidSymbolTableName`), the drawing is prepared again from the originals with
+prefixed names (Bind style). `ReloadXrefs` is deliberately not followed by
+`ResolveXrefs`: together they make `BindXrefs` fail with `eWasErased` on drawings
+carrying AEC objects.
 
 Build from this repository with a .NET 8 SDK and installed AutoCAD 2022/2025 APIs:
 

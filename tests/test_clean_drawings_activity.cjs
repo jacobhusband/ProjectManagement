@@ -24,6 +24,11 @@ async function scenario(outcome) {
     updateActivity: (id, info) => events.push(['update', id, info]),
     completeActivity: (id, info) => events.push(['complete', id, info]),
     failActivity: (id, info) => events.push(['fail', id, info]),
+    // 'removed' is a run taken out of the tray while it waited for its project.
+    waitForToolTurn: async (id, toolId, launch, paths) => {
+      events.push(['turn', id, toolId, paths, button.dataset.cleanBusy]);
+      return outcome !== 'removed';
+    },
     confirmCleanDrawingSelection: async () => outcome === 'cancel' ? null : { drawings: ['E01.dwg'] },
     ACTIVITY_STATUS: { SUCCESS: 'success', WARNING: 'warning', CANCELLED: 'cancelled' },
     window: { pywebview: { api: {
@@ -45,12 +50,23 @@ async function scenario(outcome) {
   assert.equal(events.filter(e => e[0] === 'begin').length, 1);
   assert.equal(button.dataset.cleanBusy, undefined);
   if (outcome === 'error') assert.equal(events.at(-1)[0], 'fail');
+  else if (outcome === 'removed') assert.deepEqual(events.at(-1).slice(0, 3), ['turn', 'activity-1', 'toolCleanDrawings']);
   else assert.equal(events.at(-1)[2].status, outcome === 'cancel' ? 'cancelled' : 'success');
   assert.equal(events.filter(e => e[0] === 'run').length, outcome === 'success' ? 1 : 0);
+  const turn = events.find(e => e[0] === 'turn');
+  if (['success', 'removed'].includes(outcome)) {
+    // The cleaning waits for its project after the dialog, and another clean may start meanwhile.
+    assert.equal(turn[2], 'toolCleanDrawings');
+    assert.deepEqual(Array.from(turn[3]), ['project']);
+    assert.equal(turn[4], undefined, 'the dialog lock is released before waiting');
+    assert.ok(events.indexOf(turn) > events.findIndex(e => e[0] === 'update' && /confirmation/.test(e[2].message)));
+  } else {
+    assert.equal(turn, undefined);
+  }
 }
 
 (async () => {
-  for (const outcome of ['success', 'cancel', 'error']) await scenario(outcome);
+  for (const outcome of ['success', 'cancel', 'error', 'removed']) await scenario(outcome);
   const progressContext = { clampActivityProgress: value => Math.max(0, Math.min(100, value)) };
   const pStart = source.indexOf('function deriveToolActivityProgress(');
   const pEnd = source.indexOf('function updateActivityStatusFromPayload(', pStart);
@@ -59,5 +75,5 @@ async function scenario(outcome) {
   assert.ok(progress('toolCleanDrawings', 'Validating drawing 2 of 3: E02.dwg', 50) > 50);
   assert.equal(progress('toolCleanDrawings', 'AutoCAD sheet cleanup: running (10s elapsed)…', 60), 60);
   assert.equal(progress('toolCleanDrawings', 'Checking source versions and delivering validated drawings…', 80), 95);
-  console.log('Clean Drawings activity tests passed: immediate activity, shared ID, success, cancellation, failure, progress.');
+  console.log('Clean Drawings activity tests passed: immediate activity, shared ID, success, cancellation, failure, waiting for the project, progress.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -26,15 +26,12 @@ if ($AcadCore -and (Test-Path -Path $AcadCore)) {
 }
 else {
   $acadCore = $null
-  $years = 2025, 2024, 2023, 2022, 2021, 2020
-
-  foreach ($year in $years) {
-    $possiblePath = "C:\Program Files\Autodesk\AutoCAD $year\accoreconsole.exe"
-    if (Test-Path -Path $possiblePath) {
-      $acadCore = $possiblePath
-      Write-Host "PROGRESS: Found AutoCAD $year Core Console."
-      break # Stop searching once the latest version is found
-    }
+  . (Join-Path $PSScriptRoot 'AutoCadDiscovery.ps1')
+  $acadInstalls = @(Find-AcadCoreConsole)
+  if ($acadInstalls.Count) {
+    # Newest release first.
+    $acadCore = $acadInstalls[0].Path
+    Write-Host "PROGRESS: Found AutoCAD $($acadInstalls[0].Year) Core Console."
   }
 }
 
@@ -43,8 +40,8 @@ $dll = Join-Path $scriptRoot "StripRefPaths.dll"
 
 # Validation
 if ([string]::IsNullOrEmpty($acadCore) -or -not (Test-Path $acadCore)) {
-  Write-Host "PROGRESS: ERROR: AutoCAD Core Console not found for versions 2020-2025."
-  Write-Host "Please ensure AutoCAD is installed in the default 'C:\Program Files\Autodesk' directory."
+  Write-Host "PROGRESS: ERROR: AutoCAD Core Console (2020 or newer) was not found."
+  Write-Host "Choose your AutoCAD installation in the app's Settings."
   exit 1
 }
 
@@ -868,6 +865,19 @@ try {
           throw 'Binding/exploding failed. Existing Xrefs and source drawings have been preserved. See AutoCAD output above.'
         }
         $transferSource = $prepareOutput
+
+        # References that could not be bound stay attached, so make sure each one can be
+        # found by file name beside the delivered DWG. An existing file is never replaced.
+        foreach ($line in @($prepareRun.Output)) {
+          $keptMatch = [regex]::Match([string]$line, '^ACIES_XREF_KEPT:\s*(.+?)\s*$')
+          if (-not $keptMatch.Success) { continue }
+          $keptSource = $keptMatch.Groups[1].Value
+          $keptTarget = Join-Path -Path $targetDir -ChildPath ([IO.Path]::GetFileName($keptSource))
+          if ((Test-Path -LiteralPath $keptSource -PathType Leaf) -and -not (Test-Path -LiteralPath $keptTarget)) {
+            Copy-Item -LiteralPath $keptSource -Destination $keptTarget
+            Write-Host "PROGRESS: Copied attached XREF to Xrefs: $([IO.Path]::GetFileName($keptSource))"
+          }
+        }
       }
 
       if ($stagedInXrefs) {

@@ -17,11 +17,11 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" media="print" data-async-stylesheet>
     <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;700&family=Barlow+Condensed:wght@400;500;600&display=swap" rel="stylesheet" media="print" data-async-stylesheet>
     <script src="app-bootstrap.js?v=20260929-fast-start"></script>
-    <link rel="stylesheet" href="styles.css?v=20260922-review-fixes" />
+    <link rel="stylesheet" href="styles.css?v=20260928-activity-history" />
     <link rel="stylesheet" href="symbol_counter.css?v=20260818-delete-actions" />
-    <link rel="stylesheet" href="industry.css?v=20260909-cmd-add-deliverable" />
+    <link rel="stylesheet" href="industry.css?v=20260928-soft-hard-due" />
     <link rel="stylesheet" href="modern-workspace.css?v=20260929-fast-start" />
-    <link rel="stylesheet" href="deliverables-workspace.css?v=20260909" />
+    <link rel="stylesheet" href="deliverables-workspace.css?v=20260928-soft-hard-due" />
     <link rel="stylesheet" href="project-pages-editor/dist/project-pages-editor-project-pages-editor.css?v=20260918-notes-reliability" />
 </head>
 
@@ -91,6 +91,15 @@
                     <line x1="8" y1="13" x2="16" y2="13"></line>
                     <line x1="8" y1="17" x2="16" y2="17"></line>
                     <line x1="8" y1="9" x2="10" y2="9"></line>
+                </svg>
+            </button>
+            <button class="icon-btn" id="activityHistoryBtn" type="button" aria-label="Activity history"
+                title="Activity history — reopen folders and drawings, or rerun tools">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M3 12a9 9 0 1 0 3-6.7L3 8"></path>
+                    <path d="M3 3v5h5"></path>
+                    <path d="M12 7v5l4 2"></path>
                 </svg>
             </button>
             <button class="icon-btn" id="mainHelpBtn" aria-label="Help" title="Help">
@@ -381,8 +390,7 @@
                             <th class="reg-th" data-sort="id">ID</th>
                             <th class="reg-th" data-sort="name">Project</th>
                             <th class="reg-th deliverables-header" data-sort="due">Deliverable</th>
-                            <th class="reg-th">Internal</th>
-                            <th class="reg-th">External</th>
+                            <th class="reg-th">Due</th>
                             <th class="reg-th">Status</th>
                             <th class="reg-th reg-th--right">Notes</th>
                         </tr>
@@ -862,7 +870,7 @@
                             <tr>
                                 <th class="ts-drag-col">MOVE</th>
                                 <th class="ts-project-col">PROJECT #</th>
-                                <th class="ts-task-col">Task #</th>
+                                <th class="ts-task-col">TASK #</th>
                                 <th class="ts-name-col">PROJECT NAME</th>
                                 <th class="ts-func-col">FUNC</th>
                                 <th class="ts-pm-col">PM</th>
@@ -1317,7 +1325,10 @@
                 </div>
                 <div class="col-8">
                     <label class="label">Project Path</label>
-                    <input id="f_path" placeholder="e.g. M:\Projects\..." />
+                    <div class="input-with-button">
+                        <input id="f_path" placeholder="e.g. M:\Projects\..." />
+                        <button type="button" class="btn tiny" id="btnBrowseProjectPath">Browse...</button>
+                    </div>
                 </div>
             </div>
             <div class="section-divider modal-full-only"></div>
@@ -2414,6 +2425,13 @@
                             on the card.</li>
                         <li>If a process is running, an <strong>Abort Process</strong> button appears in the toolbar
                             — use it if a tool hangs or needs to be cancelled.</li>
+                        <li>Tools for different projects run at the same time. Tools for the same project run one at a
+                            time: a tool you start while its project is busy shows as <em>Queued</em> in the activity
+                            tray and starts on its own when the earlier one finishes. <strong>Freeze / Thaw</strong> and
+                            <strong>XREF</strong> also run one at a time across all projects.</li>
+                        <li>Finished tools stay in <strong>Activity History</strong> (the clock icon in the header, or
+                            <em>History</em> in the activity tray) after you clear them. From there you can reopen
+                            output folders, PDFs and drawings, or rerun the tool.</li>
                     </ul>
 
                     <h3>AutoCAD Plugins</h3>
@@ -3467,21 +3485,22 @@
                             <input class="d-name" placeholder="e.g. DD90" />
                         </div>
                         <div class="field">
-                            <label class="label">Internal Due Date</label>
+                            <label class="label">Soft Due Date</label>
                             <div class="input-with-calendar">
                                 <input class="d-due" placeholder="MM/DD/YYYY" />
                                 <button type="button" class="calendar-icon-btn" title="Pick a date">📅</button>
                                 <div class="date-validation-msg"></div>
                             </div>
+                            <div class="tiny muted">Earlier target that can slip. Shows until it passes.</div>
                         </div>
                         <div class="field">
-                            <label class="label">Hard Deadline</label>
+                            <label class="label">Hard Due Date</label>
                             <div class="input-with-calendar">
                                 <input class="d-hard-due" placeholder="MM/DD/YYYY" />
                                 <button type="button" class="calendar-icon-btn" title="Pick a date">📅</button>
                                 <div class="date-validation-msg"></div>
                             </div>
-                            <div class="tiny muted">Must-finish date. Leave blank if this can be pushed.</div>
+                            <div class="tiny muted">Must-finish date. Shows once the soft date passes.</div>
                         </div>
                     </div>
                 </div>
@@ -3514,6 +3533,23 @@
                     class="btn tiny btn-remove text-danger">Remove</button></div>
         </div>
     </template>
+    <dialog id="activityHistoryDlg" class="activity-history-dialog" aria-labelledby="activityHistoryTitle">
+        <div class="modal-header">
+            <div class="title" id="activityHistoryTitle">Activity History</div>
+            <button class="btn ghost" type="button" data-close-dialog="activityHistoryDlg">Close</button>
+        </div>
+        <div class="activity-history-toolbar">
+            <input type="search" id="activityHistorySearch" class="activity-history-search"
+                placeholder="Search by tool, project, message, or drawing" aria-label="Search activity history"
+                autocomplete="off" />
+            <button type="button" class="btn ghost tiny" id="activityHistoryClearBtn">Clear History</button>
+        </div>
+        <div class="modal-body activity-history-body">
+            <p id="activityHistoryEmpty" class="activity-history-empty" role="status">Loading activity history...</p>
+            <div id="activityHistoryList" class="activity-history-list"></div>
+        </div>
+        <p class="activity-history-footnote">Keeps your last 200 finished activities on this computer.</p>
+    </dialog>
     <section id="activityTray" class="activity-tray" hidden aria-label="Activity">
         <div class="activity-tray-shell">
             <div class="activity-tray-header">
@@ -3524,6 +3560,10 @@
                         <span id="activityTrayCounts" class="activity-tray-counts">0 active, 0 queued, 0 completed</span>
                     </span>
                     <span id="activityTrayToggleIcon" class="activity-tray-toggle-icon" aria-hidden="true">⌄</span>
+                </button>
+                <button id="activityTrayHistory" class="activity-tray-clear" type="button"
+                    title="Reopen finished activity, including items you have cleared">
+                    History
                 </button>
                 <button id="activityTrayClearAll" class="activity-tray-clear" type="button">
                     Clear Completed
@@ -3538,7 +3578,7 @@
     <div id="updateCheckIndicator" class="corner-status" hidden>Checking for updates...</div>
     <script src="project-pages-editor/dist/project-pages-editor.js?v=20260918-save-queue-export"></script>
     <script src="script.js?v=20260929-fast-start"></script>
-    <script src="industry-projects.js?v=20260909-deliverables"></script>
+    <script src="industry-projects.js?v=20260928-soft-hard-due"></script>
     <script src="industry-shell.js?v=20260909-modern-dialogs"></script>
     <script src="symbol_counter_ui.js?v=20260818-delete-actions"></script>
 </body>

@@ -3,7 +3,10 @@
 # handling complex PDFs from applications like AutoCAD.
 
 import sys
-import fitz  # The PyMuPDF library
+try:
+    import pymupdf as fitz  # The PyMuPDF library
+except ImportError:  # PyMuPDF older than 1.24.3
+    import fitz
 
 def merge_pdfs(output_path, input_paths):
     """

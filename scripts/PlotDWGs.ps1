@@ -328,20 +328,22 @@ if ($AcadCore -and (Test-Path -Path $AcadCore)) {
 }
 else {
   $acadCore = $null
-  $years = 2025, 2024, 2023, 2022, 2021, 2020
-
-  foreach ($year in $years) {
-    $possiblePath = "C:\Program Files\Autodesk\AutoCAD $year\accoreconsole.exe"
-    if (Test-Path -Path $possiblePath) {
-      $acadCore = $possiblePath
-      Write-Host "PROGRESS: Found AutoCAD $year Core Console."
-      break # Stop searching once the latest version is found
-    }
+  . (Join-Path $PSScriptRoot 'AutoCadDiscovery.ps1')
+  $acadInstalls = @(Find-AcadCoreConsole)
+  if ($acadInstalls.Count) {
+    # Newest release first.
+    $acadCore = $acadInstalls[0].Path
+    Write-Host "PROGRESS: Found AutoCAD $($acadInstalls[0].Year) Core Console."
   }
 }
 
-# Name of the Python executable (can be python, python3, or a full path)
+# Interpreter for the PDF helper scripts. The app sets ACIES_PDF_PYTHON to its own
+# Python (source runs) or to the bundled acies-pdf-tools.exe (installed app), so the
+# helpers do not need a Python on the user's PATH. Without it, fall back to "python".
 $pythonExecutable = "python"
+if (-not [string]::IsNullOrWhiteSpace($env:ACIES_PDF_PYTHON) -and (Test-Path -LiteralPath $env:ACIES_PDF_PYTHON -PathType Leaf)) {
+  $pythonExecutable = $env:ACIES_PDF_PYTHON
+}
 $MaxCombinedPdfFullPathLength = 240
 
 # --- DEFINE AVAILABLE PAPER SIZES ---
@@ -371,7 +373,7 @@ if ($StripPdfLayers -and -not (Test-Path $stripPdfLayersScriptPath)) {
 # Check if Python is available in the system's PATH
 $pythonCheck = Get-Command $pythonExecutable -ErrorAction SilentlyContinue
 if (-not $pythonCheck) {
-  Write-Host "PROGRESS: ERROR: Python executable ('$pythonExecutable') not found in PATH."
+  Write-Host "PROGRESS: ERROR: Python executable ('$pythonExecutable') not found in PATH. Reinstall ACIES Scheduler, which includes the PDF tools this step needs."
   exit 1
 }
 # Relaunch in STA mode for the file picker dialog to work correctly
@@ -405,8 +407,8 @@ if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
 }
 # Validate that accoreconsole.exe exists
 if ([string]::IsNullOrEmpty($acadCore) -or -not (Test-Path $acadCore)) {
-  Write-Host "PROGRESS: ERROR: AutoCAD Core Console not found for versions 2020-2025."
-  Write-Host "Please ensure AutoCAD is installed in the default 'C:\Program Files\Autodesk' directory."
+  Write-Host "PROGRESS: ERROR: AutoCAD Core Console (2020 or newer) was not found."
+  Write-Host "Choose your AutoCAD installation in the app's Settings."
   exit 1
 }
 

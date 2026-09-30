@@ -90,6 +90,30 @@ function Test-PyInstallerArchiveContains {
     return [bool]($archiveOutput | Select-String -Pattern $Pattern -Quiet)
 }
 
+function Ensure-WebView2Bootstrapper {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    # Setup embeds this small Microsoft installer and runs it on PCs that lack the
+    # WebView2 Runtime (see build-config\setup.iss). Reuse a copy from an earlier build.
+    if (-not (Test-Path -LiteralPath $Path)) {
+        New-Item -ItemType Directory -Force -Path (Split-Path $Path -Parent) | Out-Null
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        $partialPath = "$Path.download"
+        # Microsoft's permanent link to the current Evergreen bootstrapper (about 2 MB).
+        Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile $partialPath -UseBasicParsing
+        Move-Item -LiteralPath $partialPath -Destination $Path -Force
+    }
+
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    if ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Subject -notmatch "O=Microsoft Corporation") {
+        Remove-Item -LiteralPath $Path -Force
+        throw "The WebView2 bootstrapper is not signed by Microsoft Corporation (signature status: $($signature.Status)). It was deleted; run the build again."
+    }
+}
+
 try {
     Write-Host "###################################" -ForegroundColor Cyan
     Write-Host "#      Building ACIES Scheduler     #" -ForegroundColor Cyan
@@ -202,6 +226,9 @@ try {
 
     $expectedBundleFiles = @(
         (Join-Path $bundleOutput "ACIES Scheduler.exe"),
+        # The console helper the publish script runs its PDF steps with (no system Python needed).
+        (Join-Path $bundleOutput "acies-pdf-tools.exe"),
+        (Join-Path $bundleInternal "scripts\AutoCadDiscovery.ps1"),
         (Join-Path $bundleInternal "index.html"),
         (Join-Path $bundleInternal "styles.css"),
         (Join-Path $bundleInternal "industry.css"),
@@ -222,6 +249,25 @@ try {
     foreach ($expectedPath in $expectedBundleFiles) {
         Assert-PathExists -Path $expectedPath -Message "PyInstaller bundle is missing expected output: $expectedPath"
     }
+
+    # With no arguments the strip helper prints its usage and exits 2. Reaching that point
+    # proves the bundled helper starts and can import PyMuPDF; a broken bundle exits 1.
+    $pdfHelperExecutable = Join-Path $bundleOutput "acies-pdf-tools.exe"
+    # The usage text goes to stderr, which Windows PowerShell 5.1 turns into a terminating
+    # error while ErrorActionPreference is Stop, so relax it just for this call.
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $global:LASTEXITCODE = 0
+        $pdfHelperOutput = (& $pdfHelperExecutable "strip_pdf_layers.py" 2>&1 | Out-String)
+        $pdfHelperExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($pdfHelperExitCode -ne 2 -or $pdfHelperOutput -notmatch "Usage: python strip_pdf_layers.py") {
+        throw "The bundled PDF helper did not start correctly (exit code $pdfHelperExitCode): $pdfHelperOutput"
+    }
+    Write-Host "Verified bundled PDF helper: $pdfHelperExecutable" -ForegroundColor Gray
 
     $bundleExecutable = Join-Path $bundleOutput "ACIES Scheduler.exe"
     $heifPackagePath = Join-Path $bundleInternal "pillow_heif"
@@ -259,6 +305,9 @@ try {
     }
 
     Write-Host "Found Inno Setup at: $isccPath" -ForegroundColor Gray
+
+    Write-Host "Fetching the WebView2 Runtime bootstrapper for the installer..." -ForegroundColor Gray
+    Ensure-WebView2Bootstrapper -Path (Join-Path $projectRoot "build\webview2\MicrosoftEdgeWebview2Setup.exe")
     Invoke-CheckedCommand -Description "Inno Setup compilation" -Command {
         & $isccPath "/DMyAppVersion=$appVersion" (Join-Path $PSScriptRoot "setup.iss")
     }
