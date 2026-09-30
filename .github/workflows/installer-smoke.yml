@@ -1,0 +1,58 @@
+name: Installer smoke test
+
+# Installs the published installer on a fresh Windows VM, the closest thing to a new
+# user's PC, and checks that it installs, starts, and that the tools that used to need
+# Python work without it. The job log needs a sign-in to read, so every result is also
+# written as an annotation on the run.
+#
+# It runs after each release is built, on demand from the Actions tab ("Run workflow",
+# with an optional tag), and whenever the test itself changes.
+on:
+  workflow_run:
+    workflows: ["Build and Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to test, for example v2.1.0. Leave blank for the latest release."
+        required: false
+        default: ""
+  push:
+    branches:
+      - main
+      - "ci/**"
+    paths:
+      - ".github/workflows/installer-smoke.yml"
+      - "build-config/smoke-test-installer.ps1"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    # After a release run, only test a release that was actually published.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download the installer
+        shell: pwsh
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+          RELEASED_TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          $tag = if ($env:RELEASED_TAG) { $env:RELEASED_TAG } else { $env:REQUESTED_TAG }
+          $releases = "https://github.com/$env:GITHUB_REPOSITORY/releases"
+          $url = if ($tag) { "$releases/download/$tag/acies-scheduler-setup.exe" } else { "$releases/latest/download/acies-scheduler-setup.exe" }
+          $installer = Join-Path $env:RUNNER_TEMP "acies-scheduler-setup.exe"
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
+          Write-Host "Downloaded $((Get-Item $installer).Length) bytes"
+
+      - name: Smoke test on a clean machine
+        shell: pwsh
+        run: |
+          ./build-config/smoke-test-installer.ps1 -InstallerPath (Join-Path $env:RUNNER_TEMP "acies-scheduler-setup.exe")
