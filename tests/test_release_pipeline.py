@@ -89,9 +89,17 @@ class InstallerSmokeTests(unittest.TestCase):
         condition = self.workflow()["jobs"]["smoke"]["if"]
         self.assertIn("github.event.workflow_run.conclusion == 'success'", condition)
 
-    def test_it_installs_the_published_installer_on_a_fresh_windows_vm(self):
+    def test_it_covers_two_windows_generations_and_a_pc_without_webview2(self):
         job = self.workflow()["jobs"]["smoke"]
-        self.assertEqual("windows-latest", job["runs-on"])
+        self.assertEqual("${{ matrix.os }}", job["runs-on"])
+        legs = job["strategy"]["matrix"]["include"]
+        self.assertFalse(job["strategy"]["fail-fast"])
+        self.assertGreaterEqual(len({leg["os"] for leg in legs}), 2)
+        self.assertIn("missing", {leg["webview2"] for leg in legs})
+        self.assertIn("-SimulateMissingWebView2", self.WORKFLOW.read_text(encoding="utf-8"))
+        self.assertIn("SimulateMissingWebView2", self.SCRIPT.read_text(encoding="utf-8"))
+
+    def test_it_installs_the_published_installer_on_a_fresh_windows_vm(self):
         text = self.WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("releases/latest/download/acies-scheduler-setup.exe", text)
         self.assertIn("smoke-test-installer.ps1", text)

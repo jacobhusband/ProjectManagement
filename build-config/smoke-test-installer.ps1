@@ -12,6 +12,9 @@ the WebView2 Runtime, and finally uninstalls.
       Tests an app folder that is already unpacked (a PyInstaller build) and skips the
       install and uninstall steps. Safe on a development PC.
 
+  smoke-test-installer.ps1 -InstallerPath .\acies-scheduler-setup.exe -SimulateMissingWebView2
+      As the first form, but first removes the WebView2 Runtime, to prove that Setup installs it.
+
 The app itself always runs against a scratch user profile, so it never touches real data.
 Exits 1 if a required check fails. On GitHub Actions each result is also written as an
 annotation, because the job log needs a sign-in to read.
@@ -20,7 +23,10 @@ annotation, because the job log needs a sign-in to read.
 param(
     [string]$InstallerPath,
     [string]$AppDir,
-    [int]$BootTimeoutSeconds = 60
+    [int]$BootTimeoutSeconds = 60,
+    # Removes the WebView2 Runtime before installing, so Setup has to install it. Only for a
+    # disposable machine: it uninstalls a system component.
+    [switch]$SimulateMissingWebView2
 )
 
 $ErrorActionPreference = "Stop"
@@ -132,6 +138,32 @@ try {
         ".NET Framework release $dotNetRelease; python on PATH: $pythonBefore; AutoCAD installed: $autocadBefore"
     Add-Result "Test machine" $true $environment -Informational
 
+    # ---------------------------------------------------------------- make WebView2 missing
+    if ($SimulateMissingWebView2) {
+        if ($AppDir) { throw "-SimulateMissingWebView2 only applies when installing with -InstallerPath." }
+        $recordedBefore = Get-WebView2Version
+        $notes = @()
+        # First try a real uninstall. It is refused on PCs where Edge shares the runtime.
+        $entry = Get-ItemProperty -LiteralPath "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Microsoft EdgeWebView" -ErrorAction SilentlyContinue
+        if ($entry -and $entry.UninstallString) {
+            $null = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"$($entry.UninstallString) --force-uninstall`"" -Wait -PassThru -WindowStyle Hidden
+            $notes += "ran the runtime's own uninstaller"
+        }
+        # If a version is still recorded, clear it. Setup and the app both decide from this record.
+        if (Get-WebView2Version) {
+            foreach ($guid in @("{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}", "{2CD8A007-E189-409D-A2C8-9AF4EF3C72AA}",
+                    "{0D50BFEC-CD6A-4F9A-964C-C7416E3ACB10}", "{65C35B14-6C1D-4122-AC46-7148CC9D6497}")) {
+                foreach ($base in @("HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients", "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients")) {
+                    Remove-ItemProperty -LiteralPath "$base\$guid" -Name pv -ErrorAction SilentlyContinue
+                }
+            }
+            $notes += "cleared the recorded version"
+        }
+        $recordedNow = Get-WebView2Version
+        Add-Result "WebView2 made unavailable for this test" (-not $recordedNow) "was '$recordedBefore', now '$recordedNow' ($($notes -join '; '))"
+        if ($recordedNow) { throw "Could not make WebView2 unavailable, so the install path cannot be tested." }
+    }
+
     # ---------------------------------------------------------------- install
     if ($AppDir) {
         $appDir = (Resolve-Path -LiteralPath $AppDir).Path
@@ -147,7 +179,11 @@ try {
         $setupText = Get-Content -Raw -LiteralPath $setupLog -ErrorAction SilentlyContinue
         Add-Result "Setup runs silently and registers the app" ($setup.ExitCode -eq 0 -and [bool]$install) "exit code $($setup.ExitCode), install folder: $appDir"
         $needed = $setupText -match "Extracting temporary file: .*MicrosoftEdgeWebview2Setup\.exe"
-        Add-Result "Setup handled the WebView2 Runtime" $true $(if ($needed) { "it was missing, so Setup ran Microsoft's bootstrapper" } else { "it was already installed, so Setup left it alone" }) -Informational
+        if ($SimulateMissingWebView2) {
+            Add-Result "Setup installs the WebView2 Runtime when it is missing" $needed $(if ($needed) { "Setup ran Microsoft's bootstrapper" } else { "Setup did not try to install it" })
+        } else {
+            Add-Result "Setup handled the WebView2 Runtime" $true $(if ($needed) { "it was missing, so Setup ran Microsoft's bootstrapper" } else { "it was already installed, so Setup left it alone" }) -Informational
+        }
     }
 
     $exe = Join-Path $appDir "ACIES Scheduler.exe"

@@ -30,10 +30,26 @@ permissions:
 
 jobs:
   smoke:
+    name: smoke (${{ matrix.os }}, WebView2 ${{ matrix.webview2 }})
     # After a release run, only test a release that was actually published.
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    strategy:
+      # One failing combination must not hide the result of the others.
+      fail-fast: false
+      matrix:
+        include:
+          # Windows Server 2022 is the closest hosted image to Windows 10, and the latest
+          # image is the closest to Windows 11.
+          - os: windows-2022
+            webview2: present
+          - os: windows-latest
+            webview2: present
+          # The same image with the WebView2 Runtime removed first, to prove that Setup
+          # installs it. Some Windows 10 PCs really do not have it.
+          - os: windows-latest
+            webview2: missing
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -54,5 +70,12 @@ jobs:
 
       - name: Smoke test on a clean machine
         shell: pwsh
+        env:
+          WEBVIEW2_MODE: ${{ matrix.webview2 }}
         run: |
-          ./build-config/smoke-test-installer.ps1 -InstallerPath (Join-Path $env:RUNNER_TEMP "acies-scheduler-setup.exe")
+          $installer = Join-Path $env:RUNNER_TEMP "acies-scheduler-setup.exe"
+          if ($env:WEBVIEW2_MODE -eq "missing") {
+            ./build-config/smoke-test-installer.ps1 -InstallerPath $installer -SimulateMissingWebView2
+          } else {
+            ./build-config/smoke-test-installer.ps1 -InstallerPath $installer
+          }
