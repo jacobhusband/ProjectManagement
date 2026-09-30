@@ -193,6 +193,21 @@ try {
     Add-Result "Installed files are all there" ($missing.Count -eq 0) $(if ($missing.Count) { "missing: " + ($missing -join ", ") } else { "app, PDF helper, CAD scripts and web UI" })
     if ($missing.Count) { throw "The install is incomplete, so the remaining checks cannot run." }
 
+    # The installer is public, so anyone can read the .env inside it. Releases from 2.1.1 on are
+    # built without a Gemini key (each user enters their own); earlier ones still carry it.
+    $versionFile = Join-Path $appDir "_internal\VERSION"
+    $installedVersion = if (Test-Path -LiteralPath $versionFile) { (Get-Content -Raw -LiteralPath $versionFile).Trim() } else { "" }
+    $envFile = Join-Path $appDir "_internal\.env"
+    $envText = if (Test-Path -LiteralPath $envFile) { [string](Get-Content -Raw -LiteralPath $envFile) } else { "" }
+    $carriesKey = $envText -match '(?m)^\s*(GOOGLE|GEMINI)_API_KEY\s*=\s*["'']?[^"''\s]'
+    $mustBeKeyFree = $false
+    try { $mustBeKeyFree = ([version]$installedVersion) -ge ([version]"2.1.1") } catch { $mustBeKeyFree = $false }
+    if ($mustBeKeyFree) {
+        Add-Result "The installer carries no Gemini API key" (-not $carriesKey) $(if ($carriesKey) { "version $installedVersion ships an API key in _internal\.env" } else { "version $installedVersion, _internal\.env has none" })
+    } else {
+        Add-Result "Gemini API key in the installer" $true $(if ($carriesKey) { "version '$installedVersion' still carries one (only releases from 2.1.1 on are checked)" } else { "none found in version '$installedVersion'" }) -Informational
+    }
+
     $webViewAfter = Get-WebView2Version
     Add-Result "WebView2 Runtime is present for the app" ([bool]$webViewAfter) $(if ($webViewAfter) { "version $webViewAfter" } else { "not installed after Setup" })
 

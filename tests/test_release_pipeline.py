@@ -66,8 +66,8 @@ class ReleaseNotesTests(unittest.TestCase):
         if not notes.exists():
             self.skipTest(f"No notes yet for {version}; the release workflow will warn.")
         text = notes.read_text(encoding="utf-8")
-        self.assertIn(version, text)
-        self.assertIn("Before you install", text)
+        self.assertIn(f"## ACIES Scheduler {version}", text)
+        self.assertGreater(len(text.strip()), 200, "The notes look like a stub.")
         self.assertNotIn("TODO", text)
 
 
@@ -117,6 +117,9 @@ class InstallerSmokeTests(unittest.TestCase):
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, text)
+        # The published installer must not carry a Gemini key (releases from 2.1.1 on).
+        self.assertIn("The installer carries no Gemini API key", text)
+        self.assertIn('[version]"2.1.1"', text)
         # Setup must never run on a PC that already has the app unless the caller asked for it.
         self.assertIn("-InstallerPath", text)
         self.assertIn("-AppDir", text)
