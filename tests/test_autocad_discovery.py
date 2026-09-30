@@ -148,7 +148,12 @@ class PowerShellDiscoveryTests(unittest.TestCase):
             found = self.find(temp_dir)
 
             self.assertEqual([2027, 2025], [item["Year"] for item in found])
-            self.assertEqual(str(autodesk / "AutoCAD 2027" / "accoreconsole.exe"), found[0]["Path"])
+            # Compare resolved paths: the GitHub runner's temp folder is a short 8.3 name
+            # (C:\Users\RUNNER~1\...) that PowerShell reports in its long form.
+            self.assertEqual(
+                (autodesk / "AutoCAD 2027" / "accoreconsole.exe").resolve(),
+                Path(found[0]["Path"]).resolve(),
+            )
 
     def test_finds_nothing_when_autocad_is_absent(self):
         with tempfile.TemporaryDirectory(prefix="acies-acad-ps-") as temp_dir:
