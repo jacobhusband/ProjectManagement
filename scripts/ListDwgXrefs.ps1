@@ -59,8 +59,8 @@ try {
 '@
   Set-Content -Path $lispPath -Value $lisp -Encoding ASCII
 
+  # Scripts already use command-line file prompts. Leave registry-backed FILEDIA alone.
   $scriptLines = @(
-    "FILEDIA 0",
     "CMDECHO 0",
     "(load `"$lispPathForAcad`")",
     "LISTXREFS",

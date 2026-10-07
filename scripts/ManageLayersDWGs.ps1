@@ -584,35 +584,43 @@ $extractLspContent = @"
   )
 )
 
-;;; Batch: Try ObjectDBX first, fall back to OPEN (with xrefs disabled) for failures
-(defun c:ExtractLayersBatch (/ files dwgPath failedFiles oldXloadctl)
+;;; True when dwgPath is the drawing this console session was started on (/i).
+(defun _session-drawing-p (dwgPath)
+  (= (strcase (_fix-path dwgPath))
+     (strcase (strcat (getvar "DWGPREFIX") (getvar "DWGNAME"))))
+)
+
+;;; Leave the console without saving. A drawing that loads dirty (unresolved
+;;; xrefs, custom objects) makes QUIT ask "Really want to discard all changes?",
+;;; and answering N would leave the console waiting or resave the DWG.
+(defun _quit-discard ()
+  (if (/= 0 (getvar "DBMOD"))
+    (command "_.QUIT" "_Y")
+    (command "_.QUIT")
+  )
+)
+
+;;; Batch: ObjectDBX for every file. A file ObjectDBX cannot read is read
+;;; directly when it is the session drawing; otherwise it is left out of the
+;;; dump and PowerShell re-runs it in its own console session. Never use
+;;; _.OPEN here: it prompts on a dirty drawing and the script cannot answer.
+(defun c:ExtractLayersBatch (/ files dwgPath)
   (setq files (_read-lines "$scanListForLisp"))
-  (setq failedFiles nil)
-
-  (if files
-    (progn
-      ;; First pass: Try ObjectDBX for all files
-      (foreach dwgPath files
-        (if (not (_extract-layers-dbx dwgPath "$lispReportPath"))
-          (setq failedFiles (cons dwgPath failedFiles))
-        )
-      )
-
-      ;; Second pass: Fallback with XLOADCTL=0 to skip xref loading
-      (if failedFiles
-        (progn
-          (setq oldXloadctl (getvar "XLOADCTL"))
-          (setvar "XLOADCTL" 0)
-          (foreach f (reverse failedFiles)
-            (command "_.OPEN" f)
-            (c:ExtractLayers)
-          )
-          (setvar "XLOADCTL" oldXloadctl)
-        )
+  (foreach dwgPath files
+    (if (not (_extract-layers-dbx dwgPath "$lispReportPath"))
+      (if (_session-drawing-p dwgPath)
+        (c:ExtractLayers)
       )
     )
   )
-  (command "_.QUIT" "_N")
+  (_quit-discard)
+  (princ)
+)
+
+;;; Single-file fallback, run on a file opened with /i by PowerShell.
+(defun c:ExtractLayersCurrent ()
+  (c:ExtractLayers)
+  (_quit-discard)
   (princ)
 )
 (princ)
@@ -638,9 +646,8 @@ if ($filesToScan.Count -eq 0) {
 $filesToScan | ForEach-Object { ($_ -replace '\\', '/') } |
   Set-Content -Path $scanListFile -Encoding ASCII
 
+# Scripts already use command-line file prompts. Leave registry-backed FILEDIA alone.
 $extractScrLines = @(
-  "FILEDIA",
-  "0",
   "CMDDIA",
   "0",
   "PROXYNOTICE",
@@ -657,9 +664,43 @@ $errLog = Join-Path $ToolDir "extract_batch.err.txt"
 if (Test-Path $outLog) { Remove-Item $outLog -Force }
 if (Test-Path $errLog) { Remove-Item $errLog -Force }
 
-$scanTimeoutSeconds = $ProcessTimeoutSeconds * $filesToScan.Count
+# ObjectDBX reads a file in seconds; a console that stays silent longer than this is stuck on a prompt.
+$scanTimeoutSeconds = [Math]::Min($ProcessTimeoutSeconds * $filesToScan.Count, 120 + 30 * $filesToScan.Count)
 $r = Invoke-AcadCore -DwgPath $filesToScan[0] -ScriptPath $extractScr -OutLog $outLog -ErrLog $errLog -TimeoutSeconds $scanTimeoutSeconds
 if ($r.TimedOut) { Write-Host "Layer scan timed out." -ForegroundColor Red }
+
+# Files ObjectDBX could not read have no ###DWG: marker in the dump. Re-run each in its own
+# console session (opened with /i) instead of _.OPEN inside the batch session.
+if (-not $r.TimedOut -and (Test-Path $layerDumpFile)) {
+  $scannedNames = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($line in (Get-Content $layerDumpFile)) {
+    $t = $line.Trim()
+    if ($t.StartsWith("###DWG:", [System.StringComparison]::OrdinalIgnoreCase)) {
+      [void]$scannedNames.Add($t.Substring(7))
+    }
+  }
+  $unreadFiles = @($filesToScan | Where-Object { -not $scannedNames.Contains([System.IO.Path]::GetFileName($_)) })
+  if ($unreadFiles.Count -gt 0) {
+    $fallbackScr = Join-Path $ToolDir "extract_current.scr"
+    Set-Content -Path $fallbackScr -Value (@(
+        "CMDDIA",
+        "0",
+        "PROXYNOTICE",
+        "0",
+        "SECURELOAD",
+        "0",
+        "(load `"$extractLspForLisp`")",
+        "(c:ExtractLayersCurrent)"
+      ) -join "`r`n") -Encoding ASCII
+    foreach ($unread in $unreadFiles) {
+      Write-Host "PROGRESS: Reading layers from $([System.IO.Path]::GetFileName($unread)) directly..."
+      $fbOut = Join-Path $ToolDir "extract_current.out.txt"
+      $fbErr = Join-Path $ToolDir "extract_current.err.txt"
+      $fb = Invoke-AcadCore -DwgPath $unread -ScriptPath $fallbackScr -OutLog $fbOut -ErrLog $fbErr -TimeoutSeconds $ProcessTimeoutSeconds
+      if ($fb.TimedOut) { Write-Warning "Layer scan timed out for $unread" }
+    }
+  }
+}
 
 Write-Host "PROGRESS: Reading extracted data..."
 
@@ -1292,7 +1333,10 @@ $updateLspContent = @"
   (if (null f)
     (progn
       (prompt "\\nERROR: Could not open LayerUpdateReport.tsv for append.")
-      (command "_.QUIT" "_N")
+      (if (/= 0 (getvar "DBMOD"))
+        (command "_.QUIT" "_Y")
+        (command "_.QUIT")
+      )
       (princ)
     )
   )
@@ -1336,8 +1380,6 @@ Set-Content -Path $updateLsp -Value $updateLspContent -Encoding ASCII
 
 $updateScr = Join-Path $ToolDir "update.scr"
 $updateScrLines = @(
-  "FILEDIA",
-  "0",
   "CMDDIA",
   "0",
   "PROXYNOTICE",

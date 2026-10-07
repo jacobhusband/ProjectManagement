@@ -212,16 +212,24 @@ function Show-ZipDwgDialog {
     return @()
   }
 
-  Add-Type -AssemblyName System.IO.Compression.FileSystem
-  $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+  Write-Host "PROGRESS: Reading drawings in ZIP: $([IO.Path]::GetFileName($ZipPath))"
   try {
-    $entryNames = @($zip.Entries | Where-Object {
-      $_.Name -and ([IO.Path]::GetExtension($_.FullName) -ieq '.dwg')
-    } | ForEach-Object { $_.FullName } | Sort-Object)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+    try {
+      $entryNames = @($zip.Entries | Where-Object {
+        $_.Name -and ([IO.Path]::GetExtension($_.FullName) -ieq '.dwg')
+      } | ForEach-Object { $_.FullName } | Sort-Object)
+    }
+    finally { $zip.Dispose() }
   }
-  finally { $zip.Dispose() }
+  catch {
+    Write-Host "PROGRESS: ERROR: Could not read ZIP '$ZipPath': $_"
+    throw
+  }
 
   if ($entryNames.Count -eq 0) {
+    Write-Host "PROGRESS: No DWG files were found in ZIP: $([IO.Path]::GetFileName($ZipPath))"
     [System.Windows.Forms.MessageBox]::Show("No DWG files were found in $ZipPath", "Select DWGs from ZIP") | Out-Null
     return @()
   }
@@ -232,6 +240,15 @@ function Show-ZipDwgDialog {
     $form.Size = New-Object System.Drawing.Size(800, 520)
     $form.MinimumSize = New-Object System.Drawing.Size(600, 350)
     $form.StartPosition = 'CenterScreen'
+    # PowerShell is launched hidden by the desktop app. The second, unowned
+    # dialog can otherwise stay behind the app after the file picker closes.
+    $form.TopMost = $true
+    $form.ShowInTaskbar = $true
+    $form.add_Shown({
+      $form.Activate()
+      $form.BringToFront()
+      $list.Focus() | Out-Null
+    })
     $label = New-Object System.Windows.Forms.Label
     $label.Text = 'Check the drawings you want to prepare for XREF. Paths are shown as stored in the ZIP.'
     $label.Dock = 'Top'
@@ -259,7 +276,11 @@ function Show-ZipDwgDialog {
     $form.Controls.Add($buttons)
     $form.AcceptButton = $ok
     $form.CancelButton = $cancel
-    if ($form.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return @() }
+    Write-Host "PROGRESS: Waiting for DWG selection from ZIP ($($entryNames.Count) drawing(s)). Check the 'Select DWGs from ZIP' window."
+    if ($form.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) {
+      Write-Host "PROGRESS: ZIP drawing selection cancelled."
+      return @()
+    }
     $selected = @($list.CheckedItems | ForEach-Object { [string]$_ })
     if ($selected.Count -eq 0) { return @() }
 
@@ -269,7 +290,8 @@ function Show-ZipDwgDialog {
       try {
         $folder.Description = 'Select the project root folder. Prepared drawings will go into its Xrefs subfolder.'
         $folder.SelectedPath = Split-Path -Parent $ZipPath
-        if ($folder.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return @() }
+        Write-Host "PROGRESS: Waiting for project folder selection for ZIP drawings..."
+        if ($folder.ShowDialog($form) -ne [System.Windows.Forms.DialogResult]::OK) { return @() }
         $projectRoot = $folder.SelectedPath
       }
       finally { $folder.Dispose() }
@@ -621,9 +643,9 @@ Set-Content -Encoding ASCII -Path $lisp -Value $lispContent
 # Make .scr that runs the requested steps
 $script = Join-Path $env:TEMP "run_STRIP.scr"
 $lispPathForScript = ($lisp -replace '\\', '/')
+# Scripts already use command-line file prompts. Leave registry-backed FILEDIA alone.
 $scriptLines = @(
   "CMDECHO 1",
-  "FILEDIA 0",
   "SECURELOAD 0"
 )
 if ($StripXrefs) {
@@ -651,7 +673,6 @@ Set-Content -Encoding ASCII -Path $script -Value $scriptContent
 $verifyScript = Join-Path $env:TEMP "verify_AUDIT.scr"
 $verifyContent = @(
   "CMDECHO 1",
-  "FILEDIA 0",
   "_.AUDIT",
   "N",
   "_.QUIT",
@@ -851,7 +872,7 @@ try {
         $prepareOutput = Join-Path $prepareDir 'prepared.dwg'
         Copy-Item -LiteralPath $sourcePath -Destination $prepareInput
         $prepareScript = Join-Path $prepareDir 'prepare.scr'
-        @('FILEDIA 0', 'SECURELOAD 0', '_.NETLOAD', ('"' + $prepareDll + '"'),
+        @('SECURELOAD 0', '_.NETLOAD', ('"' + $prepareDll + '"'),
           'ACIESPREPAREXREFS', '_.QUIT', '_Y') | Set-Content -LiteralPath $prepareScript -Encoding UTF8
         Write-Host "PROGRESS: Binding and exploding modelspace Xrefs in $name..."
         $prepareRun = Invoke-AcadCoreScript -AcadCorePath $acadCore -DwgPath $prepareInput -ScriptPath $prepareScript -Environment @{

@@ -711,6 +711,15 @@ function ensureCommandDock() {
   });
   const pending = el("span", { className: "reg-kick cmd-pending" });
   pending.hidden = true;
+  // Per-project: it shows, and changes, Work locally for whichever project is
+  // selected, so commands run on its local copy instead of the server folder.
+  const workLocally = el("label", { className: "reg-kick cmd-work-locally" });
+  const workLocallyInput = el("input", {
+    type: "checkbox",
+    className: "cmd-work-locally-input",
+    disabled: true,
+  });
+  workLocally.append(workLocallyInput, el("span", { textContent: "Work locally" }));
   const hint = el("span", { className: "reg-kick cmd-key", textContent: "Ctrl K" });
   const expand = el("button", {
     type: "button",
@@ -722,7 +731,7 @@ function ensureCommandDock() {
     el("span", { className: "reg-kick", textContent: "Actions" }),
     el("span", { className: "cmd-expand-chevron", "aria-hidden": "true", textContent: "▴" })
   );
-  bar.append(context, input, pending, hint, expand);
+  bar.append(context, input, pending, workLocally, hint, expand);
 
   root.append(body, bar);
   document.body.appendChild(root);
@@ -740,6 +749,8 @@ function ensureCommandDock() {
     context,
     input,
     pending,
+    workLocally,
+    workLocallyInput,
     expand,
     deliverable: null,
     project: null,
@@ -760,6 +771,9 @@ function ensureCommandDock() {
     filterCommandDock();
   });
   input.addEventListener("keydown", handleCommandDockKeydown);
+  workLocallyInput.addEventListener("change", () => {
+    void toggleCommandDockWorkLocally(workLocallyInput.checked);
+  });
   // Capture before outside controls run: explicit status/action triggers can
   // still reopen the sheet, while ordinary outside clicks simply dismiss it.
   document.addEventListener("pointerdown", (event) => {
@@ -858,6 +872,15 @@ function updateCommandDockContext() {
       ? "Now select a row or type # to search a project…"
       : "Type a command · # to search projects…";
   }
+  const workLocally = !!project && isProjectWorkLocally(project);
+  if (workLocally) dock.scope.textContent += " · working on the local copy";
+  dock.workLocallyInput.checked = workLocally;
+  dock.workLocallyInput.disabled = !project;
+  dock.workLocally.classList.toggle("is-checked", workLocally);
+  dock.workLocally.classList.toggle("is-disabled", !project);
+  dock.workLocally.title = project
+    ? "Work on the local copy: the folder, quick access and tools use this project's Local Projects folder instead of the server"
+    : "Select a project to work on its local copy";
   if (dock.pendingKey) {
     const pending = dock.items.find(item => item.key === dock.pendingKey);
     const targetLabel = pending?.scope === "project" ? "project" : "deliverable";
@@ -869,6 +892,27 @@ function updateCommandDockContext() {
   dock.root.classList.toggle("has-selection", !!deliverable);
   dock.root.classList.toggle("has-project", !!project && !deliverable);
   dock.root.classList.toggle("has-pending", !!dock.pendingKey);
+}
+
+// Switching needs a local copy to point at; without one the box springs back
+// and the toast says how to make it.
+async function toggleCommandDockWorkLocally(enabled) {
+  const dock = ensureCommandDock();
+  const project = dock.project;
+  if (!project) return;
+  dock.workLocallyInput.disabled = true;
+  try {
+    if (!(await setProjectWorkLocally(project, enabled))) {
+      toast(WORK_LOCALLY_MISSING_COPY_MESSAGE, 6000);
+    }
+  } catch (error) {
+    console.warn("Failed to change Work locally:", error);
+    toast(error?.message || "Unable to change Work locally.");
+  } finally {
+    // The folder command's label depends on the mode, so rebuild the list too.
+    renderCommandDockItems();
+    updateCommandDockContext();
+  }
 }
 
 // The "Target" group: projects until one is chosen, then that project's
@@ -983,9 +1027,13 @@ function buildCommandDockGroups(deliverable, project) {
     {
       key: "folder",
       scope: "project",
-      label: "Open project folder",
-      hidden: !!project && !project.path,
+      label: project && isProjectWorkLocally(project) ? "Open local project folder" : "Open project folder",
+      hidden: !!project && !getProjectActionFolderPath(project),
       run: async (target) => {
+        if (isProjectWorkLocally(target.project)) {
+          await openProjectDirectory(target.project, "local");
+          return;
+        }
         if (!target.project?.path) {
           toast("This project has no folder path.");
           return;

@@ -373,8 +373,8 @@ try {
 (princ)
 '@
   Set-Content -LiteralPath $scanLspPath -Value $scanLisp -Encoding ASCII
+  # Scripts already use command-line file prompts. Leave registry-backed FILEDIA alone.
   $scanScript = @(
-    "FILEDIA", "0",
     "CMDDIA", "0",
     "PROXYNOTICE", "0",
     "SECURELOAD", "0",
@@ -818,7 +818,6 @@ try {
 '@
   Set-Content -LiteralPath $updateLspPath -Value $updateLisp -Encoding ASCII
   $updateScript = @(
-    "FILEDIA", "0",
     "CMDDIA", "0",
     "PROXYNOTICE", "0",
     "SECURELOAD", "0",

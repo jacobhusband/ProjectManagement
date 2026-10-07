@@ -2761,6 +2761,7 @@ function plainTextToPageHtml(text) {
 function sanitizeStoredPageHtml(html) {
   if (!html) return "";
   const doc = new DOMParser().parseFromString(String(html), "text/html");
+  unwrapPageFindHighlights(doc.body);
   doc.body
     .querySelectorAll("script, iframe, object, embed, base, meta")
     .forEach((node) => node.remove());
@@ -4137,18 +4138,77 @@ function getLaunchContextProjectId(launchContext = null) {
   return String(launchContext.projectId || "").trim();
 }
 
+// "Work locally" is a per-project switch on the deliverable card. While it is on,
+// the card's tools, quick access and Open Project Folder use the Local Projects
+// copy instead of the server folder.
+const WORK_LOCALLY_MISSING_COPY_MESSAGE =
+  "This project has no local copy yet. Use Tools > Work Locally to copy it, then turn on Work locally.";
+
+function isProjectWorkLocally(project) {
+  return project?.workLocally === true;
+}
+
+function getProjectLocalFolderPath(project) {
+  return normalizeWindowsPath(project?.localProjectPath || "");
+}
+
+function getProjectActionFolderPath(project) {
+  if (isProjectWorkLocally(project)) return getProjectLocalFolderPath(project);
+  return normalizeProjectPath(project?.path || "");
+}
+
 function buildProjectsTabToolLaunchContext(project, deliverable) {
-  const projectPath = normalizeProjectPath(project?.path || "");
+  const projectPath = getProjectActionFolderPath(project);
   return {
     source: "projects-tab",
     projectPath,
     rootProjectPath: projectPath,
+    serverProjectPath: normalizeProjectPath(project?.path || ""),
+    workLocally: isProjectWorkLocally(project),
     discipline: getActiveDiscipline(),
     cadFilePaths: [],
     projectId: String(project?.id || "").trim(),
     projectName: String(project?.name || project?.nick || project?.id || "").trim(),
     deliverableName: String(deliverable?.name || "").trim(),
   };
+}
+
+// Work Locally copies the server folder down, so it always starts from the
+// server path even while the project's other tools are pointed at the local copy.
+function getServerLaunchContext(launchContext = null) {
+  const serverProjectPath = String(launchContext?.serverProjectPath || "").trim();
+  if (launchContext?.workLocally !== true || !serverProjectPath) return launchContext;
+  return {
+    ...launchContext,
+    projectPath: serverProjectPath,
+    rootProjectPath: serverProjectPath,
+    workLocally: false,
+  };
+}
+
+// Turning Work locally on needs a local copy to point at. A copy that sits where
+// Work Locally would have put it is adopted even if the app never recorded it.
+async function resolveProjectLocalFolder(project) {
+  const knownPath = getProjectLocalFolderPath(project);
+  if (knownPath) return knownPath;
+  const serverPath = normalizeProjectPath(project?.path || "");
+  if (!serverPath || !window.pywebview?.api?.get_local_project_copy_info) return "";
+  const info = await window.pywebview.api.get_local_project_copy_info(convertPath(serverPath));
+  if (info?.status !== "success" || !info.exists) return "";
+  return normalizeWindowsPath(info.path || "");
+}
+
+// Resolves false, without changing anything, when there is no local copy to use.
+async function setProjectWorkLocally(project, enabled) {
+  if (!project) return false;
+  if (enabled) {
+    const localPath = await resolveProjectLocalFolder(project);
+    if (!localPath) return false;
+    project.localProjectPath = localPath;
+  }
+  project.workLocally = enabled;
+  await save();
+  return true;
 }
 
 function queuePendingCadLaunchContext(launchContext = null) {
@@ -4158,12 +4218,16 @@ function queuePendingCadLaunchContext(launchContext = null) {
 function launchSharedToolCard(toolId, launchContext = null) {
   const entry = getSharedToolLaunchEntry(toolId);
   if (!entry || entry.isReady !== true) return false;
-  if (entry.id === "toolOpenCadFiles") {
-    void openProjectCadFiles(launchContext);
-    return true;
-  }
   if (entry.id === "toolCopyProjectLocally") {
     void runLocalProjectManager(launchContext);
+    return true;
+  }
+  if (launchContext?.workLocally === true && !hasLaunchContextProjectPath(launchContext)) {
+    toast(WORK_LOCALLY_MISSING_COPY_MESSAGE, 6000);
+    return false;
+  }
+  if (entry.id === "toolOpenCadFiles") {
+    void openProjectCadFiles(launchContext);
     return true;
   }
   const card = document.getElementById(entry.id);
@@ -4332,7 +4396,9 @@ async function runLocalProjectManager(launchContext = null) {
     message: "Preparing Work Locally...",
     progress: 8,
   });
-  const resolvedLaunchContext = launchContext || resolveCadLaunchContextForTool();
+  const resolvedLaunchContext = getServerLaunchContext(
+    launchContext || resolveCadLaunchContextForTool()
+  );
   updateActivity(activityId, {
     rerunLaunchContext: resolvedLaunchContext,
     rerunDefaultPath: getLaunchContextProjectRoot(resolvedLaunchContext),
@@ -4579,7 +4645,7 @@ async function runLocalProjectManager(launchContext = null) {
         hasWarnings || missingFolders.length
           ? `Project copied locally with warnings: ${warningParts.join(", ")}.`
           : managerResult.replaceExistingLocal === true
-            ? "Local project replaced from server files."
+            ? "Local project updated from server files."
             : "Project copied locally.",
       openFolderPath: String(copyResult?.localProjectPath || "").trim(),
     });
@@ -7144,8 +7210,11 @@ function getDeclarativeClickAction(name) {
     addDeliverable: () => addDeliverable(),
     addRefRow: () => addRefRow(),
     closeImagePreviewDialog: () => closeImagePreviewDialog(),
+    dismissPluginSetupLater: () => dismissPluginSetup("later"),
+    dismissPluginSetupNever: () => dismissPluginSetup("never"),
     dismissSetupHelpLater: () => dismissSetupHelp("later"),
     dismissSetupHelpNever: () => dismissSetupHelp("never"),
+    installFirstRunPlugins: () => installFirstRunPlugins(),
     nextOnboardingStep: () => nextOnboardingStep(),
     onDeleteActiveProjectFromPageView: () => onDeleteActiveProjectFromPageView(),
     onDeleteCurrentProject: () => onDeleteCurrentProject(),
@@ -9617,6 +9686,17 @@ function renderActivityTray() {
         })
       );
     }
+    if (item.toolId === "toolPublishDwgs" && item.status === ACTIVITY_STATUS.SUCCESS && item.combinedPdfPath) {
+      actions.appendChild(el("button", {
+        className: "activity-card-action", type: "button", textContent: "Move set to PDF folder",
+        title: "Move the combined set into an existing or new folder inside the project's PDF folder",
+        onclick: (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          queuePublishDestination(item.id);
+        },
+      }));
+    }
     if (isTerminal && item.canvasPanelReview) {
       actions.appendChild(
         el("button", {
@@ -10506,6 +10586,9 @@ function buildActivityHistoryItem(entry) {
     addAction("open-combined-pdf", "Open Combined PDF", { title: entry.combinedPdfPath });
     addAction("copy-combined-pdf", "Copy Combined PDF", { title: entry.combinedPdfPath });
   }
+  if (entry.toolId === "toolPublishDwgs" && entry.status === ACTIVITY_STATUS.SUCCESS && entry.combinedPdfPath) {
+    addAction("move-published-pdf", "Move set to PDF folder");
+  }
   const comparePairs = entry.dwgComparePairs;
   comparePairs.forEach((pair, pairIndex) => {
     addAction(
@@ -10633,6 +10716,11 @@ async function handleActivityHistoryAction(button) {
   }
   if (action === "copy-combined-pdf") {
     await handleActivityTrayCopyCombinedPdf(activityId);
+    return;
+  }
+  if (action === "move-published-pdf") {
+    closeDlg("activityHistoryDlg");
+    queuePublishDestination(activityId);
     return;
   }
   if (action === "dwg-compare") {
@@ -10791,6 +10879,109 @@ function deriveToolActivityProgress(toolId, message, currentProgress = 5) {
   }
 
   return clampActivityProgress(currentProgress, 12);
+}
+
+// Published sets only move when the user clicks "Move set to PDF folder" on the activity.
+let publishDestinationQueue = Promise.resolve();
+const publishDestinationPending = new Set();
+
+function queuePublishDestination(activityId) {
+  const activity = getActivityRecordById(activityId);
+  if (activity?.toolId !== "toolPublishDwgs" || activity.status !== ACTIVITY_STATUS.SUCCESS ||
+      !activity.combinedPdfPath || publishDestinationPending.has(activityId)) return;
+  publishDestinationPending.add(activityId);
+  publishDestinationQueue = publishDestinationQueue
+    .then(() => showPublishDestination(activityId))
+    .catch(error => toast(error?.message || "Could not load PDF folders."))
+    .finally(() => publishDestinationPending.delete(activityId));
+}
+
+async function showPublishDestination(activityId) {
+  const activity = getActivityRecordById(activityId);
+  const api = window.pywebview?.api;
+  const dialog = document.getElementById("publishDestinationDlg");
+  if (!activity?.combinedPdfPath || !dialog || !api?.get_publish_pdf_destinations) return;
+  const projectPath = getLaunchContextProjectRoot(getServerLaunchContext(activity.rerunLaunchContext)) ||
+    activity.rerunDefaultPath || getActivityHistoryDrawingPaths(activity)[0] || "";
+  const result = await api.get_publish_pdf_destinations(activity.combinedPdfPath, projectPath);
+  if (result?.status !== "success") {
+    toast(result?.message || "Could not find the project PDF folder.");
+    return;
+  }
+  const existing = document.getElementById("publishDestinationExisting");
+  const name = document.getElementById("publishDestinationName");
+  const error = document.getElementById("publishDestinationError");
+  const move = document.getElementById("publishDestinationMove");
+  const skip = document.getElementById("publishDestinationSkip");
+  const modes = [...dialog.querySelectorAll('input[name="publishDestinationMode"]')];
+  const folders = Array.isArray(result.folders) ? result.folders : [];
+  document.getElementById("publishDestinationRoot").textContent = result.pdfFolder;
+  document.getElementById("publishDestinationFile").textContent = getWindowsPathLeaf(activity.combinedPdfPath);
+  existing.replaceChildren(...folders.map(folder => new Option(folder.name, folder.name)));
+  name.value = "";
+  error.hidden = true;
+  move.disabled = false;
+  skip.disabled = false;
+  const sync = () => {
+    const createNew = modes.some(mode => mode.value === "new" && mode.checked);
+    existing.disabled = createNew || !folders.length;
+    name.disabled = !createNew;
+    move.disabled = !createNew && !folders.length;
+  };
+  for (const mode of modes) {
+    mode.checked = mode.value === (folders.length ? "existing" : "new");
+    mode.disabled = mode.value === "existing" && !folders.length;
+    mode.onchange = sync;
+  }
+  sync();
+  await new Promise(resolve => {
+    let moving = false;
+    const onCancel = event => { if (moving) event.preventDefault(); };
+    const onClose = () => {
+      dialog.removeEventListener("cancel", onCancel);
+      dialog.removeEventListener("close", onClose);
+      move.onclick = null;
+      skip.onclick = null;
+      resolve();
+    };
+    dialog.addEventListener("cancel", onCancel);
+    dialog.addEventListener("close", onClose);
+    skip.onclick = () => dialog.close();
+    move.onclick = async () => {
+      if (moving) return;
+      const createNew = modes.some(mode => mode.value === "new" && mode.checked);
+      const folderName = createNew ? name.value.trim() : existing.value;
+      if (!folderName) {
+        error.textContent = createNew ? "Enter a name for the new folder." : "Choose an existing folder.";
+        error.hidden = false;
+        return;
+      }
+      moving = true;
+      move.disabled = skip.disabled = true;
+      error.hidden = true;
+      try {
+        const moved = await api.move_published_pdf(activity.combinedPdfPath, projectPath, folderName, createNew);
+        if (moved?.status !== "success") throw new Error(moved?.message || "Could not move the set.");
+        const patch = {
+          combinedPdfPath: moved.combinedPdfPath, openFolderPath: moved.openFolderPath,
+          message: moved.message, openFolderLabel: "Open PDF Folder",
+        };
+        if (getActivityById(activityId)) updateActivity(activityId, patch);
+        else recordActivityHistory({ ...activity, ...patch });
+        toast(moved.message || "Published set moved.");
+        dialog.close();
+      } catch (failure) {
+        error.textContent = failure?.message || "Could not move the set.";
+        error.hidden = false;
+      } finally {
+        moving = false;
+        skip.disabled = false;
+        sync();
+      }
+    };
+    dialog.showModal();
+    (folders.length ? existing : name).focus();
+  });
 }
 
 function updateActivityStatusFromPayload(payload = {}) {
@@ -11112,7 +11303,12 @@ function createDefaultLocalProjectManagerReplacementReviewState() {
     localOnlyFiles: [],
     blockedEntries: [],
     missingServerFolders: [],
+    // Discipline and Xrefs folders are rebuilt from the server. Every other selected
+    // folder only gains missing files; nothing in it is replaced or deleted.
+    replacedFolders: [],
+    mergedFolders: [],
     selectedServerFileCount: 0,
+    keptExistingFileCount: 0,
     localProjectPath: "",
     serverProjectPath: "",
     backupRequired: true,
@@ -11247,6 +11443,7 @@ let userSettings = {
   apiKey: "",
   autocadPath: "",
   showSetupHelp: true,
+  showPluginSetupPrompt: true,
   theme: "dark",
   lightingTemplates: [],
   separateDeliverableCompletionGroups: true,
@@ -13154,13 +13351,16 @@ async function refreshAppUpdateStatus({ manual = false } = {}) {
   const updateBtn = document.getElementById("appUpdateBtn");
 
   try {
-    const res = await window.pywebview.api.get_app_update_status();
+    const res = await window.pywebview.api.get_app_update_status(manual);
     if (versionLabel && res.current_version) {
       versionLabel.textContent = `v${res.current_version}`;
     }
 
-    if (res.status !== "success")
-      throw new Error(res.message || "Update check failed");
+    if (res.status !== "success") {
+      const failure = new Error(res.message || "Update check failed");
+      failure.rateLimited = res.rateLimited === true;
+      throw failure;
+    }
 
     if (res.update_available) {
       latestAppUpdate = res;
@@ -13183,7 +13383,7 @@ async function refreshAppUpdateStatus({ manual = false } = {}) {
     }
   } catch (e) {
     console.warn("Update check failed:", e);
-    if (manual) toast("Update check failed.");
+    if (manual) toast(e?.rateLimited ? e.message : "Update check failed.");
   }
 }
 
@@ -15093,6 +15293,7 @@ function normalizeProject(project) {
     nick: String(project.nick || "").trim(),
     path: normalizeProjectPath(project.path || ""),
     localProjectPath: normalizeWindowsPath(project.localProjectPath || ""),
+    workLocally: project.workLocally === true,
     workroomRootPath: normalizeWindowsPath(project.workroomRootPath || ""),
     notes: project.notes || "",
     page: normalizePage(project.page),
@@ -16154,7 +16355,7 @@ function buildLocalProjectManagerComparisonBannerMessage(summary = "") {
     case "local-newer":
       return {
         tone: "success",
-        message: "Local managed files are newer. Use Copy Local Changes to Server to review them.",
+        message: "Newer local files were found in your discipline and Xrefs folders. Review them to replace the older server copies.",
       };
     case "server-newer":
       return {
@@ -16164,7 +16365,7 @@ function buildLocalProjectManagerComparisonBannerMessage(summary = "") {
     case "mixed":
       return {
         tone: "warning",
-        message: "Managed files differ in both directions. Review server files here, then review local changes before copying to the server.",
+        message: "Your discipline and Xrefs folders have changes in both directions. Review newer local files first, then use Back to Server Files to review server changes.",
       };
     case "local-additions":
       return {
@@ -17301,7 +17502,7 @@ function renderLocalProjectManagerReplacementReview(container, reviewState = nul
   if (reviewState?.previewLoading) {
     renderLocalProjectManagerEmptyState(
       container,
-      "Checking local files before replacing the local project..."
+      "Checking local files before updating the local project..."
     );
     return;
   }
@@ -17331,25 +17532,65 @@ function renderLocalProjectManagerReplacementReview(container, reviewState = nul
     ? Number(reviewState.selectedServerFileCount)
     : 0;
 
+  const replacedFolders = Array.isArray(reviewState?.replacedFolders)
+    ? reviewState.replacedFolders
+    : [];
+  const mergedFolders = Array.isArray(reviewState?.mergedFolders)
+    ? reviewState.mergedFolders
+    : [];
+  const keptExistingFileCount = Number.isFinite(Number(reviewState?.keptExistingFileCount))
+    ? Number(reviewState.keptExistingFileCount)
+    : 0;
+  const listFolderNames = (names) =>
+    names.length < 2
+      ? names.join("")
+      : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+
   container.appendChild(
     el("div", {
       className: "local-project-manager-review-summary local-project-manager-replace-warning",
-      textContent:
-        "This will back up and delete the existing local project, then create completely new local files from the selected server folders.",
+      textContent: replacedFolders.length
+        ? `This will back up, then replace the ${listFolderNames(
+            replacedFolders
+          )} folder${
+            replacedFolders.length === 1 ? "" : "s"
+          } in the local project with the server's files.`
+        : "No discipline or Xrefs folder is selected, so nothing in the local project will be replaced or deleted.",
     })
   );
+  if (mergedFolders.length) {
+    container.appendChild(
+      el("div", {
+        className: "local-project-manager-review-summary",
+        textContent: `${listFolderNames(mergedFolders)} only ${
+          mergedFolders.length === 1 ? "gets" : "get"
+        } new files added. Existing files there are never replaced or deleted${
+          keptExistingFileCount
+            ? ` (${keptExistingFileCount} file${
+                keptExistingFileCount === 1 ? " is" : "s are"
+              } kept as they are).`
+            : "."
+        }`,
+      })
+    );
+  }
   container.appendChild(
     el("div", {
       className: "local-project-manager-review-summary",
       textContent: `${selectedServerFileCount} server file${
         selectedServerFileCount === 1 ? "" : "s"
-      } will be copied into the new local project. ${newerLocalFiles.length} newer local file${
-        newerLocalFiles.length === 1 ? "" : "s"
-      } and ${localOnlyFiles.length} local-only file${
-        localOnlyFiles.length === 1 ? "" : "s"
-      } will be removed from the current local project.`,
+      } will be copied into the local project.${
+        replacedFolders.length
+          ? ` ${newerLocalFiles.length} newer local file${
+              newerLocalFiles.length === 1 ? "" : "s"
+            } and ${localOnlyFiles.length} local-only file${
+              localOnlyFiles.length === 1 ? "" : "s"
+            } in the replaced folders will be removed.`
+          : ""
+      }`,
     })
   );
+  if (!replacedFolders.length) return;
   container.appendChild(
     createLocalProjectManagerReviewSection(
       "Newer local files",
@@ -17545,7 +17786,7 @@ function updateLocalProjectManagerFooter() {
       copyToServerBtn.textContent = "Back to Folder Selection";
     }
     if (syncBtn) {
-      syncBtn.textContent = "Back Up and Replace Local Project";
+      syncBtn.textContent = "Back Up and Update Local Project";
       syncBtn.disabled =
         fallbackVisible ||
         reviewState.previewLoading === true ||
@@ -17568,7 +17809,7 @@ function updateLocalProjectManagerFooter() {
     if (blockedEntries.length) {
       summaryEl.textContent = `${blockedEntries.length} file${
         blockedEntries.length === 1 ? "" : "s"
-      } could not be checked. Resolve blocked entries before replacing the local project.`;
+      } could not be checked. Resolve blocked entries before updating the local project.`;
       return;
     }
     if (reviewState.previewLoaded !== true) {
@@ -17656,7 +17897,7 @@ function updateLocalProjectManagerFooter() {
   }
   summaryEl.textContent = `${metrics.count} folder${
     metrics.count === 1 ? "" : "s"
-  } selected | existing local project will be replaced`;
+  } selected | discipline and Xrefs folders are replaced, other folders only gain new files`;
 }
 
 
@@ -17927,6 +18168,17 @@ async function openLocalProjectManagerReplacementReview() {
     )
       ? Number(result.selectedServerFileCount)
       : 0;
+    reviewState.keptExistingFileCount = Number.isFinite(
+      Number(result?.keptExistingFileCount)
+    )
+      ? Number(result.keptExistingFileCount)
+      : 0;
+    reviewState.replacedFolders = Array.isArray(result?.replacedFolders)
+      ? result.replacedFolders.map((name) => String(name || "").trim()).filter(Boolean)
+      : [];
+    reviewState.mergedFolders = Array.isArray(result?.mergedFolders)
+      ? result.mergedFolders.map((name) => String(name || "").trim()).filter(Boolean)
+      : [];
     reviewState.newerLocalFiles = Array.isArray(result?.newerLocalFiles)
       ? result.newerLocalFiles.map((entry, index) =>
           normalizeLocalProjectManagerReplacementRiskFile(entry, index)
@@ -18064,15 +18316,25 @@ async function runLocalProjectManagerTimestampComparison() {
     const appliedDirectionPreviews =
       applyLocalProjectManagerComparisonDirectionPreviews(result, serverPathInfo);
 
+    if (!appliedDirectionPreviews) {
+      // Check local changes first when an older backend omits direction previews.
+      await loadLocalProjectManagerDirectionPreview("to_server", { force: true });
+      await loadLocalProjectManagerDirectionPreview("to_local", { force: true });
+    }
+
+    const hasNewerLocalManagedFiles =
+      copyProjectLocallyDialogState.sync.candidateFiles.some(
+        (entry) => entry.scopeType === "managed" && entry.changeType === "newer"
+      );
     const reviewingSyncChanges =
       copyProjectLocallyDialogState.syncReviewVisible === true ||
       copyProjectLocallyDialogState.activeTab === "sync";
-    if (!reviewingSyncChanges) {
+    if (hasNewerLocalManagedFiles && !(result?.conflictCandidateCount > 0)) {
+      copyProjectLocallyDialogState.activeTab = "sync";
+      copyProjectLocallyDialogState.syncReviewVisible = true;
+    } else if (!reviewingSyncChanges) {
       copyProjectLocallyDialogState.activeTab = "copy";
       copyProjectLocallyDialogState.syncReviewVisible = false;
-    }
-    if (!appliedDirectionPreviews) {
-      await loadLocalProjectManagerDirectionPreview("to_local", { force: true });
     }
   } catch (error) {
     copyProjectLocallyDialogState.comparisonSummary = null;
@@ -20914,11 +21176,20 @@ function createDeliverableQuickAccessOptionIcon(action) {
 }
 
 function buildDeliverablePdfLookupProject(project) {
-  return {
-    path: normalizeProjectPath(project?.path || ""),
-    localProjectPath: normalizeWindowsPath(project?.localProjectPath || ""),
+  const identity = {
     id: String(project?.id || "").trim(),
     name: String(project?.name || "").trim(),
+  };
+  // The backend tries `path` first, so working locally hands it only the local
+  // copy rather than risk opening a newer file from the server folder.
+  if (isProjectWorkLocally(project)) {
+    const localPath = getProjectLocalFolderPath(project);
+    return { ...identity, path: localPath, localProjectPath: localPath };
+  }
+  return {
+    ...identity,
+    path: normalizeProjectPath(project?.path || ""),
+    localProjectPath: getProjectLocalFolderPath(project),
   };
 }
 
@@ -20938,7 +21209,11 @@ async function runDeliverableQuickAccessOpen({
 
   const lookupProject = buildDeliverablePdfLookupProject(project);
   if (!lookupProject.path && !lookupProject.localProjectPath) {
-    toast("Add a project path before opening files.");
+    if (isProjectWorkLocally(project)) {
+      toast(WORK_LOCALLY_MISSING_COPY_MESSAGE, 6000);
+    } else {
+      toast("Add a project path before opening files.");
+    }
     return;
   }
 
@@ -25307,6 +25582,7 @@ function createBlankProject(options = {}) {
     nick: "",
     path: "",
     localProjectPath: "",
+    workLocally: false,
     workroomRootPath: "",
     notes: "",
     refs: [],
@@ -26463,6 +26739,7 @@ function readForm() {
       existingProject?.deliverablePagesMigratedToProjectSubpages === true,
     path: normalizeProjectPath(val("f_path")),
     localProjectPath: normalizeWindowsPath(existingProject?.localProjectPath || ""),
+    workLocally: existingProject?.workLocally === true,
     workroomRootPath: normalizeWindowsPath(existingProject?.workroomRootPath || ""),
     refs: [],
     attachments: getModalProjectAttachments(),
@@ -28110,6 +28387,9 @@ async function fetchBundleStatuses({ silent = false } = {}) {
   bundlesLoadingPromise = (async () => {
     const response = await window.pywebview.api.get_bundle_statuses();
     if (response.status !== "success") throw new Error(response.message);
+    // The backend explains why the plugin list could not be refreshed (for example,
+    // GitHub's hourly limit), which otherwise reads as "not published yet".
+    if (response.notice && !silent) toast(response.notice);
     const data = Array.isArray(response.data)
       ? response.data.filter(isVisiblePluginBundle)
       : [];
@@ -33672,6 +33952,7 @@ function showOnboardingModal() {
 function skipOnboarding() {
   closeDlg("onboardingDlg");
   showMainApp();
+  void maybeShowPluginSetupBanner();
 }
 
 function updateOnboardingUI() {
@@ -33818,6 +34099,7 @@ async function completeOnboarding() {
     closeDlg("onboardingDlg");
     showMainApp();
     toast("Welcome to ACIES! Your settings have been saved.");
+    void maybeShowPluginSetupBanner();
   } catch (e) {
     toast("⚠️ Could not save settings. Please try again.");
   }
@@ -34946,6 +35228,188 @@ async function dismissSetupHelp(type) {
     }
   }
   // For "later", we don't change the setting, so it will show again next time
+}
+
+// ===================== AUTOCAD PLUGIN SETUP PROMPT =====================
+// A new employee has AutoCAD but none of the ACIES plugins, and nothing says the plugins
+// exist or where they are installed. This offers to install them, at launch or right
+// after onboarding. It stays away from anyone who already has an ACIES plugin (they
+// chose their own set) and from anyone who asked not to be asked.
+
+const ACIES_PLUGIN_BUNDLE_PREFIX = "ElectricalCommands.";
+let pluginSetupCheckInFlight = false;
+let pluginSetupPromptHandled = false;
+let pluginSetupInstalling = false;
+let pluginSetupInstallable = [];
+
+function getPluginSetupPromptPlan({ bundles, autocadInstalled, settings } = {}) {
+  const none = { show: false, installable: [] };
+  if (settings?.showPluginSetupPrompt === false || !autocadInstalled) return none;
+  // Other vendors' bundles share the plugins folder; only the ACIES ones count here.
+  const acies = (Array.isArray(bundles) ? bundles : []).filter((bundle) =>
+    String(bundle?.bundle_name || "").startsWith(ACIES_PLUGIN_BUNDLE_PREFIX)
+  );
+  if (acies.some((b) => b.state === "installed" || b.state === "update_available")) {
+    return none;
+  }
+  // No download link means GitHub could not be reached, so there is nothing to offer.
+  const installable = acies.filter((b) => b.state === "not_installed" && b.asset);
+  return { show: installable.length > 0, installable };
+}
+
+async function maybeShowPluginSetupBanner() {
+  if (
+    pluginSetupCheckInFlight ||
+    pluginSetupPromptHandled ||
+    userSettings.showPluginSetupPrompt === false
+  ) {
+    return;
+  }
+  pluginSetupCheckInFlight = true;
+  try {
+    const bundles = await fetchBundleStatuses({ silent: true });
+    if (!bundles) return;
+    let autocadInstalled = !!String(userSettings.autocadPath || "").trim();
+    if (!autocadInstalled) {
+      const found = await window.pywebview.api.get_installed_autocad_versions();
+      autocadInstalled =
+        found?.status === "success" &&
+        Array.isArray(found.versions) &&
+        found.versions.length > 0;
+    }
+    const plan = getPluginSetupPromptPlan({
+      bundles,
+      autocadInstalled,
+      settings: userSettings,
+    });
+    if (!plan.show) return;
+    pluginSetupInstallable = plan.installable;
+    showPluginSetupBanner(plan.installable.length);
+  } catch (e) {
+    console.warn("Plugin setup prompt skipped:", e);
+  } finally {
+    pluginSetupCheckInFlight = false;
+  }
+}
+
+function showPluginSetupBanner(count) {
+  const banner = document.getElementById("pluginSetupBanner");
+  if (!banner) return;
+  const text = document.getElementById("pluginSetupBannerText");
+  if (text) {
+    text.textContent =
+      `AutoCAD is on this PC, but none of the ACIES plugins are. Installing ` +
+      `${count === 1 ? "it" : `all ${count}`} adds the ACIES commands to AutoCAD. ` +
+      `Close AutoCAD first; you can manage plugins later in the Tools tab.`;
+  }
+  const installBtn = document.getElementById("pluginSetupInstallBtn");
+  if (installBtn) {
+    installBtn.textContent = count === 1 ? "Install plugin" : `Install ${count} plugins`;
+  }
+  banner.style.display = "block";
+}
+
+function hidePluginSetupBanner() {
+  const banner = document.getElementById("pluginSetupBanner");
+  if (banner) banner.style.display = "none";
+}
+
+function setPluginSetupBusy(busy) {
+  ["pluginSetupInstallBtn", "pluginSetupLaterBtn", "pluginSetupNeverBtn"].forEach((id) => {
+    const button = document.getElementById(id);
+    if (button) button.disabled = busy;
+  });
+  const installBtn = document.getElementById("pluginSetupInstallBtn");
+  if (installBtn && busy) installBtn.textContent = "Installing...";
+}
+
+async function dismissPluginSetup(type) {
+  if (pluginSetupInstalling) return;
+  pluginSetupPromptHandled = true;
+  hidePluginSetupBanner();
+  if (type === "never") {
+    userSettings.showPluginSetupPrompt = false;
+    await persistUserSettingsLocally({ silent: true });
+    toast("You can install plugins any time from the Tools tab.");
+  }
+  // "Not right now" changes nothing saved, so the offer returns at the next launch.
+}
+
+async function installFirstRunPlugins() {
+  if (pluginSetupInstalling) return;
+  const targets = pluginSetupInstallable.slice();
+  if (!targets.length) {
+    hidePluginSetupBanner();
+    return;
+  }
+  pluginSetupInstalling = true;
+  setPluginSetupBusy(true);
+  const activityId = beginActivity({
+    activityId: createActivityId("plugins_first_run"),
+    label: "AutoCAD plugins",
+    message: `Installing ${targets.length} plugin${targets.length === 1 ? "" : "s"}...`,
+    progress: 5,
+    kind: "plugin",
+    openFolderLabel: "Open Plugins Folder",
+  });
+  const failures = [];
+  let installed = 0;
+  let pluginsFolderPath = "";
+  let autocadRunning = "";
+  try {
+    for (const [index, bundle] of targets.entries()) {
+      const label = normalizeBundleCoreName(bundle.bundle_name);
+      updateActivity(activityId, {
+        message: `Installing ${label} (${index + 1} of ${targets.length})...`,
+        progress: 5 + Math.round((90 * index) / targets.length),
+      });
+      let response;
+      try {
+        response = await window.pywebview.api.install_single_bundle(bundle.asset);
+      } catch (err) {
+        response = { status: "error", message: err?.message || "Install failed." };
+      }
+      if (response?.status === "success") {
+        installed += 1;
+        pluginsFolderPath = response.pluginsFolderPath || pluginsFolderPath;
+      } else if (response?.code === "autocad_running") {
+        // AutoCAD locks the plugin files, so every remaining plugin would fail the same way.
+        autocadRunning = response.message || "Close AutoCAD and try again.";
+        break;
+      } else {
+        failures.push(`${label}: ${response?.message || "Install failed."}`);
+      }
+    }
+    const noun = (n) => `${n} plugin${n === 1 ? "" : "s"}`;
+    if (autocadRunning && !installed) {
+      failActivity(activityId, { message: autocadRunning });
+    } else if (!installed) {
+      failActivity(activityId, { message: failures[0] || "No plugins were installed." });
+    } else {
+      const problems = autocadRunning
+        ? ` AutoCAD was opened partway; install the rest from the Tools tab.`
+        : failures.length
+          ? ` ${noun(failures.length)} failed: ${failures.join("; ")}`
+          : "";
+      completeActivity(activityId, {
+        message: `Installed ${noun(installed)}. They load the next time AutoCAD starts.${problems}`,
+        openFolderPath: pluginsFolderPath,
+        openFolderLabel: "Open Plugins Folder",
+      });
+    }
+  } finally {
+    pluginSetupInstalling = false;
+  }
+  if (installed) {
+    pluginSetupPromptHandled = true;
+    hidePluginSetupBanner();
+    await ensureBundlesRendered({ force: true });
+  } else {
+    // Nothing was installed, so keep the offer up for another try (for example, after
+    // closing AutoCAD).
+    setPluginSetupBusy(false);
+    showPluginSetupBanner(targets.length);
+  }
 }
 
 // ===================== INITIALIZATION & EVENTS =====================
@@ -36334,7 +36798,7 @@ function initEventListeners() {
             if (reviewState.previewLoaded !== true || blockedEntries.length) {
               toast(
                 blockedEntries.length
-                  ? "Resolve blocked entries before replacing the local project."
+                  ? "Resolve blocked entries before updating the local project."
                   : "Review local replacement details before continuing.",
                 7000
               );
@@ -38351,6 +38815,9 @@ function initEventListeners() {
       const response = await window.pywebview.api.uninstall_all_plugins();
       if (response.status === "success") {
         toast(`Uninstalled ${response.count} plugins.`);
+        // Removing every plugin is a choice; do not offer to put them back at each launch.
+        userSettings.showPluginSetupPrompt = false;
+        void persistUserSettingsLocally({ silent: true });
         ensureBundlesRendered({ force: true });
       } else {
         toast("Failed to uninstall plugins.");
@@ -38469,6 +38936,8 @@ async function init() {
       setTimeout(showProjectDataLoadError, 300);
     }
     prefetchBundles();
+    // A brand-new user is offered the plugins when onboarding finishes instead.
+    if (!isNewUser()) void maybeShowPluginSetupBanner();
     void refreshGoogleAuthStateInBackground();
   } finally {
     hideAppLoader();
@@ -38677,6 +39146,9 @@ function normalizeHtmlForProjectPagesEditor(html) {
   // handlers before the editor's schema sanitizes it.
   const holder = document.implementation.createHTMLDocument("").body;
   holder.innerHTML = html || "";
+  // Remove legacy search wrappers before Tiptap drops their metadata and turns
+  // them into permanent highlight formatting.
+  unwrapPageFindHighlights(holder);
   flattenLegacyPageItems(holder);
   normalizePageChecklistItems(holder);
   holder.querySelectorAll("img").forEach((img) => {
@@ -38703,7 +39175,7 @@ function setPageSaveStatus(text) {
   }
 }
 
-const PAGE_FIND_MATCH_SELECTOR = 'mark.page-find-match[data-page-find-match="true"]';
+const PAGE_FIND_MATCH_SELECTOR = 'mark.page-find-match, mark[data-page-find-match="true"]';
 const PAGE_FIND_HIGHLIGHT_NAME = "page-find-match";
 const PAGE_FIND_ACTIVE_HIGHLIGHT_NAME = "page-find-active";
 const PAGE_FIND_TEXT_BLOCK_SELECTOR = [
@@ -38745,9 +39217,27 @@ function clearPageFindCssHighlights() {
 
 function unwrapPageFindHighlights(root) {
   if (!root?.querySelectorAll) return;
-  const doc = root.ownerDocument || document;
+  // Older editor imports already discarded the search class/data attributes.
+  // Recover only pages dominated by many tiny, unstyled fragments; ordinary
+  // highlights and explicitly colored marks retain their formatting.
+  const bareMarks = Array.from(root.querySelectorAll("mark")).filter(
+    (mark) => !mark.attributes.length && mark.textContent.trim()
+  );
+  const singleLetterCount = bareMarks.filter(
+    (mark) => mark.textContent.length === 1
+  ).length;
+  const shortFragmentCount = bareMarks.filter(
+    (mark) => mark.textContent.length <= 3
+  ).length;
+  if (
+    bareMarks.length >= 20 &&
+    singleLetterCount / bareMarks.length >= 0.5 &&
+    shortFragmentCount / bareMarks.length >= 0.75
+  ) {
+    bareMarks.forEach((mark) => mark.replaceWith(...mark.childNodes));
+  }
   root.querySelectorAll(PAGE_FIND_MATCH_SELECTOR).forEach((mark) => {
-    mark.replaceWith(doc.createTextNode(mark.textContent || ""));
+    mark.replaceWith(...mark.childNodes);
   });
   try {
     root.normalize();

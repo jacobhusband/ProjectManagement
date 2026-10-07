@@ -350,7 +350,14 @@ class LocalProjectManagerComparisonScopeTests(unittest.TestCase):
             os.utime(full_path, (mtime, mtime))
         return full_path
 
-    def test_newer_file_outside_managed_folder_is_detected(self):
+    def _compare_candidates(self):
+        comparison = self.api._compare_local_project_manager_files(
+            self.local_dir, self.server_dir
+        )
+        self.assertEqual(comparison["status"], "success")
+        return comparison
+
+    def test_newer_local_file_outside_managed_folder_is_left_alone(self):
         # "Reports" is not a discipline folder or Xrefs -> additive_only scope.
         rel_path = "Reports/notes.txt"
         server_file = self._write(self.server_dir, rel_path, "server version")
@@ -359,21 +366,99 @@ class LocalProjectManagerComparisonScopeTests(unittest.TestCase):
         self._write(self.local_dir, rel_path, "local version", mtime=base_mtime + 600.0)
         os.utime(server_file, (base_mtime, base_mtime))
 
-        comparison = self.api._compare_local_project_manager_files(
-            self.local_dir, self.server_dir
-        )
-        self.assertEqual(comparison["status"], "success")
-        newer = [
-            item
-            for item in comparison.get("localToServerCandidates", [])
-            if str(item.get("changeType") or "").lower() == "newer"
-        ]
-        self.assertEqual(len(newer), 1)
+        comparison = self._compare_candidates()
+
+        self.assertEqual([], comparison["localToServerCandidates"])
+        self.assertEqual([], comparison["serverToLocalCandidates"])
+        self.assertEqual([], comparison["conflictCandidates"])
+
+    def test_newer_server_file_outside_managed_folder_is_left_alone(self):
+        rel_path = "Photos/site.jpg"
+        local_file = self._write(self.local_dir, rel_path, "local version")
+        base_mtime = os.path.getmtime(local_file)
+        self._write(self.server_dir, rel_path, "a newer server version", mtime=base_mtime + 600.0)
+
+        comparison = self._compare_candidates()
+
+        self.assertEqual([], comparison["localToServerCandidates"])
+        self.assertEqual([], comparison["serverToLocalCandidates"])
+        self.assertEqual([], comparison["conflictCandidates"])
+
+    def test_files_changed_on_both_sides_outside_managed_folders_are_not_conflicts(self):
+        rel_path = os.path.join("Arch", "2026-01-05 DD60", "plans.dwg")
+        self._write(self.server_dir, rel_path, "base", mtime=2_000_000_000)
+        self._copy_to_local_for_scope_test(rel_path)
+        self._write(self.local_dir, rel_path, "local edit", mtime=2_000_000_600)
+        self._write(self.server_dir, rel_path, "server edit!", mtime=2_000_000_300)
+
+        comparison = self._compare_candidates()
+
+        self.assertEqual(0, comparison["conflictCandidateCount"])
+        self.assertEqual([], comparison["localToServerCandidates"])
+        self.assertEqual([], comparison["serverToLocalCandidates"])
+
+    def test_new_files_outside_managed_folders_are_still_offered_both_ways(self):
+        local_only = os.path.join("Arch", "2026-02-01 DD90", "new-background.dwg")
+        server_only = os.path.join("RFI", "RFI 004.pdf")
+        self._write(self.local_dir, local_only, "from local")
+        self._write(self.server_dir, server_only, "from server")
+
+        comparison = self._compare_candidates()
+
+        to_server = {os.path.normpath(c["relativePath"]): c for c in comparison["localToServerCandidates"]}
+        to_local = {os.path.normpath(c["relativePath"]): c for c in comparison["serverToLocalCandidates"]}
+        self.assertEqual("missing", to_server[local_only]["changeType"])
+        self.assertEqual("missing", to_local[server_only]["changeType"])
+        self.assertEqual("additive_only", to_server[local_only]["scopeType"])
+
+    def test_newer_file_inside_managed_folder_is_still_replaced(self):
+        rel_path = os.path.join("Electrical", "E01.00.dwg")
+        server_file = self._write(self.server_dir, rel_path, "server version")
+        base_mtime = os.path.getmtime(server_file)
+        self._write(self.local_dir, rel_path, "local version", mtime=base_mtime + 600.0)
+
+        comparison = self._compare_candidates()
+
+        newer = {os.path.normpath(c["relativePath"]): c for c in comparison["localToServerCandidates"]}
+        self.assertEqual("newer", newer[rel_path]["changeType"])
+        self.assertEqual("managed", newer[rel_path]["scopeType"])
+
+    def test_apply_never_overwrites_a_file_that_appeared_outside_managed_folders(self):
+        rel_path = os.path.join("Documents", "RFI log.xlsx")
+        self._write(self.server_dir, rel_path, "server log")
+        local_file = os.path.join(self.local_dir, rel_path)
+
+        def save_local_copy_during_backup(*args, **kwargs):
+            # Someone saves a different copy locally after the comparison and before the copy.
+            self._write(self.local_dir, rel_path, "newer local log")
+            return {"status": "success", "backupCreated": False, "backupPath": "", "failedFiles": []}
+
+        with patch.object(
+            self.api,
+            "_create_local_project_manager_backup",
+            side_effect=save_local_copy_during_backup,
+        ):
+            result = self.api._apply_local_project_manager_direction(
+                self.local_dir, self.server_dir, [rel_path], direction="to_local"
+            )
+
+        self.assertEqual("success", result["status"])
+        self.assertEqual(0, result["copiedFileCount"])
         self.assertEqual(
-            os.path.normpath(newer[0]["relativePath"]), os.path.normpath(rel_path)
+            [{"relativePath": rel_path, "reason": "already_exists"}],
+            [
+                {"relativePath": entry["relativePath"], "reason": entry["reason"]}
+                for entry in result["skippedFiles"]
+            ],
         )
-        self.assertEqual(newer[0]["scopeType"], "additive_only")
-        self.assertTrue(newer[0]["selectedByDefault"])
+        with open(local_file) as f:
+            self.assertEqual("newer local log", f.read())
+
+    def _copy_to_local_for_scope_test(self, rel_path):
+        result = self.api._apply_local_project_manager_direction(
+            self.local_dir, self.server_dir, [rel_path], direction="to_local"
+        )
+        self.assertEqual("success", result["status"])
 
 
 class CopyProjectSourcePathResolutionTests(unittest.TestCase):

@@ -910,13 +910,13 @@ class LocalProjectManagerBackendTests(unittest.TestCase):
                 entry["relativePath"]: entry for entry in copy_preview["candidateFiles"]
             }
 
-            # Since 2026-06-10 newer files outside the managed folders are offered too
-            # (see test_newer_file_outside_managed_folder_is_detected); "additive only"
-            # means sync never deletes there.
-            arch_entry = sync_lookup[os.path.join("Arch", "plans.dwg")]
-            self.assertEqual("additive_only", arch_entry["scopeType"])
-            self.assertEqual("newer", arch_entry["changeType"])
+            # "Additive only" means files outside the discipline and Xrefs folders are
+            # never replaced or deleted: a file that exists on both sides is left alone
+            # in both directions, whichever copy is newer.
+            self.assertNotIn(os.path.join("Arch", "plans.dwg"), sync_lookup)
             self.assertNotIn(os.path.join("Arch", "plans.dwg"), copy_lookup)
+            self.assertEqual("server-arch", arch_server.read_text(encoding="utf-8"))
+            self.assertEqual("local-arch", arch_local.read_text(encoding="utf-8"))
             self.assertEqual(
                 "additive_only",
                 sync_lookup[os.path.join("Documents", "local-only.txt")]["scopeType"],
@@ -1084,13 +1084,17 @@ class LocalProjectManagerBackendTests(unittest.TestCase):
             local_project = docs_root / "Local Projects" / server_project.name
             shared_relative_path = os.path.join("Electrical", "shared.dwg")
             equal_relative_path = os.path.join("Electrical", "equal.dwg")
-            local_only_relative_path = os.path.join("Documents", "local-only.txt")
+            local_only_relative_path = os.path.join("Electrical", "local-only.txt")
+            kept_relative_path = os.path.join("Documents", "kept.txt")
 
             self._write_file(server_project / shared_relative_path, "server-old")
             self._write_file(local_project / shared_relative_path, "local-new")
             self._write_file(server_project / equal_relative_path, "same")
             self._write_file(local_project / equal_relative_path, "same")
             self._write_file(local_project / local_only_relative_path, "local-only")
+            # Folders other than the discipline and Xrefs ones are never replaced, so
+            # nothing in them is reported as at risk even when it is local-only.
+            self._write_file(local_project / kept_relative_path, "kept")
 
             os.utime(server_project / shared_relative_path, (1000, 1000))
             os.utime(local_project / shared_relative_path, (2000, 2000))
@@ -1119,7 +1123,152 @@ class LocalProjectManagerBackendTests(unittest.TestCase):
                 [entry["relativePath"] for entry in result["localOnlyFiles"]],
             )
             self.assertEqual(2, result["selectedServerFileCount"])
+            self.assertEqual(["Electrical"], result["replacedFolders"])
+            self.assertEqual([], result["mergedFolders"])
             self.assertEqual([], result["blockedEntries"])
+
+    def test_preview_copy_project_locally_replacement_only_counts_missing_files_in_other_folders(self):
+        with tempfile.TemporaryDirectory(prefix="acies-local-project-replace-merge-preview-") as temp_dir:
+            docs_root = Path(temp_dir) / "DocumentsRoot"
+            server_project = Path(temp_dir) / "ServerRoot" / "260243 BofA - Eastport Plaza"
+            local_project = docs_root / "Local Projects" / server_project.name
+
+            self._write_file(server_project / "Electrical" / "power.dwg", "server-power")
+            self._write_file(local_project / "Electrical" / "power.dwg", "local-power")
+            self._write_file(server_project / "Arch" / "2026-01-05 DD60" / "plans.dwg", "server-plans")
+            self._write_file(local_project / "Arch" / "2026-01-05 DD60" / "plans.dwg", "local-plans")
+            self._write_file(server_project / "Arch" / "2026-03-02 CD" / "plans.dwg", "new-plans")
+            self._write_file(local_project / "Arch" / "my-local-markup.pdf", "local-only")
+            self._write_file(local_project / "Photos" / "site.jpg", "photo")
+
+            with patch.object(self.api, "get_user_settings", return_value=self._settings()), patch.object(
+                main_module,
+                "_get_windows_documents_dir",
+                return_value=str(docs_root),
+            ):
+                result = self.api.preview_copy_project_locally_replacement(
+                    str(server_project),
+                    None,
+                    ["Electrical", "Arch"],
+                )
+
+            self.assertEqual("success", result["status"])
+            self.assertEqual(["Electrical"], result["replacedFolders"])
+            self.assertEqual(["Arch"], result["mergedFolders"])
+            # power.dwg is rebuilt and the new Arch folder is added; the Arch file that is
+            # already present locally is kept as it is.
+            self.assertEqual(2, result["selectedServerFileCount"])
+            self.assertEqual(1, result["keptExistingFileCount"])
+            # Local-only Arch and Photos files are never at risk, so nothing is reported.
+            self.assertEqual([], result["newerLocalFiles"])
+            self.assertEqual([], result["localOnlyFiles"])
+
+    def test_copy_project_locally_replace_existing_only_adds_missing_files_outside_managed_folders(self):
+        with tempfile.TemporaryDirectory(prefix="acies-local-project-replace-merge-") as temp_dir:
+            docs_root = Path(temp_dir) / "DocumentsRoot"
+            server_project = Path(temp_dir) / "ServerRoot" / "260243 BofA - Eastport Plaza"
+            local_project = docs_root / "Local Projects" / server_project.name
+
+            self._write_file(server_project / "Electrical" / "power.dwg", "server-power")
+            self._write_file(local_project / "Electrical" / "power.dwg", "local-old-power")
+            self._write_file(local_project / "Electrical" / "scratch.dwg", "local-only-scratch")
+            self._write_file(server_project / "Xrefs" / "x-TB.dwg", "server-titleblock")
+            self._write_file(local_project / "Xrefs" / "x-TB.dwg", "local-titleblock")
+            self._write_file(server_project / "Arch" / "2026-01-05 DD60" / "plans.dwg", "server-plans")
+            self._write_file(local_project / "Arch" / "2026-01-05 DD60" / "plans.dwg", "local-plans")
+            self._write_file(server_project / "Arch" / "2026-03-02 CD" / "plans.dwg", "new-plans")
+            self._write_file(local_project / "Arch" / "my-markup.pdf", "local-only-markup")
+            self._write_file(server_project / "RFI" / "RFI 004.pdf", "new-rfi")
+            self._write_file(local_project / "RFI" / "RFI 001.pdf", "local-rfi")
+            self._write_file(local_project / "Photos" / "site.jpg", "photo")
+            self._write_file(local_project / "Documents" / "local-only.txt", "local-only")
+
+            with patch.object(self.api, "get_user_settings", return_value=self._settings()), patch.object(
+                main_module,
+                "_get_windows_documents_dir",
+                return_value=str(docs_root),
+            ), patch.object(
+                self.api,
+                "_build_backup_drawings_timestamp",
+                return_value="20260414_101500",
+            ):
+                result = self.api.copy_project_locally(
+                    str(server_project),
+                    None,
+                    ["Electrical", "Xrefs", "Arch", "RFI"],
+                    None,
+                    True,
+                )
+
+            backup_root = docs_root / "Local Projects" / "0 Archive" / server_project.name / "20260414_101500"
+            self.assertEqual("success", result["status"])
+            self.assertTrue(result["replacedExistingLocal"])
+            # The discipline and Xrefs folders are rebuilt from the server...
+            self.assertEqual("server-power", (local_project / "Electrical" / "power.dwg").read_text(encoding="utf-8"))
+            self.assertFalse((local_project / "Electrical" / "scratch.dwg").exists())
+            self.assertEqual("server-titleblock", (local_project / "Xrefs" / "x-TB.dwg").read_text(encoding="utf-8"))
+            # ...and the replaced local files are backed up first.
+            self.assertEqual("local-old-power", (backup_root / "Electrical" / "power.dwg").read_text(encoding="utf-8"))
+            self.assertEqual("local-only-scratch", (backup_root / "Electrical" / "scratch.dwg").read_text(encoding="utf-8"))
+            self.assertEqual("local-titleblock", (backup_root / "Xrefs" / "x-TB.dwg").read_text(encoding="utf-8"))
+            # Every other folder keeps all its files and only gains the missing ones.
+            self.assertEqual(
+                "local-plans",
+                (local_project / "Arch" / "2026-01-05 DD60" / "plans.dwg").read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                "new-plans",
+                (local_project / "Arch" / "2026-03-02 CD" / "plans.dwg").read_text(encoding="utf-8"),
+            )
+            self.assertEqual("local-only-markup", (local_project / "Arch" / "my-markup.pdf").read_text(encoding="utf-8"))
+            self.assertEqual("new-rfi", (local_project / "RFI" / "RFI 004.pdf").read_text(encoding="utf-8"))
+            self.assertEqual("local-rfi", (local_project / "RFI" / "RFI 001.pdf").read_text(encoding="utf-8"))
+            self.assertEqual("photo", (local_project / "Photos" / "site.jpg").read_text(encoding="utf-8"))
+            self.assertEqual("local-only", (local_project / "Documents" / "local-only.txt").read_text(encoding="utf-8"))
+            self.assertEqual(1, result["skippedExistingFileCount"])
+            self.assertFalse((backup_root / "Arch").exists())
+            self.assertFalse((backup_root / "Photos").exists())
+            self.assertFalse((backup_root / "Documents").exists())
+
+    def test_copy_project_locally_replace_existing_subset_only_replaces_the_selected_parts(self):
+        with tempfile.TemporaryDirectory(prefix="acies-local-project-replace-subset-") as temp_dir:
+            docs_root = Path(temp_dir) / "DocumentsRoot"
+            server_project = Path(temp_dir) / "ServerRoot" / "260243 BofA - Eastport Plaza"
+            local_project = docs_root / "Local Projects" / server_project.name
+
+            self._write_file(server_project / "Electrical" / "Calculations" / "load.txt", "server-load")
+            self._write_file(local_project / "Electrical" / "Calculations" / "load.txt", "local-load")
+            self._write_file(local_project / "Electrical" / "Calculations" / "extra.txt", "local-extra")
+            self._write_file(local_project / "Electrical" / "Markups" / "redline.pdf", "local-redline")
+            self._write_file(server_project / "Electrical" / "E01.00.dwg", "server-sheet")
+            self._write_file(local_project / "Electrical" / "E01.00.dwg", "local-sheet")
+
+            with patch.object(self.api, "get_user_settings", return_value=self._settings()), patch.object(
+                main_module,
+                "_get_windows_documents_dir",
+                return_value=str(docs_root),
+            ):
+                result = self.api.copy_project_locally(
+                    str(server_project),
+                    None,
+                    None,
+                    [
+                        {
+                            "name": "Electrical",
+                            "mode": "subset",
+                            "selectedChildNames": ["Calculations"],
+                            "includeParentRootFiles": False,
+                        }
+                    ],
+                    True,
+                )
+
+            self.assertEqual("success", result["status"])
+            self.assertEqual("server-load", (local_project / "Electrical" / "Calculations" / "load.txt").read_text(encoding="utf-8"))
+            self.assertFalse((local_project / "Electrical" / "Calculations" / "extra.txt").exists())
+            # Parts of the discipline folder that were not selected are not touched.
+            self.assertEqual("local-redline", (local_project / "Electrical" / "Markups" / "redline.pdf").read_text(encoding="utf-8"))
+            self.assertEqual("local-sheet", (local_project / "Electrical" / "E01.00.dwg").read_text(encoding="utf-8"))
 
     def test_copy_project_locally_replace_existing_backs_up_deletes_and_recreates_local_project(self):
         with tempfile.TemporaryDirectory(prefix="acies-local-project-replace-") as temp_dir:
@@ -1127,7 +1276,7 @@ class LocalProjectManagerBackendTests(unittest.TestCase):
             server_project = Path(temp_dir) / "ServerRoot" / "260243 BofA - Eastport Plaza"
             local_project = docs_root / "Local Projects" / server_project.name
             selected_relative_path = os.path.join("Electrical", "power.dwg")
-            stale_relative_path = os.path.join("Documents", "local-only.txt")
+            stale_relative_path = os.path.join("Electrical", "local-only.txt")
 
             self._write_file(server_project / selected_relative_path, "server-power")
             self._write_file(local_project / selected_relative_path, "local-old-power")
@@ -1361,8 +1510,8 @@ class LocalProjectManagerUiTests(unittest.TestCase):
         self.assertIn('"Add to server"', text)
         self.assertIn('"Newer local files"', text)
         self.assertIn('"Local-only files"', text)
-        self.assertIn("Back Up and Replace Local Project", text)
-        self.assertIn("existing local project will be replaced", text)
+        self.assertIn("Back Up and Update Local Project", text)
+        self.assertIn("other folders only gain new files", text)
         self.assertIn("managerResult.replaceExistingLocal === true", text)
         self.assertIn("replaceExistingLocal:", text)
         self.assertIn('copyProjectLocallyDialogState.syncReviewVisible === true', text)

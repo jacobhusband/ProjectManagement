@@ -454,6 +454,33 @@ $oleCheckErrorMarker = "ACIES_OLE_CHECK:ERROR"
 $oleRefreshRequiredMarker = "ACIES_OLE_REFRESH:REQUIRED"
 Write-Host "PROGRESS: ARCALIGNEDTEXT module candidates: $($arcAlignedTextSupportCandidates -join '; ')"
 
+function Test-DwgOpenInAutoCad {
+  # AutoCAD holds <drawing>.dwl and .dwl2 open without sharing for as long as the
+  # drawing is open in a session. A lock file left behind by a crash or a killed
+  # session can still be opened, so only a refused open counts as "in use".
+  param([string]$DwgPath)
+
+  foreach ($lockExtension in @(".dwl", ".dwl2")) {
+    $lockPath = [System.IO.Path]::ChangeExtension($DwgPath, $lockExtension)
+    if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf)) { continue }
+    try {
+      $lockStream = [System.IO.File]::Open(
+        $lockPath,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::ReadWrite,
+        [System.IO.FileShare]::None)
+      $lockStream.Dispose()
+    }
+    catch [System.IO.IOException] {
+      return $true
+    }
+    catch {
+      # Not conclusive (for example, no permission to open it); keep checking.
+    }
+  }
+  return $false
+}
+
 function Invoke-FullAutoCadOleRefresh {
   param(
     [string]$AcadExe,
@@ -478,19 +505,29 @@ function Invoke-FullAutoCadOleRefresh {
     }
   }
 
+  # A second AutoCAD session opening a drawing that is already open stops at the
+  # "drawing in use" prompt, which nobody can answer in a hidden window.
+  if (Test-DwgOpenInAutoCad -DwgPath $DwgPath) {
+    return [pscustomobject]@{
+      Status = "in_use"
+      Message = "The drawing is open in AutoCAD, so its linked Excel content cannot be refreshed. Save and close it, then publish again (or turn off the Excel refresh option to publish what is saved)."
+    }
+  }
+
   $refreshId = [guid]::NewGuid().ToString("N")
   $refreshScript = Join-Path $env:TEMP "acies_refresh_ole_$refreshId.scr"
   $refreshCompleteMarker = Join-Path $env:TEMP "acies_refresh_ole_$refreshId.complete"
   $refreshCompleteMarkerForLisp = Convert-ToLispPath $refreshCompleteMarker
   $refreshWaitMilliseconds = [Math]::Max(1, [Math]::Min(30, $RefreshWaitSeconds)) * 1000
+  # Full AutoCAD reports DXF group 71 correctly (1 = linked), unlike Core Console,
+  # so it can tell a linked table from an embedded one. Embedded-only drawings are
+  # left unsaved. The marker's second line records how many linked items it found.
+  # Scripts already use command-line file prompts. Leave FILEDIA/CMDDIA alone:
+  # both are registry-backed, and a timeout can terminate this hidden session.
   $scriptContent = @"
-(setvar "FILEDIA" 0)
-(setvar "CMDDIA" 0)
-(command "_.DELAY" $refreshWaitMilliseconds)
-(command "_.REGENALL")
-(command "_.DELAY" 2000)
-(command "_.QSAVE")
-(progn (setq aciesOleRefreshMarker (open "$refreshCompleteMarkerForLisp" "w")) (if aciesOleRefreshMarker (progn (write-line "ACIES_OLE_REFRESH:COMPLETE" aciesOleRefreshMarker) (close aciesOleRefreshMarker))))
+(setq aciesLinkedOle (ssget "_X" '((0 . "OLE2FRAME") (71 . 1))))
+(if aciesLinkedOle (progn (command "_.DELAY" $refreshWaitMilliseconds) (command "_.REGENALL") (command "_.DELAY" 2000) (command "_.QSAVE")))
+(progn (setq aciesOleRefreshMarker (open "$refreshCompleteMarkerForLisp" "w")) (if aciesOleRefreshMarker (progn (write-line "ACIES_OLE_REFRESH:COMPLETE" aciesOleRefreshMarker) (write-line (strcat "LINKED=" (itoa (if aciesLinkedOle (sslength aciesLinkedOle) 0))) aciesOleRefreshMarker) (close aciesOleRefreshMarker))))
 (command "_.QUIT")
 "@
 
@@ -529,9 +566,18 @@ function Invoke-FullAutoCadOleRefresh {
       }
     }
 
+    $linkedCount = 0
+    $markerText = Get-Content -LiteralPath $refreshCompleteMarker -Raw -ErrorAction SilentlyContinue
+    if ($markerText -match 'LINKED=(\d+)') { $linkedCount = [int]$Matches[1] }
+    if ($linkedCount -eq 0) {
+      return [pscustomobject]@{
+        Status = "success"
+        Message = "Full AutoCAD found no linked Excel objects (only embedded or static ones), so the drawing was left unchanged."
+      }
+    }
     return [pscustomobject]@{
       Status = "success"
-      Message = "Linked Excel OLE content was given time to refresh in full AutoCAD and the drawing was saved."
+      Message = "$linkedCount linked Excel object(s) were given time to refresh in full AutoCAD and the drawing was saved."
     }
   }
   catch {
@@ -847,11 +893,27 @@ function Invoke-CorePlotAttempt {
 (setq *acies-refresh-excel-ole-links* $oleRefreshEnabledLiteral)
 (setq *acies-ole-refresh-attempted* $oleRefreshAttemptedLiteral)
 
-(defun InspectLinkedOLEs (/ selection count)
-  ;; DXF group 71 identifies the OLE item type: 1=linked, 2=embedded,
-  ;; 3=static. ssget avoids ActiveX, which is not dependable in Core Console.
-  (setq selection (ssget "_X" '((0 . "OLE2FRAME") (71 . 1))))
-  (setq count (if selection (sslength selection) 0))
+(defun InspectLinkedOLEs (/ selection count index sourceApp)
+  ;; DXF group 71 is the OLE item type (1=linked, 2=embedded, 3=static), but
+  ;; Core Console cannot load OLE servers and reports 0 for every item, so a
+  ;; (71 . 1) filter never matches. Count the items whose source application
+  ;; (group 3) is Excel instead; the full AutoCAD pass reads group 71 correctly
+  ;; and only saves the drawing when an item is really linked. ssget avoids
+  ;; ActiveX, which is not dependable in Core Console.
+  (setq selection (ssget "_X" '((0 . "OLE2FRAME"))))
+  (setq count 0)
+  (if selection
+    (progn
+      (setq index 0)
+      (while (< index (sslength selection))
+        (setq sourceApp (cdr (assoc 3 (entget (ssname selection index)))))
+        (if (and sourceApp (wcmatch (strcase sourceApp) "*EXCEL*"))
+          (setq count (1+ count))
+        )
+        (setq index (1+ index))
+      )
+    )
+  )
   (if (> count 0)
     (princ (strcat "\n${oleCheckPresentMarker}:" (itoa count)))
     (princ "\n$oleCheckAbsentMarker")
@@ -919,7 +981,6 @@ function Invoke-CorePlotAttempt {
 
 (defun EnsurePublishPreflight (/ hasArcAlignedText arcSupportLoaded arcSelectResult)
   (setvar "BACKGROUNDPLOT" 0)
-  (setvar "FILEDIA" 0)
   (setvar "DEMANDLOAD" 3)
   (setvar "PROXYSHOW" 1)
   (setq hasArcAlignedText nil)
@@ -1086,7 +1147,7 @@ foreach ($dwgPath in $files) {
 
     "OLE_REFRESH_RESULT: $($oleRefreshResult.Status) - $($oleRefreshResult.Message)" | Out-File $logFile -Append
     if ($oleRefreshResult.Status -eq "success") {
-      Write-Host "PROGRESS: Refreshed linked Excel content and saved $($dwgItem.Name)."
+      Write-Host "PROGRESS: $($dwgItem.Name) - $($oleRefreshResult.Message)"
     }
     else {
       Write-Host "PROGRESS: ERROR: $($dwgItem.Name) - $($oleRefreshResult.Message) Plot skipped to prevent stale OLE content."

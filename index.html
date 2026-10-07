@@ -19,8 +19,8 @@
     <script src="app-bootstrap.js?v=20260929-fast-start"></script>
     <link rel="stylesheet" href="styles.css?v=20260928-activity-history" />
     <link rel="stylesheet" href="symbol_counter.css?v=20260818-delete-actions" />
-    <link rel="stylesheet" href="industry.css?v=20260928-soft-hard-due" />
-    <link rel="stylesheet" href="modern-workspace.css?v=20260929-fast-start" />
+    <link rel="stylesheet" href="industry.css?v=20260930-work-locally" />
+    <link rel="stylesheet" href="modern-workspace.css?v=20260930-work-locally" />
     <link rel="stylesheet" href="deliverables-workspace.css?v=20260928-soft-hard-due" />
     <link rel="stylesheet" href="project-pages-editor/dist/project-pages-editor-project-pages-editor.css?v=20260918-notes-reliability" />
 </head>
@@ -165,6 +165,26 @@
                 <button class="btn ghost tiny" data-click-action="dismissSetupHelpNever">Do not ask again</button>
             </div>
             <button class="setup-help-close" data-click-action="dismissSetupHelpLater" aria-label="Close">×</button>
+        </div>
+    </div>
+    <!-- AutoCAD plugin setup prompt: shown when AutoCAD is installed but none of the ACIES plugins are -->
+    <div id="pluginSetupBanner" class="setup-help-banner" style="display: none;" role="region"
+        aria-label="AutoCAD plugin setup">
+        <div class="setup-help-content">
+            <div class="setup-help-icon" aria-hidden="true">🔌</div>
+            <div class="setup-help-text">
+                <strong>Install the ACIES AutoCAD plugins?</strong>
+                <p id="pluginSetupBannerText">AutoCAD is on this PC, but none of the ACIES plugins are.</p>
+            </div>
+            <div class="setup-help-actions">
+                <button id="pluginSetupInstallBtn" class="btn btn-primary tiny"
+                    data-click-action="installFirstRunPlugins">Install plugins</button>
+                <button id="pluginSetupLaterBtn" class="btn ghost tiny"
+                    data-click-action="dismissPluginSetupLater">Not right now</button>
+                <button id="pluginSetupNeverBtn" class="btn ghost tiny"
+                    data-click-action="dismissPluginSetupNever">Do not ask again</button>
+            </div>
+            <button class="setup-help-close" data-click-action="dismissPluginSetupLater" aria-label="Close">×</button>
         </div>
     </div>
     <main>
@@ -1829,6 +1849,30 @@
         <div class="modal-footer">
             <button type="button" class="btn ghost" id="workflowPreFlightCancelBtn">Cancel</button>
             <button type="button" class="btn" id="workflowPreFlightRunBtn">Run workflow</button>
+        </div>
+    </dialog>
+
+    <dialog id="publishDestinationDlg" aria-labelledby="publishDestinationTitle">
+        <div class="modal-header">
+            <div class="title" id="publishDestinationTitle">Place published set</div>
+            <button type="button" class="btn ghost" id="publishDestinationSkip">Keep in output folder</button>
+        </div>
+        <div class="modal-body stack">
+            <p>The combined PDF is ready. Move it into an issue folder under this project's PDF folder.</p>
+            <div class="tiny muted" id="publishDestinationRoot" style="overflow-wrap: anywhere;"></div>
+            <div class="tiny" id="publishDestinationFile" style="overflow-wrap: anywhere;"></div>
+            <label class="radio-label"><input type="radio" name="publishDestinationMode" value="existing" checked>
+                Use an existing folder</label>
+            <label class="label" for="publishDestinationExisting">Existing folder</label>
+            <select id="publishDestinationExisting"></select>
+            <label class="radio-label"><input type="radio" name="publishDestinationMode" value="new">
+                Create a new folder</label>
+            <label class="label" for="publishDestinationName">New folder name</label>
+            <input id="publishDestinationName" placeholder="YYYY-MM-DD MEP IFP" disabled autocomplete="off">
+            <div id="publishDestinationError" class="tiny" role="alert" hidden></div>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn" id="publishDestinationMove">Move set</button>
         </div>
     </dialog>
 
@@ -3577,8 +3621,8 @@
     </section>
     <div id="updateCheckIndicator" class="corner-status" hidden>Checking for updates...</div>
     <script src="project-pages-editor/dist/project-pages-editor.js?v=20260918-save-queue-export"></script>
-    <script src="script.js?v=20260929-fast-start"></script>
-    <script src="industry-projects.js?v=20260928-soft-hard-due"></script>
+    <script src="script.js?v=20261005-page-find-cleanup"></script>
+    <script src="industry-projects.js?v=20260930-work-locally"></script>
     <script src="industry-shell.js?v=20260909-modern-dialogs"></script>
     <script src="symbol_counter_ui.js?v=20260818-delete-actions"></script>
 </body>

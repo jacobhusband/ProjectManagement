@@ -357,6 +357,97 @@ class RemoveXrefPathsBehaviorTests(unittest.TestCase):
         self.assertNotIn("ZIP source selected. Extracting archive", text)
         self.assertNotIn('"{0}_Prepared" -f $zipBaseName', text)
 
+    def test_zip_picker_is_visible_and_returns_only_checked_drawings(self):
+        # Exercise the real modal dialog in the same hidden STA process used by
+        # the app. A timer answers it; opacity keeps this test off the desktop.
+        with tempfile.TemporaryDirectory(prefix="acies-xref-picker-") as temporary:
+            root = Path(temporary)
+            archive = root / 'Arch' / 'CAD.zip'
+            archive.parent.mkdir()
+            with zipfile.ZipFile(archive, 'w') as bundle:
+                bundle.writestr('CAD/', '')
+                bundle.writestr('CAD/A02-01.dwg', 'first')
+                bundle.writestr('CAD/A03-01.dwg', 'second')
+                bundle.writestr('CAD/logo.png', 'image')
+            harness = root / 'picker.ps1'
+            harness.write_text(r'''
+param([string]$ScriptPath, [string]$ZipPath, [string]$Mode)
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($ScriptPath, [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw $errors[0] }
+foreach ($definition in $ast.FindAll({ param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+  }, $false)) {
+  # Hide the test window without replacing any dialog behavior.
+  $body = $definition.Extent.Text.Replace("`$form.StartPosition = 'CenterScreen'",
+    "`$form.StartPosition = 'CenterScreen'; `$form.Opacity = 0")
+  . ([scriptblock]::Create($body))
+}
+$script:pickerError = ''
+$script:seen = $false
+$timer = New-Object System.Windows.Forms.Timer
+$timer.Interval = 100
+$timer.add_Tick({
+  $picker = @([System.Windows.Forms.Application]::OpenForms |
+    Where-Object { $_.Text -like 'Select DWGs from *' }) | Select-Object -First 1
+  if (-not $picker) { return }
+  $timer.Stop()
+  try {
+    if (-not $picker.TopMost -or -not $picker.ShowInTaskbar -or -not $picker.Visible) {
+      throw 'ZIP picker is not visible above the hidden app process'
+    }
+    $drawings = @($picker.Controls | Where-Object { $_ -is [System.Windows.Forms.CheckedListBox] })[0]
+    if ($drawings.Items.Count -ne 2) { throw 'DWG entries were not filtered correctly' }
+    $script:seen = $true
+    if ($Mode -eq 'cancel') {
+      $picker.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    } else {
+      $drawings.SetItemChecked(1, $true)
+      $picker.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    }
+  } catch {
+    $script:pickerError = $_.ToString()
+    $picker.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+  } finally { $picker.Close() }
+})
+$timer.Start()
+try { $items = @(Show-ZipDwgDialog -ZipPath $ZipPath) }
+finally { $timer.Stop(); $timer.Dispose() }
+if ($script:pickerError) { throw $script:pickerError }
+if (-not $script:seen) { throw 'ZIP picker was never shown' }
+Write-Output ('RESULT:' + (ConvertTo-Json -InputObject $items -Compress))
+''', encoding='utf-8')
+            for mode in ('select', 'cancel'):
+                with self.subTest(mode=mode):
+                    startupinfo = subprocess.STARTUPINFO()
+                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    startupinfo.wShowWindow = subprocess.SW_HIDE
+                    result = subprocess.run(
+                        [self.powershell, '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass',
+                         '-File', str(harness), '-ScriptPath', str(SCRIPT_PATH),
+                         '-ZipPath', str(archive), '-Mode', mode],
+                        capture_output=True, text=True, timeout=20,
+                        startupinfo=startupinfo,
+                        env={**os.environ, 'ACIES_NONINTERACTIVE': '0'},
+                    )
+                    output = result.stdout + result.stderr
+                    self.assertEqual(0, result.returncode, output)
+                    self.assertIn('Waiting for DWG selection from ZIP (2 drawing(s))', output)
+                    items = json.loads(next(line[len('RESULT:'):] for line in output.splitlines()
+                                            if line.startswith('RESULT:')))
+                    if mode == 'cancel':
+                        self.assertEqual([], items)
+                        self.assertIn('ZIP drawing selection cancelled.', output)
+                    else:
+                        self.assertEqual(1, len(items))
+                        self.assertEqual('CAD/A03-01.dwg', items[0]['EntryName'])
+                        self.assertEqual('zipEntry', items[0]['Kind'])
+                        self._same_path(root, items[0]['ProjectRoot'])
+            self.assertFalse((root / 'Xrefs').exists())
+
     def test_zip_traversal_does_not_replace_existing_background(self):
         with tempfile.TemporaryDirectory(prefix="acies-xref-unsafe-zip-") as temporary:
             root = Path(temporary)

@@ -563,6 +563,13 @@ ISSUE_DATE_MAX_YEAR = 2100
 APP_UPDATE_REPO = "jacobhusband/ProjectManagement"
 APP_INSTALLER_NAME = "acies-scheduler-setup.exe"
 GITHUB_API_BASE = "https://api.github.com"
+# GitHub allows an anonymous client 60 API requests an hour per IP address, and everyone
+# in an office shares one. Answers are therefore kept on disk: one younger than this is
+# reused without asking GitHub, and when GitHub refuses or cannot be reached the last
+# saved answer is used instead, however old.
+GITHUB_API_CACHE_FRESH_SECONDS = 10 * 60
+GITHUB_API_CACHE_MAX_ENTRIES = 24
+_GITHUB_API_CACHE_LOCK = threading.Lock()
 KNOWN_PLUGIN_BUNDLES = [
     "ElectricalCommands.AutoLispCommands.bundle",
     "ElectricalCommands.CleanCADCommands.bundle",
@@ -845,6 +852,8 @@ def build_default_user_settings():
         'apiKey': '',
         'autocadPath': '',
         'showSetupHelp': True,
+        # Offers to install the ACIES AutoCAD plugins when AutoCAD is present and none are.
+        'showPluginSetupPrompt': True,
         'cleanDwgOptions': {
             'stripXrefs': True,
             'setByLayer': True,
@@ -1565,6 +1574,7 @@ CAD_AUTO_SELECT_TRACE_FILE = get_app_data_path("cad_auto_select_trace.log")
 CHECKLISTS_FILE = get_app_data_path("checklists.json")
 ACTIVITY_HISTORY_FILE = get_app_data_path("activity_history.json")
 ACTIVITY_HISTORY_LIMIT = 200
+GITHUB_API_CACHE_FILE = get_app_data_path("github_api_cache.json")
 SYNC_BACKUPS_DIR = os.path.join(get_app_data_dir(), "sync_backups")
 SYNC_METADATA_FILE = get_app_data_path("local_project_sync_metadata.json")
 LIGHTING_SCHEDULE_SYNC_FILE = "T24LightingFixtureSchedule.sync.json"
@@ -3694,6 +3704,16 @@ def _autocad_registry_installs():
     Autodesk records every install under HKLM\\SOFTWARE\\Autodesk\\AutoCAD\\<release>\\<product>,
     so this finds AutoCAD on any drive and any future release.
     """
+    for _release, _product, folder, name in _autocad_registry_entries():
+        yield folder, name
+
+
+def _autocad_registry_entries():
+    """Yields (release key, product key, install folder, product name) for each registered AutoCAD.
+
+    The release key (for example R25.0) and product key (ACAD-8101:409) also name the
+    install's per-user settings under HKCU\\Software\\Autodesk\\AutoCAD.
+    """
     if sys.platform != "win32":
         return
     import winreg
@@ -3721,7 +3741,7 @@ def _autocad_registry_installs():
                         except OSError:
                             continue
                         if isinstance(folder, str) and folder.strip():
-                            yield folder.strip(), str(name or "")
+                            yield release, product, folder.strip(), str(name or "")
 
 
 def _autocad_program_files_installs():
@@ -3762,6 +3782,156 @@ def discover_autocad_installs():
             continue
         found.setdefault(os.path.normcase(exe), {"year": year, "path": exe})
     return sorted(found.values(), key=lambda item: (-item["year"], item["path"].lower()))
+
+
+# --- Plot style table preflight ---
+# Publish DWGs plots with this plot style table. AutoCAD only looks for it in the plot
+# style folders of the user's profile, and it is not part of an AutoCAD install, so a PC
+# that never received the file cannot plot. Checking first lets the tool say where the
+# file belongs instead of failing partway through the plot.
+PUBLISH_PLOT_STYLE_NAME = "510-monochrome.ctb"
+
+
+def _plot_style_dirs_from_profiles(release, product):
+    """Yields the plot style folders each AutoCAD profile of this install is set to use."""
+    if sys.platform != "win32":
+        return
+    import winreg
+    profiles_path = rf"Software\Autodesk\AutoCAD\{release}\{product}\Profiles"
+    try:
+        profiles = winreg.OpenKey(winreg.HKEY_CURRENT_USER, profiles_path)
+    except OSError:
+        return
+    with profiles:
+        for profile in _registry_subkey_names(winreg, profiles):
+            try:
+                with winreg.OpenKey(profiles, rf"{profile}\General") as general:
+                    value = winreg.QueryValueEx(general, "PrinterStyleSheetDir")[0]
+            except OSError:
+                continue
+            if isinstance(value, str):
+                yield value
+
+
+def find_plot_style_table(acad_path, style_name=PUBLISH_PLOT_STYLE_NAME):
+    """Looks for a plot style table in the plot style folders of the given Core Console's AutoCAD.
+
+    Returns {'status': 'found', 'path': ...}, {'status': 'missing', 'searched': [...]}, or
+    {'status': 'unknown'} when the answer cannot be worked out (not a registered
+    AutoCAD install, or not Windows). Only 'missing' is grounds for stopping a job.
+    """
+    install_folder = os.path.normcase(os.path.dirname(os.path.abspath(str(acad_path or ""))))
+    releases = [
+        (release, product)
+        for release, product, folder, _name in _autocad_registry_entries()
+        if os.path.normcase(os.path.abspath(folder)) == install_folder
+    ]
+    match = _AUTOCAD_YEAR_RE.search(install_folder)
+    if not releases or not match:
+        return {"status": "unknown"}
+    year = match.group(1)
+
+    import glob
+    appdata = os.environ.get("APPDATA") or ""
+    candidates = []
+    for release, product in releases:
+        # AutoCAD's own default: <roaming folder>\AutoCAD <year>\<release>\<language>\
+        roots = glob.glob(os.path.join(glob.escape(appdata), "Autodesk", f"AutoCAD {year}", glob.escape(release), "*"))
+        for root in roots:
+            candidates.append(os.path.join(root, "Plotters", "Plot Styles"))
+        for configured in _plot_style_dirs_from_profiles(release, product):
+            # A profile lists folders separated by ";". Each is judged on its own, so a
+            # shared folder still counts when the roaming-folder token beside it cannot
+            # be expanded (no roaming folder exists yet).
+            for part in configured.split(";"):
+                part = part.strip()
+                if not part:
+                    continue
+                if re.search(r"%RoamableRootFolder%", part, re.IGNORECASE):
+                    expansions = [
+                        re.sub(r"%RoamableRootFolder%", lambda _m, r=root: os.path.join(r, ""), part, flags=re.IGNORECASE)
+                        for root in roots
+                    ]
+                else:
+                    expansions = [part]
+                for expanded in expansions:
+                    candidates.append(os.path.expandvars(expanded))
+
+    searched = []
+    seen = set()
+    for folder in candidates:
+        key = os.path.normcase(os.path.normpath(folder))
+        if key in seen:
+            continue
+        seen.add(key)
+        searched.append(folder)
+        candidate = os.path.join(folder, style_name)
+        if os.path.isfile(candidate):
+            return {"status": "found", "path": candidate}
+    return {"status": "missing", "searched": searched, "year": year}
+
+
+# --- GitHub API answers kept on disk ---
+class GitHubRateLimitError(Exception):
+    """GitHub refused a request because this network used up its anonymous hourly allowance."""
+
+
+def _github_rate_limit_message(response):
+    """The user-facing explanation for a rate-limited response, or '' if it is not one."""
+    status = getattr(response, "status_code", 0)
+    if status not in (403, 429):
+        return ""
+    headers = getattr(response, "headers", None) or {}
+    try:
+        remaining = str(headers.get("X-RateLimit-Remaining", "")).strip()
+        reset = int(str(headers.get("X-RateLimit-Reset", "")).strip())
+    except (AttributeError, TypeError, ValueError):
+        remaining, reset = "", 0
+    try:
+        mentions_limit = "rate limit" in str(getattr(response, "text", "")).lower()
+    except Exception:
+        mentions_limit = False
+    if status != 429 and remaining != "0" and not mentions_limit:
+        return ""
+    retry = "Try again in a little while."
+    if reset > 0:
+        try:
+            retry = "Try again after " + datetime.datetime.fromtimestamp(reset).strftime("%I:%M %p").lstrip("0") + "."
+        except (OverflowError, OSError, ValueError):
+            pass
+    return (
+        "GitHub is limiting how often this network can look up releases "
+        "(everyone on it shares a small hourly allowance). " + retry
+    )
+
+
+def _read_github_api_cache():
+    try:
+        with open(GITHUB_API_CACHE_FILE, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    entries = data.get("entries") if isinstance(data, dict) else None
+    return entries if isinstance(entries, dict) else {}
+
+
+def _remember_github_api_answer(url, payload, fetched_at):
+    """Saves a GitHub answer. A cache that cannot be written is never a reason to fail."""
+    try:
+        with _GITHUB_API_CACHE_LOCK:
+            entries = _read_github_api_cache()
+            entries[url] = {"fetchedAt": fetched_at, "payload": payload}
+            newest = sorted(
+                entries.items(),
+                key=lambda item: item[1].get("fetchedAt", 0) if isinstance(item[1], dict) else 0,
+                reverse=True,
+            )[:GITHUB_API_CACHE_MAX_ENTRIES]
+            temporary = f"{GITHUB_API_CACHE_FILE}.tmp"
+            with open(temporary, "w", encoding="utf-8") as handle:
+                json.dump({"entries": dict(newest)}, handle)
+            os.replace(temporary, GITHUB_API_CACHE_FILE)
+    except Exception as exc:
+        logging.debug("Could not save the GitHub answer for %s: %s", url, exc)
 
 
 # --- API Class ---
@@ -3892,7 +4062,47 @@ class Api:
             return {'status': 'error', 'message': str(e)}
 
     # --- Application update helpers ---
-    def _fetch_latest_release(self):
+    def _github_api_json(self, url, max_age=GITHUB_API_CACHE_FRESH_SECONDS):
+        """GET a GitHub API URL and return its JSON, or None when GitHub answers 404.
+
+        An answer younger than max_age seconds is reused without asking GitHub (pass 0
+        to always ask). If GitHub then refuses or cannot be reached, the last saved
+        answer is returned instead, and only a lookup with nothing saved raises.
+        """
+        now = time.time()
+        with _GITHUB_API_CACHE_LOCK:
+            saved = _read_github_api_cache().get(url)
+        has_saved = isinstance(saved, dict) and "payload" in saved
+        saved_at = 0.0
+        if has_saved:
+            try:
+                saved_at = float(saved.get("fetchedAt") or 0)
+            except (TypeError, ValueError):
+                saved_at = 0.0
+            if max_age and 0 <= now - saved_at < max_age:
+                return saved["payload"]
+
+        try:
+            response = requests.get(url, timeout=10)
+            if response.status_code == 404:
+                return None
+            limit_message = _github_rate_limit_message(response)
+            if limit_message:
+                raise GitHubRateLimitError(limit_message)
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            if not has_saved:
+                raise
+            logging.warning(
+                "GitHub lookup for %s failed (%s); using the answer saved %d minutes ago.",
+                url, exc, max(0, int((now - saved_at) // 60)))
+            return saved["payload"]
+
+        _remember_github_api_answer(url, payload, now)
+        return payload
+
+    def _fetch_latest_release(self, max_age=GITHUB_API_CACHE_FRESH_SECONDS):
         """Fetch latest release metadata for this application.
 
         GitHub returns 404 for /releases/latest when no published release exists,
@@ -3908,15 +4118,16 @@ class Api:
 
         for url in endpoints:
             try:
-                response = requests.get(url, timeout=10)
-                if response.status_code == 404:
+                payload = self._github_api_json(url, max_age=max_age)
+                if payload is None:
                     continue
-                response.raise_for_status()
-                payload = response.json()
                 data = payload[0] if isinstance(
                     payload, list) and payload else payload
                 if data:
                     break
+            except GitHubRateLimitError:
+                # The second endpoint would be refused too, and "no release" would be false.
+                raise
             except Exception as e:
                 last_error = e
 
@@ -3947,10 +4158,15 @@ class Api:
             'html_url': data.get('html_url') or ''
         }
 
-    def get_app_update_status(self):
-        """Check GitHub for a newer installer."""
+    def get_app_update_status(self, force=False):
+        """Check GitHub for a newer installer.
+
+        force skips the saved answer: a person who just clicked "check for updates"
+        expects the news from GitHub now, not from a few minutes ago.
+        """
         try:
-            release = self._fetch_latest_release()
+            release = self._fetch_latest_release(
+                max_age=0 if force else GITHUB_API_CACHE_FRESH_SECONDS)
             latest_version = release['latest_version']
             download_url = release['download_url']
             update_available = bool(download_url) and _is_remote_newer(
@@ -3969,6 +4185,7 @@ class Api:
             return {
                 'status': 'error',
                 'message': str(e),
+                'rateLimited': isinstance(e, GitHubRateLimitError),
                 'current_version': self.app_version
             }
 
@@ -3984,15 +4201,16 @@ class Api:
 
         for url in endpoints:
             try:
-                response = requests.get(url, timeout=10)
-                if response.status_code == 404:
+                payload = self._github_api_json(url)
+                if payload is None:
                     continue
-                response.raise_for_status()
-                payload = response.json()
                 data = payload[0] if isinstance(
                     payload, list) and payload else payload
                 if data:
                     break
+            except GitHubRateLimitError:
+                # Every other lookup would be refused too, and "no release" would be false.
+                raise
             except Exception as e:
                 last_error = e
 
@@ -4006,23 +4224,15 @@ class Api:
 
         # Fallback: look at tags if no releases are published yet.
         try:
-            tag_resp = requests.get(
-                f"{GITHUB_API_BASE}/repos/{self.github_repo}/tags?per_page=1",
-                timeout=10
-            )
-            tag_resp.raise_for_status()
-            tags = tag_resp.json()
+            tags = self._github_api_json(
+                f"{GITHUB_API_BASE}/repos/{self.github_repo}/tags?per_page=1")
             if isinstance(tags, list) and tags:
                 tag_name = tags[0].get('name') or ''
                 release_data = {}
                 try:
-                    rel_resp = requests.get(
-                        f"{GITHUB_API_BASE}/repos/{self.github_repo}/releases/tags/{tag_name}",
-                        timeout=10
-                    )
-                    if rel_resp.status_code != 404:
-                        rel_resp.raise_for_status()
-                        release_data = rel_resp.json() or {}
+                    release_data = self._github_api_json(
+                        f"{GITHUB_API_BASE}/repos/{self.github_repo}/releases/tags/{tag_name}"
+                    ) or {}
                 except Exception as inner:
                     logging.warning(
                         f"Could not fetch release data for tag {tag_name}: {inner}")
@@ -4033,6 +4243,8 @@ class Api:
                     'release_notes': release_data.get('body', ''),
                     'html_url': release_data.get('html_url', '')
                 }
+        except GitHubRateLimitError:
+            raise
         except Exception as e:
             last_error = e
 
@@ -4149,6 +4361,7 @@ class Api:
 
             release_tag = BUNDLE_RELEASE_TAG
             assets = []
+            notice = ''
             try:
                 release_info = self._fetch_latest_bundle_release()
                 self.release_tag = release_info.get('tag') or BUNDLE_RELEASE_TAG
@@ -4156,12 +4369,14 @@ class Api:
                 assets = release_info.get('assets', []) or []
                 if not assets and release_tag:
                     api_url = f"{GITHUB_API_BASE}/repos/{self.github_repo}/releases/tags/{release_tag}"
-                    tag_response = requests.get(api_url, timeout=10)
-                    if tag_response.status_code != 404:
-                        tag_response.raise_for_status()
-                        assets = tag_response.json().get('assets', [])
+                    tag_payload = self._github_api_json(api_url)
+                    if tag_payload:
+                        assets = tag_payload.get('assets', [])
             except Exception as e:
                 self.release_tag = release_tag
+                if isinstance(e, GitHubRateLimitError):
+                    # Without this the plugins would read "Release asset not published yet".
+                    notice = str(e)
                 logging.warning(
                     f"Could not refresh plugin release assets; falling back to known bundle catalog: {e}"
                 )
@@ -4220,7 +4435,10 @@ class Api:
                 }
                 statuses.append(status)
 
-            return {'status': 'success', 'data': statuses}
+            result = {'status': 'success', 'data': statuses}
+            if notice:
+                result['notice'] = notice
+            return result
 
         except Exception as e:
             logging.error(f"Error getting bundle statuses: {e}")
@@ -4233,6 +4451,8 @@ class Api:
         if self._is_autocad_running():
             return {
                 'status': 'error',
+                # The first-run plugin prompt stops on this instead of trying every plugin.
+                'code': 'autocad_running',
                 'message': 'AutoCAD is currently running. Please close AutoCAD and try again to prevent file locking errors.'
             }
 
@@ -11548,6 +11768,96 @@ Return ONLY the JSON object.
                     return candidate
         return ''
 
+    def get_publish_pdf_destinations(self, combined_pdf_path, project_path=''):
+        """Find the project's PDF folder and its immediate issue folders."""
+        try:
+            source = os.path.abspath(str(combined_pdf_path or '').strip())
+            if not source.lower().endswith('.pdf') or not os.path.isfile(
+                self._to_windows_extended_path(source)
+            ):
+                raise ValueError('The published PDF is no longer available at its saved location.')
+            pdf_folder = self._resolve_deliverable_pdf_folder({
+                'path': project_path or self._find_project_root_by_id(source),
+                'localProjectPath': self._find_project_root_by_id(source),
+            })
+            if not pdf_folder:
+                raise ValueError("Could not find this project's PDF folder. The set remains in its output folder.")
+            folders = self._list_deliverable_pdf_issue_folders(pdf_folder)
+            root_real = os.path.normcase(os.path.realpath(pdf_folder))
+            folders = [folder for folder in folders if os.path.commonpath([
+                root_real, os.path.normcase(os.path.realpath(folder['path']))
+            ]) == root_real]
+            return {
+                'status': 'success', 'pdfFolder': pdf_folder,
+                'combinedPdfPath': source, 'folders': folders,
+            }
+        except (OSError, ValueError) as exc:
+            return {'status': 'error', 'message': str(exc)}
+
+    def move_published_pdf(self, combined_pdf_path, project_path, folder_name, create_new=False):
+        """Move the combined set into one PDF subfolder without replacing files."""
+        result = self.get_publish_pdf_destinations(combined_pdf_path, project_path)
+        if result.get('status') != 'success':
+            return result
+        destination = None
+        destination_created = False
+        source_removed = False
+        folder_created = False
+        folder = None
+        try:
+            name = str(folder_name or '')
+            if (
+                not name.strip() or name != name.strip() or name.endswith('.')
+                or re.search(r'[<>:"/\\|?*\x00-\x1f]', name)
+                or name in ('.', '..')
+                or re.match(r'^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)', name, re.I)
+            ):
+                raise ValueError('Enter a valid folder name without slashes or Windows reserved characters.')
+            pdf_folder = result['pdfFolder']
+            folder = os.path.join(pdf_folder, name)
+            root_real = os.path.normcase(os.path.realpath(pdf_folder))
+            folder_real = os.path.normcase(os.path.realpath(folder))
+            if folder_real == root_real or os.path.commonpath([root_real, folder_real]) != root_real:
+                raise ValueError('Choose a folder inside the project PDF folder.')
+            if create_new is True:
+                os.mkdir(self._to_windows_extended_path(folder))
+                folder_created = True
+            elif name not in {item['name'] for item in result['folders']}:
+                raise ValueError('That folder is no longer available. Choose an existing folder or create a new one.')
+            source = result['combinedPdfPath']
+            destination = os.path.join(folder, os.path.basename(source))
+            if os.path.normcase(os.path.realpath(source)) == os.path.normcase(os.path.realpath(destination)):
+                raise ValueError('The set is already in that folder.')
+            # Exclusive creation also protects against another discipline publishing
+            # the same name after the destination list was loaded.
+            with open(self._to_windows_extended_path(source), 'rb') as src:
+                with open(self._to_windows_extended_path(destination), 'xb') as dst:
+                    destination_created = True
+                    shutil.copyfileobj(src, dst)
+                    dst.flush()
+                    os.fsync(dst.fileno())
+            os.unlink(self._to_windows_extended_path(source))
+            source_removed = True
+            return {
+                'status': 'success', 'combinedPdfPath': destination,
+                'openFolderPath': folder, 'message': f'Published set moved to {name}.',
+            }
+        except FileExistsError:
+            return {'status': 'error', 'message': 'That folder or PDF already exists. Choose another name or folder; nothing was overwritten.'}
+        except (OSError, ValueError) as exc:
+            return {'status': 'error', 'message': f'Could not move the set: {exc}'}
+        finally:
+            if destination_created and not source_removed:
+                try:
+                    os.unlink(self._to_windows_extended_path(destination))
+                except OSError:
+                    logging.warning('Could not remove incomplete published PDF copy: %s', destination)
+            if folder_created and not source_removed:
+                try:
+                    os.rmdir(self._to_windows_extended_path(folder))
+                except OSError:
+                    pass  # Leave a folder another process has started using.
+
     def _coerce_issue_date(self, match):
         """Builds a date from a YYYY/MM/DD regex match, rejecting nonsense years."""
         if not match:
@@ -12986,6 +13296,11 @@ Return ONLY the JSON object.
                     baseline,
                     comparison_tolerance_seconds,
                 )
+                if decision != 'equal' and scope_type != 'managed':
+                    # Outside the discipline and Xrefs folders (Arch, Photos, RFI,
+                    # Documents, ...) files are only ever added. Two differing copies are
+                    # left as they are on both sides, never replaced or flagged as a conflict.
+                    continue
                 if decision == 'conflict':
                     conflict_candidates.append(
                         self._build_local_project_manager_conflict_entry(
@@ -13612,6 +13927,7 @@ Return ONLY the JSON object.
 
         copied_files = []
         deleted_files = []
+        skipped_files = []
         synced_baselines = []
         for candidate_entry in pending_candidates:
             relative_path = str(candidate_entry.get('relativePath') or '').strip()
@@ -13649,6 +13965,20 @@ Return ONLY the JSON object.
                     'source': source_path,
                     'destination': destination_path,
                     'error': 'Source file was not found.',
+                })
+                continue
+
+            if (
+                str(candidate_entry.get('scopeType') or '').strip().lower() != 'managed'
+                and os.path.lexists(self._to_windows_extended_path(destination_path))
+            ):
+                # The comparison only offers files missing on the other side here. One
+                # that has appeared since is left as it is, never replaced.
+                skipped_files.append({
+                    'relativePath': relative_path,
+                    'source': source_path,
+                    'destination': destination_path,
+                    'reason': 'already_exists',
                 })
                 continue
 
@@ -13726,6 +14056,8 @@ Return ONLY the JSON object.
             'copiedFileCount': len(copied_files),
             'deletedFiles': deleted_files,
             'deletedFileCount': len(deleted_files),
+            'skippedFiles': skipped_files,
+            'skippedFileCount': len(skipped_files),
             'failedFiles': failed_files,
             'failedFileCount': len(failed_files),
             'blockedEntries': blocked_entries,
@@ -13862,14 +14194,19 @@ Return ONLY the JSON object.
             logging.error(f"Error resolving Local Project Manager conflict: {e}")
             return {'status': 'error', 'message': str(e)}
 
-    def _copy_folder_contents(self, source_folder, destination_folder, cancel_check=None):
-        """Recursively copy a folder with per-file failure tracking."""
+    def _copy_folder_contents(self, source_folder, destination_folder, cancel_check=None, skip_existing=False):
+        """Recursively copy a folder with per-file failure tracking.
+
+        With skip_existing, a file that already exists at the destination is left exactly
+        as it is, so the copy only adds what is missing.
+        """
         source_display_root = os.path.normpath(source_folder)
         destination_display_root = os.path.normpath(destination_folder)
         source_copy_root = self._to_windows_extended_path(source_display_root)
         destination_copy_root = self._to_windows_extended_path(destination_display_root)
 
         copied_file_count = 0
+        skipped_existing_count = 0
         failed_files = []
 
         os.makedirs(destination_copy_root, exist_ok=True)
@@ -13934,6 +14271,9 @@ Return ONLY the JSON object.
                 destination_path = os.path.join(destination_root, child_file)
                 source_display_path = os.path.join(source_display, child_file)
                 destination_display_path = os.path.join(destination_display, child_file)
+                if skip_existing and os.path.lexists(destination_path):
+                    skipped_existing_count += 1
+                    continue
                 try:
                     shutil.copy2(source_path, destination_path)
                     copied_file_count += 1
@@ -13946,16 +14286,18 @@ Return ONLY the JSON object.
 
         return {
             'copiedFileCount': copied_file_count,
+            'skippedExistingCount': skipped_existing_count,
             'failedFiles': failed_files,
         }
 
-    def _copy_folder_direct_files(self, source_folder, destination_folder):
+    def _copy_folder_direct_files(self, source_folder, destination_folder, skip_existing=False):
         source_display_root = os.path.normpath(source_folder)
         destination_display_root = os.path.normpath(destination_folder)
         source_copy_root = self._to_windows_extended_path(source_display_root)
         destination_copy_root = self._to_windows_extended_path(destination_display_root)
 
         copied_file_count = 0
+        skipped_existing_count = 0
         failed_files = []
         source_file_count = 0
 
@@ -13983,6 +14325,9 @@ Return ONLY the JSON object.
                     source_display_path = os.path.join(source_display_root, entry.name)
                     destination_display_path = os.path.join(destination_display_root, entry.name)
 
+                    if skip_existing and os.path.lexists(destination_path):
+                        skipped_existing_count += 1
+                        continue
                     try:
                         shutil.copy2(source_path, destination_path)
                         copied_file_count += 1
@@ -14001,19 +14346,33 @@ Return ONLY the JSON object.
 
         return {
             'copiedFileCount': copied_file_count,
+            'skippedExistingCount': skipped_existing_count,
             'failedFiles': failed_files,
             'sourceFileCount': source_file_count,
         }
 
-    def _copy_folder_selected_children(self, source_folder, destination_folder, selected_child_names, include_parent_root_files):
+    def _copy_folder_selected_children(
+        self,
+        source_folder,
+        destination_folder,
+        selected_child_names,
+        include_parent_root_files,
+        skip_existing=False,
+    ):
         copied_file_count = 0
+        skipped_existing_count = 0
         failed_files = []
         missing_child_folders = []
         copied_any_source_content = False
 
         if include_parent_root_files:
-            direct_files_result = self._copy_folder_direct_files(source_folder, destination_folder)
+            direct_files_result = self._copy_folder_direct_files(
+                source_folder,
+                destination_folder,
+                skip_existing=skip_existing,
+            )
             copied_file_count += int(direct_files_result.get('copiedFileCount', 0) or 0)
+            skipped_existing_count += int(direct_files_result.get('skippedExistingCount', 0) or 0)
             failed_files.extend(direct_files_result.get('failedFiles', []))
             copied_any_source_content = int(direct_files_result.get('sourceFileCount', 0) or 0) > 0
 
@@ -14021,8 +14380,13 @@ Return ONLY the JSON object.
             source_child_folder = os.path.join(source_folder, child_name)
             destination_child_folder = os.path.join(destination_folder, child_name)
             if os.path.isdir(self._to_windows_extended_path(source_child_folder)):
-                copy_result = self._copy_folder_contents(source_child_folder, destination_child_folder)
+                copy_result = self._copy_folder_contents(
+                    source_child_folder,
+                    destination_child_folder,
+                    skip_existing=skip_existing,
+                )
                 copied_file_count += int(copy_result.get('copiedFileCount', 0) or 0)
+                skipped_existing_count += int(copy_result.get('skippedExistingCount', 0) or 0)
                 failed_files.extend(copy_result.get('failedFiles', []))
                 copied_any_source_content = True
             else:
@@ -14030,6 +14394,7 @@ Return ONLY the JSON object.
 
         return {
             'copiedFileCount': copied_file_count,
+            'skippedExistingCount': skipped_existing_count,
             'failedFiles': failed_files,
             'missingChildFolders': missing_child_folders,
             'copiedAnySourceContent': copied_any_source_content,
@@ -14636,6 +15001,72 @@ Return ONLY the JSON object.
             'missingServerFolders': missing_server_folders,
         }
 
+    def _get_copy_project_managed_folder_keys(self, settings):
+        return {
+            str(name or '').strip().lower()
+            for name in self._get_local_project_manager_managed_root_names(settings)
+        }
+
+    def _get_copy_project_replacement_scopes(self, folder_requests, managed_folder_keys):
+        """Local places that copying from the server rebuilds from scratch.
+
+        Only the selected discipline and Xrefs folders are replaced. Every other folder
+        (Arch, Photos, RFI, Documents, ...) is never replaced or emptied, because it only
+        ever gains files; copying into it adds what is missing.
+        """
+        scopes = []
+        for folder_request in folder_requests or []:
+            folder_name = str(folder_request.get('name') or '').strip()
+            if not folder_name or folder_name.lower() not in managed_folder_keys:
+                continue
+            if str(folder_request.get('mode') or '').strip().lower() == 'subset':
+                if bool(folder_request.get('includeParentRootFiles')):
+                    scopes.append({'relativePath': folder_name, 'directFilesOnly': True})
+                for child_name in self._normalize_copy_project_folder_names(
+                    folder_request.get('selectedChildNames')
+                ):
+                    scopes.append({
+                        'relativePath': os.path.join(folder_name, child_name),
+                        'directFilesOnly': False,
+                    })
+                continue
+            scopes.append({'relativePath': folder_name, 'directFilesOnly': False})
+        return scopes
+
+    def _is_copy_project_path_in_replacement_scope(self, relative_path, scopes):
+        path_parts = [
+            part.lower() for part in re.split(r'[\\/]+', str(relative_path or '')) if part
+        ]
+        for scope in scopes:
+            scope_parts = [
+                part.lower() for part in re.split(r'[\\/]+', scope['relativePath']) if part
+            ]
+            if path_parts[:len(scope_parts)] != scope_parts:
+                continue
+            depth_below_scope = len(path_parts) - len(scope_parts)
+            if depth_below_scope >= 1 and (not scope['directFilesOnly'] or depth_below_scope == 1):
+                return True
+        return False
+
+    def _remove_copy_project_replacement_scopes(self, local_project_path, scopes):
+        for scope in scopes:
+            scope_path = os.path.normpath(os.path.join(local_project_path, scope['relativePath']))
+            if not self._is_copy_project_path_directory(scope_path):
+                continue
+            if not scope['directFilesOnly']:
+                self._remove_copy_project_tree(scope_path)
+                continue
+            with os.scandir(self._to_windows_extended_path(scope_path)) as entries:
+                direct_file_paths = [
+                    entry.path for entry in entries if self._is_copy_project_entry_file(entry)
+                ]
+            for file_path in direct_file_paths:
+                try:
+                    os.remove(file_path)
+                except PermissionError:
+                    os.chmod(file_path, stat_module.S_IWRITE)
+                    os.remove(file_path)
+
     def _build_copy_project_replacement_risk_file(self, local_file, server_file=None, reason='local_only'):
         local_file = local_file or {}
         server_file = server_file or {}
@@ -14665,7 +15096,9 @@ Return ONLY the JSON object.
         selected_folder_names=None,
         selected_folder_requests=None,
     ):
-        """Preview local files that would be deleted before replacing an existing local project."""
+        """Preview the local files that copying would delete when it rebuilds the selected
+        discipline and Xrefs folders. Other selected folders only gain missing files, so
+        nothing in them is at risk."""
         try:
             settings = self.get_user_settings()
             source_resolution = self._resolve_copy_project_source_path(
@@ -14710,9 +15143,26 @@ Return ONLY the JSON object.
                 if str(entry.get('relativePath') or '').strip()
             }
 
+            managed_folder_keys = self._get_copy_project_managed_folder_keys(settings)
+            replacement_scopes = self._get_copy_project_replacement_scopes(
+                folder_requests,
+                managed_folder_keys,
+            )
+            replaced_folders = [
+                request.get('name')
+                for request in folder_requests
+                if str(request.get('name') or '').lower() in managed_folder_keys
+            ]
+            merged_folders = [
+                request.get('name')
+                for request in folder_requests
+                if str(request.get('name') or '').lower() not in managed_folder_keys
+            ]
+
             newer_local_files = []
             local_only_files = []
             blocked_entries = []
+            local_file_keys = set()
             comparison_tolerance_seconds = 60.0
 
             for scan_error in selected_server_scan.get('scanErrors', []) or []:
@@ -14745,6 +15195,12 @@ Return ONLY the JSON object.
                     relative_path = str(local_file.get('relativePath') or '').strip()
                     if not relative_path:
                         continue
+                    local_file_keys.add(relative_path.lower())
+                    if not self._is_copy_project_path_in_replacement_scope(
+                        relative_path,
+                        replacement_scopes,
+                    ):
+                        continue
                     server_file = server_files_by_relative_path.get(relative_path.lower())
                     if not server_file:
                         local_only_files.append(
@@ -14767,6 +15223,22 @@ Return ONLY the JSON object.
                             )
                         )
 
+            # The copy writes every selected file in a replaced folder, but elsewhere only
+            # the files that are missing locally; the rest stay exactly as they are.
+            files_to_write_count = 0
+            kept_existing_file_count = 0
+            for relative_key in server_files_by_relative_path:
+                if (
+                    relative_key not in local_file_keys
+                    or self._is_copy_project_path_in_replacement_scope(
+                        relative_key,
+                        replacement_scopes,
+                    )
+                ):
+                    files_to_write_count += 1
+                else:
+                    kept_existing_file_count += 1
+
             return {
                 'status': 'success',
                 'serverProjectPath': normalized_server_path,
@@ -14778,7 +15250,10 @@ Return ONLY the JSON object.
                 'projectName': target_info.get('projectName') or '',
                 'localProjectExists': local_project_exists,
                 'folderRequests': folder_requests,
-                'selectedServerFileCount': len(selected_server_scan.get('files', []) or []),
+                'replacedFolders': replaced_folders,
+                'mergedFolders': merged_folders,
+                'selectedServerFileCount': files_to_write_count,
+                'keptExistingFileCount': kept_existing_file_count,
                 'missingServerFolders': selected_server_scan.get('missingServerFolders', []),
                 'newerLocalFiles': newer_local_files,
                 'newerLocalFileCount': len(newer_local_files),
@@ -14792,39 +15267,67 @@ Return ONLY the JSON object.
             logging.error(f"Error previewing local project replacement: {e}")
             return {'status': 'error', 'message': str(e)}
 
-    def _backup_existing_local_project_before_replace(self, local_project_path):
+    def _backup_local_project_replacement_scopes(self, local_project_path, scopes):
+        """Back up the local files that rebuilding the given scopes is about to delete."""
         normalized_local_project_path = os.path.normpath(str(local_project_path or '').strip())
         if not normalized_local_project_path:
             return {'status': 'error', 'message': 'Local project path is required.'}
-        if not os.path.isdir(self._to_windows_extended_path(normalized_local_project_path)):
+
+        scan_result = self._scan_copy_project_files(normalized_local_project_path)
+
+        def scan_error_affects_scopes(error):
+            # An unreadable folder only matters when it is, holds, or sits inside a folder
+            # being replaced; a folder the copy leaves alone cannot block it.
+            error_parts = [
+                part.lower()
+                for part in re.split(r'[\\/]+', str(error.get('relativePath') or ''))
+                if part
+            ]
+            if not error_parts:
+                return True
+            for scope in scopes:
+                scope_parts = [
+                    part.lower() for part in re.split(r'[\\/]+', scope['relativePath']) if part
+                ]
+                shared_depth = min(len(error_parts), len(scope_parts))
+                if error_parts[:shared_depth] == scope_parts[:shared_depth]:
+                    return True
+            return False
+
+        blocking_scan_errors = [
+            error for error in scan_result.get('scanErrors', []) if scan_error_affects_scopes(error)
+        ]
+        if blocking_scan_errors:
+            # A file that could not be listed could not be backed up either.
+            failed_files = [
+                {
+                    'source': str(error.get('path') or ''),
+                    'destination': '',
+                    'error': str(error.get('error') or 'Could not be scanned.'),
+                }
+                for error in blocking_scan_errors
+            ]
             return {
                 'status': 'success',
                 'backupCreated': False,
                 'backupPath': '',
                 'copiedFileCount': 0,
-                'failedFiles': [],
-                'failedFileCount': 0,
+                'failedFiles': failed_files,
+                'failedFileCount': len(failed_files),
             }
 
-        project_name = os.path.basename(normalized_local_project_path.rstrip('\\/'))
-        backup_root = os.path.join(
-            _get_windows_documents_dir(),
-            'Local Projects',
-            '0 Archive',
-            project_name,
+        replaced_relative_paths = [
+            entry['relativePath']
+            for entry in scan_result.get('files', [])
+            if self._is_copy_project_path_in_replacement_scope(entry['relativePath'], scopes)
+        ]
+        backup_result = self._create_local_project_manager_backup(
+            normalized_local_project_path,
+            replaced_relative_paths,
+            direction='to_local',
         )
-        backup_path = self._reserve_unique_archive_folder(backup_root)
-        copy_result = self._copy_folder_contents(normalized_local_project_path, backup_path)
-        failed_files = list(copy_result.get('failedFiles', []) or [])
-        self._cleanup_old_backups(backup_root, max_backups=5)
-        return {
-            'status': 'success',
-            'backupCreated': True,
-            'backupPath': backup_path,
-            'copiedFileCount': int(copy_result.get('copiedFileCount', 0) or 0),
-            'failedFiles': failed_files,
-            'failedFileCount': len(failed_files),
-        }
+        backup_result['failedFileCount'] = len(backup_result.get('failedFiles', []) or [])
+        return backup_result
 
     def copy_project_locally(
         self,
@@ -14915,15 +15418,25 @@ Return ONLY the JSON object.
                 'failedFiles': [],
                 'failedFileCount': 0,
             }
+            # Only the selected discipline and Xrefs folders are rebuilt from the server.
+            # Every other folder keeps what it has and only gains missing files.
+            managed_folder_keys = self._get_copy_project_managed_folder_keys(settings)
+            replacement_scopes = self._get_copy_project_replacement_scopes(
+                folder_requests,
+                managed_folder_keys,
+            )
             if os.path.isdir(local_project_copy_path) and replace_existing_local:
-                backup_result = self._backup_existing_local_project_before_replace(local_project_path)
+                backup_result = self._backup_local_project_replacement_scopes(
+                    local_project_path,
+                    replacement_scopes,
+                )
                 if backup_result.get('status') != 'success':
                     return backup_result
                 if backup_result.get('failedFiles'):
                     return {
                         'status': 'error',
                         'code': 'local_backup_failed',
-                        'message': 'Failed to back up the existing local project before replacing it.',
+                        'message': 'Failed to back up the local folders before replacing them.',
                         'serverProjectPath': normalized_server_path,
                         'resolvedServerProjectPath': normalized_server_path,
                         'resolvedFromWorkroom': resolved_from_workroom,
@@ -14935,12 +15448,15 @@ Return ONLY the JSON object.
                         'backupPath': backup_result.get('backupPath') or '',
                     }
                 try:
-                    self._remove_copy_project_tree(local_project_path)
+                    self._remove_copy_project_replacement_scopes(
+                        local_project_path,
+                        replacement_scopes,
+                    )
                 except Exception as e:
                     return {
                         'status': 'error',
                         'code': 'local_project_delete_failed',
-                        'message': f'Failed to delete existing local project: {e}',
+                        'message': f'Failed to delete the local folders being replaced: {e}',
                         'serverProjectPath': normalized_server_path,
                         'resolvedServerProjectPath': normalized_server_path,
                         'resolvedFromWorkroom': resolved_from_workroom,
@@ -14953,7 +15469,7 @@ Return ONLY the JSON object.
                     }
 
             required_folders = [request.get('name') for request in folder_requests]
-            os.makedirs(local_project_copy_path, exist_ok=False)
+            os.makedirs(local_project_copy_path, exist_ok=True)
             for folder_name in required_folders:
                 folder_path = os.path.join(local_project_path, folder_name)
                 os.makedirs(self._to_windows_extended_path(folder_path), exist_ok=True)
@@ -14961,6 +15477,7 @@ Return ONLY the JSON object.
             copied_folders = []
             missing_server_folders = []
             copied_file_count = 0
+            skipped_existing_file_count = 0
             failed_files = []
             for folder_request in folder_requests:
                 folder_name = folder_request.get('name') or ''
@@ -14969,6 +15486,9 @@ Return ONLY the JSON object.
 
                 source_folder = os.path.join(normalized_server_path, folder_name)
                 destination_folder = os.path.join(local_project_path, folder_name)
+                # A replaced folder was emptied above, so only the other folders can hold
+                # a file already; those are left as they are.
+                skip_existing = folder_name.lower() not in managed_folder_keys
                 if os.path.isdir(self._to_windows_extended_path(source_folder)):
                     if str(folder_request.get('mode') or '').strip().lower() == 'subset':
                         copy_result = self._copy_folder_selected_children(
@@ -14976,16 +15496,23 @@ Return ONLY the JSON object.
                             destination_folder,
                             folder_request.get('selectedChildNames'),
                             bool(folder_request.get('includeParentRootFiles')),
+                            skip_existing=skip_existing,
                         )
                         if copy_result.get('copiedAnySourceContent'):
                             copied_folders.append(folder_name)
                         copied_file_count += int(copy_result.get('copiedFileCount', 0) or 0)
+                        skipped_existing_file_count += int(copy_result.get('skippedExistingCount', 0) or 0)
                         failed_files.extend(copy_result.get('failedFiles', []))
                         missing_server_folders.extend(copy_result.get('missingChildFolders', []))
                     else:
-                        copy_result = self._copy_folder_contents(source_folder, destination_folder)
+                        copy_result = self._copy_folder_contents(
+                            source_folder,
+                            destination_folder,
+                            skip_existing=skip_existing,
+                        )
                         copied_folders.append(folder_name)
                         copied_file_count += int(copy_result.get('copiedFileCount', 0) or 0)
+                        skipped_existing_file_count += int(copy_result.get('skippedExistingCount', 0) or 0)
                         failed_files.extend(copy_result.get('failedFiles', []))
                 else:
                     missing_server_folders.append(folder_name)
@@ -15012,6 +15539,7 @@ Return ONLY the JSON object.
                 'missingServerFolders': missing_server_folders,
                 'copyWarnings': copy_warnings,
                 'copiedFileCount': copied_file_count,
+                'skippedExistingFileCount': skipped_existing_file_count,
                 'failedFileCount': failed_file_count,
                 'failedFiles': failed_files,
                 'replacedExistingLocal': replace_existing_local,
@@ -15227,10 +15755,14 @@ Return ONLY the JSON object.
                     'message': 'Select at least one folder to copy to server.',
                 }
 
+            # Only the discipline and Xrefs folders are replaced on the server. The other
+            # folders only gain files that are missing there, so they need no backup.
+            managed_folder_keys = self._get_copy_project_managed_folder_keys(settings)
+
             backup_results = []
             for folder_request in folder_requests:
                 folder_name = folder_request.get('name') or ''
-                if not folder_name:
+                if not folder_name or folder_name.lower() not in managed_folder_keys:
                     continue
 
                 server_folder = os.path.join(normalized_server_path, folder_name)
@@ -15256,10 +15788,12 @@ Return ONLY the JSON object.
 
                 source_folder = os.path.join(normalized_local_path, folder_name)
                 destination_folder = os.path.join(normalized_server_path, folder_name)
+                is_managed_folder = folder_name.lower() in managed_folder_keys
 
                 if os.path.isdir(self._to_windows_extended_path(source_folder)):
-                    local_backup = self._create_local_project_backup(destination_folder, backup_type='local')
-                    backup_results.append(local_backup)
+                    if is_managed_folder:
+                        local_backup = self._create_local_project_backup(destination_folder, backup_type='local')
+                        backup_results.append(local_backup)
 
                     if str(folder_request.get('mode') or '').strip().lower() == 'subset':
                         copy_result = self._copy_folder_selected_children(
@@ -15267,13 +15801,18 @@ Return ONLY the JSON object.
                             destination_folder,
                             folder_request.get('selectedChildNames'),
                             bool(folder_request.get('includeParentRootFiles')),
+                            skip_existing=not is_managed_folder,
                         )
                         if copy_result.get('copiedAnySourceContent'):
                             copied_folders.append(folder_name)
                         copied_file_count += int(copy_result.get('copiedFileCount', 0) or 0)
                         failed_files.extend(copy_result.get('failedFiles', []))
                     else:
-                        copy_result = self._copy_folder_contents(source_folder, destination_folder)
+                        copy_result = self._copy_folder_contents(
+                            source_folder,
+                            destination_folder,
+                            skip_existing=not is_managed_folder,
+                        )
                         copied_folders.append(folder_name)
                         copied_file_count += int(copy_result.get('copiedFileCount', 0) or 0)
                         failed_files.extend(copy_result.get('failedFiles', []))
@@ -18421,6 +18960,28 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
             'activityId': str(activity_id or '').strip(),
         }
 
+    def _plot_style_problem(self, acad_path):
+        """Explains a missing plot style table, or returns '' when Publish DWGs can go ahead."""
+        try:
+            result = find_plot_style_table(acad_path)
+        except Exception as exc:
+            # A fault in this check must never stop a publish that would have worked.
+            logging.warning("Plot style check failed; publishing anyway: %s", exc)
+            return ''
+        if result.get('status') != 'missing':
+            return ''
+        searched = result.get('searched') or []
+        logging.warning(
+            "%s not found for AutoCAD %s; searched: %s",
+            PUBLISH_PLOT_STYLE_NAME, result.get('year'), '; '.join(searched) or '<none>')
+        destination = f" into {searched[0]}" if searched else ""
+        return (
+            f"AutoCAD {result.get('year')} on this PC does not have the plot style table "
+            f"{PUBLISH_PLOT_STYLE_NAME}, which Publish DWGs plots with. Copy it from a "
+            f"coworker's PC (their AutoCAD's Plotters\\Plot Styles folder){destination}, "
+            "then publish again."
+        )
+
     def run_publish_script(self, launch_context=None, activity_id=None, params_override=None):
         """Runs the PlotDWGs.ps1 PowerShell script with progress updates.
 
@@ -18446,6 +19007,18 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
         acad_path = settings.get('autocadPath', '')
         if not acad_path:
             raise Exception("No AutoCAD version selected in settings.")
+        plot_style_problem = self._plot_style_problem(acad_path)
+        if plot_style_problem:
+            self._notify_tool_status(
+                'toolPublishDwgs',
+                f"ERROR: {plot_style_problem}",
+                activity_id=activity_id,
+            )
+            return {
+                'status': 'error',
+                'message': plot_style_problem,
+                'activityId': str(activity_id or '').strip(),
+            }
         publish_options = dict(settings.get('publishDwgOptions') or {})
         if isinstance(params_override, dict):
             publish_options.update(params_override)

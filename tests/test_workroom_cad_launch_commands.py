@@ -185,6 +185,13 @@ class WorkroomCadLaunchCommandTests(unittest.TestCase):
         self.api = Api.__new__(Api)
         self.api.test_mode = False
         self.api._workroom_cad_file_cache = {}
+        # AUTOCAD_CORE_PATH names the usual install folder, which exists on a PC with
+        # AutoCAD; these tests are about the launch commands, not that PC's plot styles.
+        plot_style_check = patch.object(
+            main_module, "find_plot_style_table", return_value={"status": "unknown"}
+        )
+        plot_style_check.start()
+        self.addCleanup(plot_style_check.stop)
 
     def test_cad_auto_select_trace_round_trip(self):
         with tempfile.TemporaryDirectory(prefix="acies-cad-trace-") as temp_dir:
