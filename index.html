@@ -17,8 +17,9 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" media="print" data-async-stylesheet>
     <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;700&family=Barlow+Condensed:wght@400;500;600&display=swap" rel="stylesheet" media="print" data-async-stylesheet>
     <script src="app-bootstrap.js?v=20260929-fast-start"></script>
-    <link rel="stylesheet" href="styles.css?v=20260928-activity-history" />
+    <link rel="stylesheet" href="styles.css?v=20261007-expense-receipt-editor" />
     <link rel="stylesheet" href="symbol_counter.css?v=20260818-delete-actions" />
+    <link rel="stylesheet" href="panel_schedule_export.css?v=20261009-initial" />
     <link rel="stylesheet" href="industry.css?v=20260930-work-locally" />
     <link rel="stylesheet" href="modern-workspace.css?v=20260930-work-locally" />
     <link rel="stylesheet" href="deliverables-workspace.css?v=20260928-soft-hard-due" />
@@ -749,6 +750,24 @@
                             </div>
                             <div class="tool-card-status">Excel linked</div>
                         </div>
+                        <div id="toolPanelScheduleExport" class="tool-card" role="button" tabindex="0">
+                            <div class="tool-card-content">
+                                <div class="tool-icon">
+                                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                                        <polyline points="14 2 14 8 20 8"></polyline>
+                                        <path d="M8 13h8M8 17h5"></path>
+                                    </svg>
+                                </div>
+                                <div class="tool-card-header">Panel Schedule Export</div>
+                                <div class="tool-card-body">
+                                    Pick Excel workbooks with many panel schedule sheets and turn every panel into organized
+                                    text or JSON you can copy, save, or hand to an AI.
+                                </div>
+                            </div>
+                            <div class="tool-card-status">Excel to text</div>
+                        </div>
                         <div id="toolCircuitBreaker" class="tool-card" role="button" tabindex="0">
                             <div class="tool-card-content">
                                 <div class="tool-icon">
@@ -1278,35 +1297,70 @@
             </div>
         </div>
     </dialog>
-    <!-- Add Expense Entry Dialog -->
-    <dialog id="addExpenseEntryDlg">
+    <!-- Receipt review and expense entry share one workspace. -->
+    <dialog id="addExpenseEntryDlg" class="expense-entry-dialog" aria-labelledby="expenseEntryTitle">
         <div class="modal-header">
-            <div class="title">Add Expense Entry</div>
-            <div class="inline">
-                <button class="btn ghost" data-close-dialog="addExpenseEntryDlg">Cancel</button>
-                <button class="btn-primary" id="btnSaveExpenseEntry">Add Entry</button>
+            <div>
+                <div class="title" id="expenseEntryTitle">Project Expenses</div>
+                <div class="muted tiny" id="expenseEntryProjectName"></div>
             </div>
+            <button type="button" class="btn ghost" data-close-dialog="addExpenseEntryDlg">Close</button>
         </div>
-        <div class="modal-body stack">
-            <input type="hidden" id="exp_projectIndex" />
-            <div class="modal-grid">
-                <div class="col-6">
-                    <label class="label">Date</label>
-                    <input id="exp_date" type="date" />
+        <div class="expense-entry-workspace">
+            <section id="expenseReceiptPanel" class="expense-receipt-panel" aria-label="Receipt viewer" hidden>
+                <div class="expense-receipt-toolbar">
+                    <div class="inline">
+                        <button type="button" class="btn tiny" id="expenseReceiptPrevBtn" aria-label="Previous receipt">&larr;</button>
+                        <span id="expenseReceiptPosition" class="muted tiny" aria-live="polite"></span>
+                        <button type="button" class="btn tiny" id="expenseReceiptNextBtn" aria-label="Next receipt">&rarr;</button>
+                    </div>
+                    <div class="inline" role="group" aria-label="Receipt zoom">
+                        <button type="button" class="btn tiny" id="expenseReceiptZoomOutBtn" aria-label="Zoom out">&minus;</button>
+                        <button type="button" class="btn tiny" id="expenseReceiptFitBtn">Fit</button>
+                        <button type="button" class="btn tiny" id="expenseReceiptZoomInBtn" aria-label="Zoom in">+</button>
+                        <button type="button" class="btn tiny" id="expenseReceiptOpenBtn">Open File</button>
+                    </div>
                 </div>
-                <div class="col-6">
-                    <label class="label">Expense Amount ($)</label>
-                    <input id="exp_amount" type="number" step="0.01" min="0" placeholder="0.00" />
+                <div id="expenseReceiptFilename" class="expense-receipt-filename"></div>
+                <div id="expenseReceiptStage" class="image-preview-stage expense-receipt-stage">
+                    <img id="expenseReceiptImg" alt="Receipt preview" hidden />
+                    <p id="expenseReceiptStatus" class="expense-receipt-status" role="status"></p>
                 </div>
-                <div class="col-12">
-                    <label class="label">Description</label>
-                    <input id="exp_description" placeholder="e.g. Site visit materials, client lunch" />
+                <div class="expense-receipt-hint muted tiny">Scroll to zoom &middot; Drag to pan &middot; Double-click to fit</div>
+                <div id="expenseReceiptThumbnails" class="expense-receipt-thumbnails" aria-label="Choose a receipt"></div>
+            </section>
+            <form id="expenseEntryForm" class="expense-entry-form">
+                <input type="hidden" id="exp_projectIndex" />
+                <div>
+                    <label class="label" for="expenseEntrySelect">Expense entry</label>
+                    <select id="expenseEntrySelect"></select>
+                    <p class="muted tiny expense-entry-help">Add a new expense or select an existing entry to correct its amount.</p>
                 </div>
-                <div class="col-6">
-                    <label class="label">Mileage</label>
-                    <input id="exp_mileage" type="number" min="0" placeholder="0" />
+                <div class="modal-grid">
+                    <div class="col-6">
+                        <label class="label" for="exp_date">Date</label>
+                        <input id="exp_date" type="date" />
+                    </div>
+                    <div class="col-6">
+                        <label class="label" for="exp_amount">Expense Amount ($)</label>
+                        <input id="exp_amount" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00" />
+                    </div>
+                    <div class="col-12">
+                        <label class="label" for="exp_description">Description</label>
+                        <input id="exp_description" placeholder="e.g. Site visit materials, client lunch" />
+                    </div>
+                    <div class="col-6">
+                        <label class="label" for="exp_mileage">Mileage</label>
+                        <input id="exp_mileage" type="number" min="0" step="any" inputmode="decimal" placeholder="0" />
+                    </div>
                 </div>
-            </div>
+                <p id="expenseEntrySaveStatus" class="expense-entry-save-status tiny" role="status"></p>
+                <div class="expense-entry-form-actions">
+                    <button type="submit" class="btn-primary" id="btnSaveExpenseEntry">Add Entry</button>
+                    <button type="button" class="btn" id="expenseEntrySaveNextBtn" hidden>Save &amp; Next Receipt</button>
+                </div>
+                <p class="muted tiny expense-entry-help">Use Add Entry or Save Changes to save. Close discards unsaved changes.</p>
+            </form>
         </div>
     </dialog>
     <dialog id="imagePreviewDlg" class="image-preview-dialog" aria-label="Image preview">
@@ -2522,7 +2576,8 @@
                     <h3>Expenses</h3>
                     <ul>
                         <li><strong>Add expense:</strong> attach a project and amount. You can attach a photo of the
-                            receipt — click the thumbnail to preview it full-size.</li>
+                            receipt — click the thumbnail to view it alongside the expense fields. Select an existing
+                            entry to correct it, or add a new one. Use Save &amp; Next Receipt to work through receipts.</li>
                         <li>Expenses export alongside hours when you export the week.</li>
                     </ul>
                 </section>
@@ -3342,6 +3397,94 @@
         </div>
     </dialog>
 
+    <dialog id="panelExportDlg" class="pse-dialog" aria-labelledby="panelExportTitle">
+        <div class="pse-shell">
+            <header class="pse-header">
+                <div class="pse-title-wrap">
+                    <div class="pse-mark" aria-hidden="true">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                            <polyline points="14 2 14 8 20 8"></polyline>
+                            <path d="M8 13h8M8 17h5"></path>
+                        </svg>
+                    </div>
+                    <div>
+                        <div id="panelExportTitle" class="pse-title">Panel Schedule Export</div>
+                        <div class="pse-subtitle">Excel panel schedules to text data</div>
+                    </div>
+                </div>
+                <div class="pse-header-actions">
+                    <button class="btn tiny" id="panelExportAddBtn" type="button">Add Excel files</button>
+                    <button class="icon-btn" id="panelExportCloseBtn" type="button" aria-label="Close Panel Schedule Export"
+                        title="Close">X</button>
+                </div>
+            </header>
+            <div class="pse-body">
+                <aside class="pse-sidebar" aria-label="Workbooks and panels">
+                    <section class="pse-side-section">
+                        <div class="pse-heading">
+                            <span>Workbooks</span>
+                            <button class="pse-link-btn is-danger" id="panelExportClearBtn" type="button" disabled>Clear</button>
+                        </div>
+                        <div id="panelExportFiles" class="pse-files"></div>
+                        <label class="pse-check">
+                            <input type="checkbox" id="panelExportHidden" />
+                            <span>Include hidden sheets</span>
+                        </label>
+                    </section>
+                    <section class="pse-side-section pse-panels-section">
+                        <div class="pse-heading">
+                            <span>Panels <span id="panelExportPanelCount" class="pse-badge">0</span></span>
+                            <span class="pse-heading-actions">
+                                <button class="pse-link-btn" id="panelExportSelectAllBtn" type="button">All</button>
+                                <button class="pse-link-btn" id="panelExportSelectNoneBtn" type="button">None</button>
+                            </span>
+                        </div>
+                        <div id="panelExportPanels" class="pse-panels"></div>
+                    </section>
+                </aside>
+                <main class="pse-main">
+                    <div class="pse-toolbar">
+                        <div class="pse-segment" role="group" aria-label="Output format">
+                            <button class="pse-segment-btn is-active" id="panelExportFormatMd" type="button" aria-pressed="true">Readable text</button>
+                            <button class="pse-segment-btn" id="panelExportFormatJson" type="button" aria-pressed="false">JSON</button>
+                        </div>
+                        <label class="pse-check pse-check-inline">
+                            <input type="checkbox" id="panelExportLegend" checked />
+                            <span>Include notes legend</span>
+                        </label>
+                        <div id="panelExportStatus" class="pse-status" role="status" aria-live="polite"></div>
+                        <div class="pse-toolbar-actions">
+                            <button class="btn tiny" id="panelExportCopyBtn" type="button" disabled>Copy</button>
+                            <button class="btn tiny" id="panelExportSaveBtn" type="button" disabled>Save as file…</button>
+                        </div>
+                    </div>
+                    <div class="pse-preview-wrap">
+                        <textarea id="panelExportPreview" class="pse-preview" readonly spellcheck="false"
+                            aria-label="Exported panel schedule text" hidden></textarea>
+                        <div id="panelExportEmpty" class="pse-empty">
+                            <div class="pse-empty-icon" aria-hidden="true">&#9638;</div>
+                            <div class="pse-empty-title">No workbook loaded</div>
+                            <div class="pse-empty-text">Choose one or more Excel files (.xls or .xlsx). Every sheet that holds a
+                                panel schedule is read and listed here.</div>
+                            <button class="btn btn-primary" id="panelExportEmptyAddBtn" type="button">Add Excel files</button>
+                        </div>
+                        <div id="panelExportBusy" class="pse-busy" hidden>
+                            <div class="pse-busy-card">
+                                <div class="pse-spinner" aria-hidden="true"></div>
+                                <div>
+                                    <div class="pse-busy-title">Reading workbooks&hellip;</div>
+                                    <div class="pse-busy-text">Excel opens in the background, read-only. Large workbooks take a moment.</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </main>
+            </div>
+        </div>
+    </dialog>
+
     <dialog id="symbolCounterDlg" class="symbol-counter-dialog" aria-labelledby="symbolCounterTitle">
         <div class="symbol-counter-shell">
             <header class="symbol-counter-header">
@@ -3621,10 +3764,11 @@
     </section>
     <div id="updateCheckIndicator" class="corner-status" hidden>Checking for updates...</div>
     <script src="project-pages-editor/dist/project-pages-editor.js?v=20260918-save-queue-export"></script>
-    <script src="script.js?v=20261005-page-find-cleanup"></script>
+    <script src="script.js?v=20261007-expense-receipt-editor"></script>
     <script src="industry-projects.js?v=20260930-work-locally"></script>
     <script src="industry-shell.js?v=20260909-modern-dialogs"></script>
     <script src="symbol_counter_ui.js?v=20260818-delete-actions"></script>
+    <script src="panel_schedule_export_ui.js?v=20261009-initial"></script>
 </body>
 
 </html>

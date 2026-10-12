@@ -23,6 +23,8 @@ a = Analysis(
         (os.path.join(project_root, 'script.js'), '.'),
         (os.path.join(project_root, 'symbol_counter.css'), '.'),
         (os.path.join(project_root, 'symbol_counter_ui.js'), '.'),
+        (os.path.join(project_root, 'panel_schedule_export.css'), '.'),
+        (os.path.join(project_root, 'panel_schedule_export_ui.js'), '.'),
         (os.path.join(project_root, 'vendor', 'chart.umd.min.js'), 'vendor'),
         (os.path.join(project_root, '.env'), '.'),
         (os.path.join(project_root, 'assets', 'acies.png'), 'assets'),

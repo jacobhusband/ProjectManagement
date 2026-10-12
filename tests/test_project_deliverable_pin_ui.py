@@ -18,7 +18,7 @@ class ProjectDeliverablePinUiTests(unittest.TestCase):
             "function setDeliverablePinnedState(deliverable, nextPinned) {",
             "card.dataset.pinned = String(isDeliverablePinned(deliverable));",
             "const existingDeliverable = existingProject",
-            "pinned: !!existingDeliverable?.pinned || card.dataset.pinned === \"true\",",
+            'pinned: card.dataset.pinned === "true",',
         ):
             self.assertIn(expected, script)
 

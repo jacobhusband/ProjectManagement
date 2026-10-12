@@ -9876,6 +9876,18 @@ dialog::backdrop {
   box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.08);
 }
 
+.deliverable-summary-pin {
+  width: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0 0.5rem;
+  border-color: var(--glass-border);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-weight: 600;
+}
+
 /* Add task input row */
 .task-add-row {
   display: flex;
@@ -11403,6 +11415,14 @@ dialog::backdrop {
   color: var(--text);
 }
 
+.expense-table input[type="date"] {
+  color-scheme: dark;
+}
+
+[data-theme="light"] .expense-table input[type="date"] {
+  color-scheme: light;
+}
+
 .expense-table input:hover {
   background: var(--input-bg);
 }
@@ -11443,8 +11463,13 @@ dialog::backdrop {
 }
 
 .expense-table .actions-col {
-  width: 40px;
+  width: 95px;
   text-align: center;
+  white-space: nowrap;
+}
+
+.expense-edit-btn {
+  margin-right: 0.25rem;
 }
 
 .expense-remove-btn {
@@ -11487,6 +11512,8 @@ dialog::backdrop {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 0.5rem;
+  gap: 0.5rem;
+  flex-wrap: wrap;
 }
 
 .expense-images-title {
@@ -11711,6 +11738,197 @@ dialog::backdrop {
   border-radius: calc(var(--radius-sm) + 2px);
   box-shadow: 0 22px 50px rgba(2, 6, 23, 0.34);
   will-change: transform;
+}
+
+.image-preview-stage img[hidden] {
+  display: none;
+}
+
+/* Keep the receipt readable while adding or correcting an expense. */
+.expense-entry-dialog {
+  width: min(600px, calc(100vw - 2rem));
+  max-height: calc(100dvh - 2rem);
+}
+
+.expense-entry-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.expense-entry-dialog.has-receipts {
+  width: min(1200px, calc(100vw - 2rem));
+  height: min(840px, calc(100dvh - 2rem));
+}
+
+.expense-entry-dialog .modal-header {
+  flex-shrink: 0;
+  padding: 1rem 1.25rem;
+  gap: 1rem;
+}
+
+#expenseEntryProjectName {
+  margin-top: 0.3rem;
+  overflow-wrap: anywhere;
+}
+
+.expense-entry-workspace {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.has-receipts .expense-entry-workspace {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 350px;
+  overflow: hidden;
+}
+
+.expense-receipt-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: 1rem;
+  gap: 0.65rem;
+  background: var(--bg);
+  border-right: 1px solid var(--glass-border);
+}
+
+.expense-receipt-panel[hidden],
+.expense-receipt-status[hidden],
+#expenseEntrySaveNextBtn[hidden] {
+  display: none;
+}
+
+.expense-receipt-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.expense-receipt-toolbar .inline {
+  gap: 0.35rem;
+}
+
+.expense-receipt-filename {
+  font-size: 0.8rem;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.expense-receipt-stage {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  height: auto;
+  max-width: none;
+  max-height: none;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+}
+
+.expense-receipt-stage img {
+  flex: none;
+}
+
+.expense-receipt-status {
+  padding: 1.5rem;
+  color: #cbd5e1;
+  text-align: center;
+  font-size: 0.9rem;
+  line-height: 1.6;
+  max-width: 32rem;
+}
+
+.expense-receipt-hint {
+  text-align: center;
+}
+
+.expense-receipt-thumbnails {
+  display: flex;
+  gap: 0.5rem;
+  overflow-x: auto;
+  flex-shrink: 0;
+  padding: 0.2rem;
+}
+
+.expense-receipt-thumbnail {
+  flex: 0 0 60px;
+  height: 66px;
+  border: 2px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.expense-receipt-thumbnail[aria-current="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.expense-entry-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  min-width: 0;
+  padding: 1.5rem;
+  overflow-y: auto;
+}
+
+.expense-entry-form select {
+  width: 100%;
+  min-width: 0;
+}
+
+.expense-entry-form input[type="date"] {
+  color-scheme: dark;
+}
+
+[data-theme="light"] .expense-entry-form input[type="date"] {
+  color-scheme: light;
+}
+
+.expense-entry-help {
+  margin: 0.5rem 0 0;
+  line-height: 1.5;
+}
+
+.expense-entry-form-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.expense-entry-form-actions button {
+  width: 100%;
+}
+
+.expense-entry-save-status {
+  min-height: 1.25rem;
+  margin: 0;
+  color: var(--accent);
+}
+
+@media (max-width: 760px) {
+  .has-receipts .expense-entry-workspace {
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  .expense-receipt-panel {
+    flex: 0 0 420px;
+    border-right: 0;
+    border-bottom: 1px solid var(--glass-border);
+  }
+
+  .expense-entry-form {
+    flex-shrink: 0;
+    overflow-y: visible;
+  }
 }
 
 @keyframes expense-thumb-sheen {

@@ -493,5 +493,80 @@ class TemplateToolFolderFlowTests(unittest.TestCase):
             self.assertEqual(("Excel Files (*.xlsx;*.xls)",), captured["kwargs"]["file_types"])
 
 
+class NarrativeOutputFolderTests(unittest.TestCase):
+    def setUp(self):
+        self.api = Api.__new__(Api)
+        self.temp_dir = tempfile.TemporaryDirectory(prefix="acies-narrative-folder-")
+        self.addCleanup(self.temp_dir.cleanup)
+        self.project_root = Path(self.temp_dir.name) / "260243 Sample Clinic"
+        self.project_root.mkdir()
+        self.pdf_root = self.project_root / "PDF"
+
+    def _assert_picker_directory(self, expected, default_dir=None, template_key="narrative"):
+        chosen = self.project_root / "Chosen output"
+        with patch.object(self.api, "_create_file_dialog", return_value=(str(chosen),)) as dialog:
+            result = self.api.select_template_output_folder(
+                str(default_dir or self.project_root), template_key
+            )
+        self.assertEqual("success", result["status"])
+        self.assertEqual(str(chosen), result["path"])
+        self.assertEqual(os.path.normpath(str(expected)),
+                         os.path.normpath(dialog.call_args.kwargs["directory"]))
+
+    def test_newest_issue_date_wins_over_recently_modified_older_issue(self):
+        older = self.pdf_root / "2026-08-16 MEP IFP"
+        newest = self.pdf_root / "2026.10.12 MEP RFI 03"
+        undated = self.pdf_root / "Working"
+        for folder in (older, newest, undated):
+            folder.mkdir(parents=True)
+        os.utime(newest, (1000, 1000))
+        os.utime(older, (2000, 2000))
+        os.utime(undated, (3000, 3000))
+        (older / "2027-01-01 Nested archive").mkdir()
+        (self.pdf_root / "2027-02-01 Not a folder.pdf").write_bytes(b"%PDF-1.4\n")
+        self._assert_picker_directory(newest)
+
+    def test_undated_folders_use_modification_time(self):
+        older = self.pdf_root / "Previous"
+        newest = self.pdf_root / "Latest"
+        for folder, modified in ((older, 2000), (newest, 3000)):
+            folder.mkdir(parents=True)
+            os.utime(folder, (modified, modified))
+        self._assert_picker_directory(newest)
+
+    def test_empty_pdf_folder_is_the_default(self):
+        self.pdf_root.mkdir()
+        self._assert_picker_directory(self.pdf_root)
+
+    def test_missing_pdf_folder_keeps_project_root(self):
+        self._assert_picker_directory(self.project_root)
+
+    def test_nested_project_file_path_resolves_case_insensitive_pdf_folder(self):
+        pdf_root = self.project_root / "pdf"
+        newest = pdf_root / "2026-10-12 MEP IFP"
+        newest.mkdir(parents=True)
+        project_file = self.project_root / "Electrical" / "Plans.dwg"
+        project_file.parent.mkdir()
+        project_file.write_bytes(b"")
+        self._assert_picker_directory(newest, default_dir=project_file)
+        self._assert_picker_directory(newest, default_dir=pdf_root)
+
+    def test_other_template_tools_keep_their_supplied_default(self):
+        (self.pdf_root / "2026-10-12 MEP IFP").mkdir(parents=True)
+        for template_key in (None, "planCheck"):
+            with self.subTest(template_key=template_key):
+                self._assert_picker_directory(self.project_root, template_key=template_key)
+
+    def test_dialog_fallback_keeps_resolved_narrative_directory(self):
+        newest = self.pdf_root / "2026-10-12 MEP IFP"
+        newest.mkdir(parents=True)
+        with patch.object(self.api, "_create_file_dialog", side_effect=TypeError), patch.object(
+            self.api, "select_folder", return_value={"status": "cancelled", "path": None}
+        ) as fallback:
+            result = self.api.select_template_output_folder(str(self.project_root), "narrative")
+        fallback.assert_called_once_with(str(newest))
+        self.assertEqual("cancelled", result["status"])
+
+
 if __name__ == "__main__":
     unittest.main()

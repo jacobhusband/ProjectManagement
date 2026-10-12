@@ -164,6 +164,7 @@ from PIL import Image as PILImage, ImageOps, UnidentifiedImageError
 from lighting_plan import LightingPlanValidationError, analyze_lighting_plan
 import symbol_counter as symbol_counter_module
 from symbol_counter import SymbolCounterError, SymbolCounterService
+import panel_schedule_export as panel_export_module
 
 
 _PROJECT_PAGE_PDF_VOID_TAGS = frozenset({
@@ -4059,6 +4060,46 @@ class Api:
             return {'status': 'success'}
         except Exception as e:
             logging.warning("Failed to close symbol-count session: %s", e)
+            return {'status': 'error', 'message': str(e)}
+
+    # --- Panel Schedule Export (Excel workbook -> text data) ---
+    def export_panel_schedule_files(self, paths, include_hidden=False):
+        """Read the panel schedule sheets of each selected workbook as text data."""
+        try:
+            paths = [str(path).strip() for path in (paths or []) if str(path or '').strip()]
+            if not paths:
+                return {'status': 'error', 'message': 'Select at least one Excel workbook.'}
+            files = panel_export_module.export_files(paths, bool(include_hidden))
+            return {'status': 'success', 'files': files}
+        except Exception as e:
+            logging.exception("Panel schedule export failed")
+            return {'status': 'error', 'message': str(e)}
+
+    def save_panel_schedule_export(self, content, default_name, file_type='md'):
+        """Ask where to save exported panel schedule text, then write it as UTF-8."""
+        try:
+            ext = 'json' if str(file_type or '').lower().lstrip('.') == 'json' else 'md'
+            name = re.sub(r'[<>:"/\\|?*]+', '_', str(default_name or 'panel schedules')).strip() or 'panel schedules'
+            if not name.lower().endswith(f'.{ext}'):
+                name = f'{name}.{ext}'
+            window = webview.windows[0]
+            output_path = window.create_file_dialog(
+                webview.FileDialog.SAVE,
+                directory=get_default_documents_dir(),
+                save_filename=name,
+                file_types=(('JSON (*.json)',) if ext == 'json' else ('Markdown (*.md)', 'Text (*.txt)')),
+            )
+            if not output_path:
+                return {'status': 'cancelled'}
+            if isinstance(output_path, (list, tuple)):
+                output_path = output_path[0] if output_path else None
+            if not output_path:
+                return {'status': 'cancelled'}
+            with open(output_path, 'w', encoding='utf-8', newline='\n') as handle:
+                handle.write(str(content or ''))
+            return {'status': 'success', 'path': str(output_path)}
+        except Exception as e:
+            logging.exception("Failed to save panel schedule export")
             return {'status': 'error', 'message': str(e)}
 
     # --- Application update helpers ---
@@ -9215,12 +9256,17 @@ Return ONLY the JSON object.
             logging.error(f"Error in folder dialog: {e}")
             return {'status': 'error', 'message': str(e)}
 
-    def select_template_output_folder(self, default_dir=None):
-        """Shows a folder dialog for template-tool output."""
+    def select_template_output_folder(self, default_dir=None, template_key=None):
+        """Shows a folder dialog, starting Narrative in the latest PDF issue folder."""
         try:
             directory = str(default_dir or '').strip() or get_default_documents_dir()
             if os.path.isfile(directory):
                 directory = os.path.dirname(directory)
+            if default_dir and self._normalize_template_key(template_key) == 'narrative':
+                pdf_folder = self._resolve_deliverable_pdf_folder({'path': directory})
+                if pdf_folder:
+                    issue_folders = self._list_deliverable_pdf_issue_folders(pdf_folder)
+                    directory = issue_folders[0]['path'] if issue_folders else pdf_folder
             if not os.path.isdir(directory):
                 directory = get_default_documents_dir()
 
@@ -9234,7 +9280,7 @@ Return ONLY the JSON object.
                 folder_path = folder_path[0] if folder_path else ''
             return {'status': 'success', 'path': folder_path}
         except TypeError:
-            return self.select_folder(default_dir)
+            return self.select_folder(directory)
         except Exception as e:
             logging.error(f"Error in template output folder dialog: {e}")
             return {'status': 'error', 'message': str(e)}

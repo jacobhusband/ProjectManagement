@@ -4757,7 +4757,8 @@ async function handleTemplateToolSave(templateKey, label, options = {}) {
       progress: 18,
     });
     selection = await window.pywebview.api.select_template_output_folder(
-      defaultFolder
+      defaultFolder,
+      templateKey
     );
   } catch (e) {
     failActivity(activityId, {
@@ -5759,7 +5760,9 @@ const EXPENSE_IMAGE_MODAL_MAX_SIZE = 1800;
 const expenseAttachmentPreviewCache = new Map();
 const expenseAttachmentResolvedPathCache = new Map();
 let activeExpenseImagePreviewRequestId = 0;
+let expenseEntryEditorState = null;
 const imagePreviewState = {
+  dialogId: "imagePreviewDlg",
   scale: 1,
   minScale: 1,
   maxScale: 6,
@@ -5905,7 +5908,7 @@ function createExpenseProjectSection(project, projectIndex) {
   actions.appendChild(addImageBtn);
 
   const removeProjectBtn = el("button", {
-    className: "btn tiny ghost text-danger",
+    className: "btn tiny danger",
     textContent: "Remove",
     onclick: () => removeExpenseProject(projectIndex)
   });
@@ -5954,6 +5957,13 @@ function createExpenseProjectSection(project, projectIndex) {
 
   const imagesHeader = el("div", { className: "expense-images-header" });
   imagesHeader.appendChild(el("span", { className: "expense-images-title", textContent: "Receipts & Attachments" }));
+  if (project.images?.length) {
+    imagesHeader.appendChild(el("button", {
+      className: "btn tiny",
+      textContent: "Review Receipts & Enter Expenses",
+      onclick: () => openExpenseEntryEditor(projectIndex)
+    }));
+  }
   imagesSection.appendChild(imagesHeader);
 
   const imagesGrid = el("div", { className: "expense-images-grid" });
@@ -6038,6 +6048,13 @@ function createExpenseRow(entry, projectIndex, entryIndex) {
 
   // Remove button
   const actionsCell = el("td", { className: "actions-col" });
+  actionsCell.appendChild(el("button", {
+    type: "button",
+    className: "btn tiny expense-edit-btn",
+    textContent: "Edit",
+    title: "Edit entry alongside receipts",
+    onclick: () => openExpenseEntryEditor(projectIndex, 0, entryIndex)
+  }));
   const removeBtn = el("button", {
     className: "expense-remove-btn",
     innerHTML: "&times;",
@@ -6056,7 +6073,7 @@ function createExpenseImageThumb(image, projectIndex, imageIndex) {
     className: "expense-image-preview-btn",
     type: "button",
     title: getExpenseAttachmentFilename(image),
-    "aria-label": `Preview ${getExpenseAttachmentFilename(image)}`
+    "aria-label": `Review ${getExpenseAttachmentFilename(image)} and enter expenses`
   });
   thumb.appendChild(previewButton);
 
@@ -6069,7 +6086,7 @@ function createExpenseImageThumb(image, projectIndex, imageIndex) {
   } else {
     renderExpenseAttachmentPlaceholder(previewButton, "PDF", "pdf");
     previewButton.onclick = async () => {
-      await openExpenseAttachment(image);
+      await openExpenseImagePreview(image);
     };
   }
 
@@ -6147,7 +6164,11 @@ async function fetchExpenseAttachmentPreview(path, maxSize = EXPENSE_IMAGE_THUMB
 
   expenseAttachmentPreviewCache.set(cacheKey, request);
   const result = await request;
-  expenseAttachmentPreviewCache.set(cacheKey, result);
+  if (result?.status === "success") {
+    expenseAttachmentPreviewCache.set(cacheKey, result);
+  } else {
+    expenseAttachmentPreviewCache.delete(cacheKey);
+  }
   return result;
 }
 
@@ -6231,24 +6252,15 @@ async function hydrateExpenseImageThumb(previewButton, image) {
     }
 
     if (preview?.status === "unsupported") {
-      renderExpenseAttachmentPlaceholder(previewButton, "Open file", "pdf");
-      previewButton.onclick = async () => {
-        await openExpenseAttachment(image);
-      };
+      renderExpenseAttachmentPlaceholder(previewButton, "Review", "pdf");
       return;
     }
 
-    renderExpenseAttachmentPlaceholder(previewButton, "Open file", "error");
-    previewButton.onclick = async () => {
-      await openExpenseAttachment(image);
-    };
+    renderExpenseAttachmentPlaceholder(previewButton, "No preview", "error");
   } catch (error) {
     console.error("Error loading expense preview:", error);
     if (!previewButton.isConnected) return;
-    renderExpenseAttachmentPlaceholder(previewButton, "Open file", "error");
-    previewButton.onclick = async () => {
-      await openExpenseAttachment(image);
-    };
+    renderExpenseAttachmentPlaceholder(previewButton, "No preview", "error");
   }
 }
 
@@ -6272,6 +6284,13 @@ async function openExpenseAttachment(image) {
 }
 
 function getImagePreviewElements() {
+  if (imagePreviewState.dialogId === "addExpenseEntryDlg") {
+    return {
+      dialog: document.getElementById("addExpenseEntryDlg"),
+      stage: document.getElementById("expenseReceiptStage"),
+      img: document.getElementById("expenseReceiptImg"),
+    };
+  }
   return {
     dialog: document.getElementById("imagePreviewDlg"),
     stage: document.getElementById("imagePreviewStage"),
@@ -6280,6 +6299,10 @@ function getImagePreviewElements() {
 }
 
 function getImagePreviewStageSize(imageWidth, imageHeight) {
+  if (imagePreviewState.dialogId === "addExpenseEntryDlg") {
+    const stage = document.getElementById("expenseReceiptStage");
+    return { width: Math.max(1, stage.clientWidth), height: Math.max(1, stage.clientHeight) };
+  }
   const viewportWidth = Math.max(
     320,
     window.innerWidth || document.documentElement?.clientWidth || 1024
@@ -6364,8 +6387,10 @@ function syncImagePreviewLayout() {
     imagePreviewState.naturalWidth,
     imagePreviewState.naturalHeight
   );
-  stage.style.width = `${stageSize.width}px`;
-  stage.style.height = `${stageSize.height}px`;
+  if (imagePreviewState.dialogId === "imagePreviewDlg") {
+    stage.style.width = `${stageSize.width}px`;
+    stage.style.height = `${stageSize.height}px`;
+  }
 
   imagePreviewState.stageWidth = Math.max(stage.clientWidth, 1);
   imagePreviewState.stageHeight = Math.max(stage.clientHeight, 1);
@@ -6532,6 +6557,7 @@ function closeImagePreviewDialog() {
 }
 
 function openImagePreviewDialog({ dataUrl, filename, width, height }) {
+  imagePreviewState.dialogId = "imagePreviewDlg";
   const { dialog, img } = getImagePreviewElements();
   if (!dialog || !img || !dataUrl) return;
 
@@ -6572,7 +6598,7 @@ function initImagePreviewDialog() {
   imagePreviewState.initialized = true;
 
   dialog.addEventListener("close", () => {
-    resetImagePreviewDialog();
+    if (imagePreviewState.dialogId === "imagePreviewDlg") resetImagePreviewDialog();
   });
 
   dialog.addEventListener(
@@ -6590,6 +6616,13 @@ function initImagePreviewDialog() {
     }
   });
 
+  initImagePreviewStage(stage);
+  window.addEventListener("resize", () => {
+    if (getImagePreviewElements().dialog?.open) syncImagePreviewLayout();
+  });
+}
+
+function initImagePreviewStage(stage) {
   stage.addEventListener(
     "wheel",
     (event) => {
@@ -6652,54 +6685,17 @@ function initImagePreviewDialog() {
     stopImagePreviewDrag(event.pointerId);
   });
 
-  window.addEventListener("resize", () => {
-    if (dialog.open) {
-      syncImagePreviewLayout();
-    }
-  });
+  stage.addEventListener("dblclick", () => resetImagePreviewTransform());
 }
 
 async function openExpenseImagePreview(image) {
-  const filename = getExpenseAttachmentFilename(image);
-  if (!isExpensePreviewableImage(image)) {
+  const projects = getWeekExpenses(formatWeekKey(currentTimesheetWeek));
+  const projectIndex = projects.findIndex((project) => project.images?.includes(image));
+  if (projectIndex < 0) {
     await openExpenseAttachment(image);
     return;
   }
-
-  const requestId = ++activeExpenseImagePreviewRequestId;
-
-  try {
-    const preview = await fetchExpenseAttachmentPreview(
-      image.path,
-      EXPENSE_IMAGE_MODAL_MAX_SIZE
-    );
-
-    if (requestId !== activeExpenseImagePreviewRequestId) return;
-
-    if (preview?.path) {
-      image.resolvedPath = preview.path;
-      cacheResolvedExpenseAttachmentPath(image.path, preview.path);
-    }
-
-    if (preview?.status !== "success" || !preview.dataUrl) {
-      throw new Error(preview?.message || "Unable to load preview.");
-    }
-
-    const loadedPreview = await loadImagePreviewSource(preview.dataUrl);
-    if (requestId !== activeExpenseImagePreviewRequestId) return;
-
-    openImagePreviewDialog({
-      dataUrl: loadedPreview.dataUrl,
-      filename,
-      width: loadedPreview.width,
-      height: loadedPreview.height,
-    });
-  } catch (error) {
-    console.error("Error opening expense image preview:", error);
-    if (requestId !== activeExpenseImagePreviewRequestId) return;
-    toast(error?.message || "Unable to load preview. Opening file instead.");
-    await openExpenseAttachment(image);
-  }
+  openExpenseEntryEditor(projectIndex, projects[projectIndex].images.indexOf(image));
 }
 
 function calculateProjectExpenseTotals(project) {
@@ -6981,47 +6977,284 @@ function removeExpenseProject(projectIndex) {
 }
 
 function openAddExpenseEntryDialog(projectIndex) {
-  const dlg = document.getElementById("addExpenseEntryDlg");
-  if (!dlg) return;
-
-  document.getElementById("exp_projectIndex").value = projectIndex;
-  document.getElementById("exp_date").value = "";
-  document.getElementById("exp_description").value = "";
-  document.getElementById("exp_mileage").value = "";
-  document.getElementById("exp_amount").value = "";
-
-  showDialog(dlg);
+  openExpenseEntryEditor(projectIndex);
 }
 
-function saveExpenseEntry() {
-  const projectIndex = parseInt(document.getElementById("exp_projectIndex").value);
-  const date = document.getElementById("exp_date").value;
-  const description = document.getElementById("exp_description").value.trim();
-  const mileage = parseFloat(document.getElementById("exp_mileage").value) || 0;
-  const expense = parseFloat(document.getElementById("exp_amount").value) || 0;
-
+function openExpenseEntryEditor(projectIndex, imageIndex = 0, entryIndex = -1) {
+  const dlg = document.getElementById("addExpenseEntryDlg");
   const weekKey = formatWeekKey(currentTimesheetWeek);
-  const projects = getWeekExpenses(weekKey);
+  const project = getWeekExpenses(weekKey)[projectIndex];
+  if (!dlg || !project) return;
 
-  if (projectIndex < 0 || projectIndex >= projects.length) {
-    toast("Invalid project.");
-    return;
+  initExpenseEntryEditor();
+  expenseEntryEditorState = {
+    weekKey,
+    project,
+    entry: project.entries?.[entryIndex] || null,
+    imageIndex: -1,
+    drafts: new Map(),
+  };
+  imagePreviewState.dialogId = "addExpenseEntryDlg";
+  resetImagePreviewDialog();
+  document.getElementById("exp_projectIndex").value = projectIndex;
+  document.getElementById("expenseEntryProjectName").textContent =
+    `${project.projectName || "Unnamed Project"} · ${getExpenseProjectSecondaryLabel(project)}`;
+  const hasReceipts = !!project.images?.length;
+  dlg.classList.toggle("has-receipts", hasReceipts);
+  document.getElementById("expenseReceiptPanel").hidden = !hasReceipts;
+  document.getElementById("expenseEntrySaveNextBtn").hidden = !hasReceipts;
+  document.getElementById("expenseEntrySaveStatus").textContent = "";
+  document.getElementById("btnSaveExpenseEntry").disabled = false;
+  document.getElementById("expenseEntrySelect").disabled = false;
+  document.querySelectorAll("#expenseEntryForm input").forEach((input) => { input.disabled = false; });
+  renderExpenseEntrySelect();
+  loadExpenseEntryDraft();
+  renderExpenseReceiptThumbnails();
+
+  showDialog(dlg);
+  if (hasReceipts) void showExpenseReceipt(imageIndex);
+  document.getElementById("exp_amount").focus();
+}
+
+function renderExpenseEntrySelect() {
+  const state = expenseEntryEditorState;
+  if (!state) return;
+  const select = document.getElementById("expenseEntrySelect");
+  select.replaceChildren(el("option", { value: "new", textContent: "+ New expense entry" }));
+  (state.project.entries || []).forEach((entry, index) => {
+    select.appendChild(el("option", {
+      value: String(index),
+      textContent: `${entry.date || "No date"} · ${entry.description || `Entry ${index + 1}`} · $${(Number(entry.expense) || 0).toFixed(2)}`,
+    }));
+  });
+  select.value = state.entry ? String(state.project.entries.indexOf(state.entry)) : "new";
+  document.getElementById("btnSaveExpenseEntry").textContent = state.entry ? "Save Changes" : "Add Entry";
+}
+
+function readExpenseEntryDraft() {
+  return {
+    date: document.getElementById("exp_date").value,
+    description: document.getElementById("exp_description").value,
+    mileage: document.getElementById("exp_mileage").value,
+    expense: document.getElementById("exp_amount").value,
+  };
+}
+
+function loadExpenseEntryDraft() {
+  const state = expenseEntryEditorState;
+  if (!state) return;
+  const draft = state.drafts.get(state.entry) || state.entry || {
+    date: getDefaultCustomExpenseDate(), description: "", mileage: "", expense: "",
+  };
+  document.getElementById("exp_date").value = draft.date || "";
+  document.getElementById("exp_description").value = draft.description || "";
+  document.getElementById("exp_mileage").value = draft.mileage ?? "";
+  document.getElementById("exp_amount").value = draft.expense ?? "";
+}
+
+function renderExpenseReceiptThumbnails() {
+  const grid = document.getElementById("expenseReceiptThumbnails");
+  grid.replaceChildren();
+  (expenseEntryEditorState?.project.images || []).forEach((image, index) => {
+    const button = el("button", {
+      type: "button",
+      className: "expense-image-preview-btn expense-receipt-thumbnail",
+      title: getExpenseAttachmentFilename(image),
+      "aria-label": `Receipt ${index + 1}: ${getExpenseAttachmentFilename(image)}`,
+      onclick: () => { void showExpenseReceipt(index); },
+    });
+    grid.appendChild(button);
+    if (isExpensePreviewableImage(image)) {
+      setExpenseImageThumbLoadingState(button);
+      void hydrateExpenseImageThumb(button, image);
+    } else {
+      renderExpenseAttachmentPlaceholder(button, "PDF", "pdf");
+    }
+  });
+}
+
+async function showExpenseReceipt(imageIndex) {
+  const state = expenseEntryEditorState;
+  const images = state?.project.images || [];
+  if (!state || state.saving || !images.length) return;
+  state.imageIndex = Math.max(0, Math.min(images.length - 1, imageIndex));
+  const image = images[state.imageIndex];
+  resetImagePreviewDialog();
+  const requestId = activeExpenseImagePreviewRequestId;
+  const status = document.getElementById("expenseReceiptStatus");
+  const img = document.getElementById("expenseReceiptImg");
+  const stage = document.getElementById("expenseReceiptStage");
+  status.hidden = false;
+  stage.setAttribute("aria-busy", "true");
+  status.textContent = "Loading receipt…";
+  document.getElementById("expenseReceiptFilename").textContent = getExpenseAttachmentFilename(image);
+  document.getElementById("expenseReceiptPosition").textContent = `${state.imageIndex + 1} of ${images.length}`;
+  document.getElementById("expenseReceiptPrevBtn").disabled = state.imageIndex === 0;
+  document.getElementById("expenseReceiptNextBtn").disabled = state.imageIndex === images.length - 1;
+  document.getElementById("expenseEntrySaveNextBtn").disabled = state.imageIndex === images.length - 1;
+  document.getElementById("expenseReceiptOpenBtn").disabled = !image.path;
+  setExpenseReceiptZoomEnabled(false);
+  document.querySelectorAll("#expenseReceiptThumbnails button").forEach((button, index) => {
+    button.setAttribute("aria-current", String(index === state.imageIndex));
+  });
+
+  try {
+    if (!isExpensePreviewableImage(image)) {
+      status.textContent = "Use Open File to view this attachment, then enter its expense here.";
+      return;
+    }
+    const preview = await fetchExpenseAttachmentPreview(image.path, EXPENSE_IMAGE_MODAL_MAX_SIZE);
+    if (requestId !== activeExpenseImagePreviewRequestId || state !== expenseEntryEditorState) return;
+    if (preview?.status !== "success" || !preview.dataUrl) {
+      throw new Error(preview?.message || "Preview unavailable.");
+    }
+    const loaded = await loadImagePreviewSource(preview.dataUrl);
+    if (requestId !== activeExpenseImagePreviewRequestId || state !== expenseEntryEditorState) return;
+    imagePreviewState.naturalWidth = loaded.width;
+    imagePreviewState.naturalHeight = loaded.height;
+    img.alt = getExpenseAttachmentFilename(image);
+    img.src = loaded.dataUrl;
+    img.hidden = false;
+    status.hidden = true;
+    resetImagePreviewTransform();
+    setExpenseReceiptZoomEnabled(true);
+  } catch (error) {
+    if (requestId !== activeExpenseImagePreviewRequestId || state !== expenseEntryEditorState) return;
+    status.textContent = `${error.message || "Preview unavailable."} Use Open File to view the receipt.`;
+  } finally {
+    if (requestId === activeExpenseImagePreviewRequestId && state === expenseEntryEditorState) {
+      stage.setAttribute("aria-busy", "false");
+    }
+  }
+}
+
+function setExpenseReceiptZoomEnabled(enabled) {
+  ["expenseReceiptZoomOutBtn", "expenseReceiptZoomInBtn", "expenseReceiptFitBtn"].forEach((id) => {
+    document.getElementById(id).disabled = !enabled;
+  });
+}
+
+function initExpenseEntryEditor() {
+  const dlg = document.getElementById("addExpenseEntryDlg");
+  if (!dlg || dlg.dataset.initialized === "true") return;
+  dlg.dataset.initialized = "true";
+  initImagePreviewStage(document.getElementById("expenseReceiptStage"));
+  dlg.addEventListener("close", () => {
+    if (imagePreviewState.dialogId === dlg.id) {
+      resetImagePreviewDialog();
+      imagePreviewState.dialogId = "imagePreviewDlg";
+    }
+    expenseEntryEditorState = null;
+  });
+  document.getElementById("expenseEntryForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    saveExpenseEntry();
+  });
+  document.getElementById("expenseEntryForm").addEventListener("input", () => {
+    document.getElementById("expenseEntrySaveStatus").textContent = "Unsaved changes";
+  });
+  document.getElementById("expenseEntrySelect").onchange = (event) => {
+    const state = expenseEntryEditorState;
+    if (!state) return;
+    state.drafts.set(state.entry, readExpenseEntryDraft());
+    state.entry = state.project.entries?.[Number(event.target.value)] || null;
+    loadExpenseEntryDraft();
+    renderExpenseEntrySelect();
+    document.getElementById("expenseEntrySaveStatus").textContent = state.drafts.has(state.entry) ? "Unsaved changes" : "";
+    document.getElementById("exp_amount").focus();
+  };
+  document.getElementById("expenseReceiptPrevBtn").onclick = () => {
+    if (expenseEntryEditorState) void showExpenseReceipt(expenseEntryEditorState.imageIndex - 1);
+  };
+  document.getElementById("expenseReceiptNextBtn").onclick = () => {
+    if (expenseEntryEditorState) void showExpenseReceipt(expenseEntryEditorState.imageIndex + 1);
+  };
+  document.getElementById("expenseReceiptOpenBtn").onclick = () => {
+    const state = expenseEntryEditorState;
+    const image = state?.project.images?.[state.imageIndex];
+    if (image) void openExpenseAttachment(image);
+  };
+  document.getElementById("expenseReceiptFitBtn").onclick = resetImagePreviewTransform;
+  const zoom = (factor) => {
+    const stage = document.getElementById("expenseReceiptStage").getBoundingClientRect();
+    applyImagePreviewZoom(imagePreviewState.scale * factor, stage.left + stage.width / 2, stage.top + stage.height / 2);
+  };
+  document.getElementById("expenseReceiptZoomInBtn").onclick = () => zoom(1.3);
+  document.getElementById("expenseReceiptZoomOutBtn").onclick = () => zoom(1 / 1.3);
+  document.getElementById("expenseEntrySaveNextBtn").onclick = () => saveExpenseEntry({ nextReceipt: true });
+}
+
+async function saveExpenseEntry({ nextReceipt = false } = {}) {
+  const state = expenseEntryEditorState;
+  if (!state || state.saving || !document.getElementById("expenseEntryForm").reportValidity()) return false;
+  const projects = getWeekExpenses(state.weekKey);
+  if (!projects.includes(state.project) || (state.entry && !state.project.entries?.includes(state.entry))) {
+    toast("This expense is no longer available. Close and reopen the expense editor.");
+    return false;
   }
 
-  const entry = {
-    id: createExpenseEntryId(),
-    date,
-    description,
-    mileage,
-    expense
+  const draft = readExpenseEntryDraft();
+  const values = {
+    date: draft.date,
+    description: draft.description.trim(),
+    mileage: Number(draft.mileage) || 0,
+    expense: Number(draft.expense) || 0,
   };
-
-  projects[projectIndex].entries.push(entry);
-  setWeekExpenses(weekKey, projects);
-  saveTimesheets();
+  const wasNew = !state.entry;
+  const entry = state.entry || { id: createExpenseEntryId() };
+  const previousEntry = { ...entry };
+  Object.assign(entry, values);
+  if (!state.project.entries) state.project.entries = [];
+  if (wasNew) state.project.entries.push(entry);
+  setWeekExpenses(state.weekKey, projects);
+  state.saving = true;
+  document.getElementById("btnSaveExpenseEntry").disabled = true;
+  document.getElementById("expenseEntrySaveNextBtn").disabled = true;
+  document.getElementById("expenseEntrySelect").disabled = true;
+  document.querySelectorAll("#expenseEntryForm input").forEach((input) => { input.disabled = true; });
+  document.getElementById("expenseEntrySaveStatus").textContent = "Saving…";
+  const saved = await saveTimesheets({ silent: true });
+  state.saving = false;
+  if (state === expenseEntryEditorState) {
+    document.getElementById("btnSaveExpenseEntry").disabled = false;
+    document.getElementById("expenseEntrySelect").disabled = false;
+    document.querySelectorAll("#expenseEntryForm input").forEach((input) => { input.disabled = false; });
+    document.getElementById("expenseEntrySaveNextBtn").disabled = state.imageIndex >= (state.project.images?.length || 0) - 1;
+  }
+  if (!saved) {
+    if (wasNew) {
+      state.project.entries.splice(state.project.entries.indexOf(entry), 1);
+    } else {
+      Object.keys(values).forEach((key) => { delete entry[key]; });
+      Object.assign(entry, previousEntry);
+    }
+    if (state === expenseEntryEditorState) {
+      document.getElementById("expenseEntrySaveStatus").textContent = "Could not save. Your changes are still here; try again.";
+    }
+    toast("Failed to save expense entry.");
+    return false;
+  }
+  state.drafts.delete(state.entry);
+  state.entry = entry;
   renderExpenses();
-  closeDlg("addExpenseEntryDlg");
-  toast("Expense entry added.");
+  if (state !== expenseEntryEditorState) return true;
+  if (!state.project.images?.length) {
+    closeDlg("addExpenseEntryDlg");
+    toast(wasNew ? "Expense entry added." : "Expense entry updated.");
+    return true;
+  }
+
+  if (nextReceipt && state.imageIndex < state.project.images.length - 1) {
+    state.entry = null;
+    state.drafts.set(null, { date: values.date, description: "", mileage: "", expense: "" });
+    loadExpenseEntryDraft();
+    void showExpenseReceipt(state.imageIndex + 1);
+  }
+  renderExpenseEntrySelect();
+  document.getElementById("expenseEntrySaveStatus").textContent =
+    `Saved ${wasNew ? "new entry" : "changes"} · $${values.expense.toFixed(2)}`;
+  document.getElementById("exp_amount").focus();
+  return true;
 }
 
 function removeExpenseEntry(projectIndex, entryIndex) {
@@ -7041,16 +7274,16 @@ function removeExpenseEntry(projectIndex, entryIndex) {
 
 async function addExpenseImages(projectIndex) {
   try {
+    const weekKey = formatWeekKey(currentTimesheetWeek);
+    const project = getWeekExpenses(weekKey)[projectIndex];
+    if (!project) return;
     const result = await window.pywebview.api.select_expense_images();
     if (result.status === "cancelled" || !result.paths?.length) return;
 
-    const weekKey = formatWeekKey(currentTimesheetWeek);
     const projects = getWeekExpenses(weekKey);
-
-    if (projectIndex < 0 || projectIndex >= projects.length) return;
-
-    const project = projects[projectIndex];
+    if (!projects.includes(project)) return;
     if (!project.images) project.images = [];
+    const firstNewImageIndex = project.images.length;
 
     result.paths.forEach((path) => {
       const filename = path.split(/[\\/]/).pop();
@@ -7062,9 +7295,17 @@ async function addExpenseImages(projectIndex) {
     });
 
     setWeekExpenses(weekKey, projects);
-    saveTimesheets();
+    const saved = await saveTimesheets({ silent: true });
+    if (!saved) {
+      project.images.splice(firstNewImageIndex, result.paths.length);
+      toast("Could not save the attached receipts. Please try again.");
+      return;
+    }
     renderExpenses();
     toast(`Added ${result.paths.length} image(s).`);
+    if (formatWeekKey(currentTimesheetWeek) === weekKey) {
+      openExpenseEntryEditor(projects.indexOf(project), firstNewImageIndex);
+    }
   } catch (e) {
     console.error("Error selecting images:", e);
     toast("Error selecting images.");
@@ -26055,6 +26296,23 @@ function addDeliverableCard(deliverable, options = {}) {
   card.dataset.pinned = String(isDeliverablePinned(deliverable));
   card.dataset.pinnedOrder =
     normalizePinnedDeliverableOrder(deliverable.pinnedOrder) ?? "";
+  const pinLabel = el("span", {
+    textContent: isDeliverablePinned(deliverable) ? "Unpin" : "Pin",
+  });
+  const pinButton = createWorkItemPinButton({
+    pinned: isDeliverablePinned(deliverable),
+    titlePinned: "Unpin deliverable",
+    titleUnpinned: "Pin deliverable",
+    className: "deliverable-pin-btn deliverable-summary-pin",
+    onToggle: (nextPinned) => {
+      card.dataset.pinned = String(nextPinned);
+      if (!nextPinned) card.dataset.pinnedOrder = "";
+      pinLabel.textContent = nextPinned ? "Unpin" : "Pin";
+      return nextPinned;
+    },
+  });
+  pinButton.appendChild(pinLabel);
+  card.querySelector(".deliverable-summary-remove").before(pinButton);
   syncDeliverableAttachmentFields(deliverable);
   setDeliverableCardAttachments(card, deliverable.attachments);
 
@@ -26189,15 +26447,15 @@ function addDeliverableCard(deliverable, options = {}) {
     dateInput.addEventListener('change', handleDateEdit);
   });
 
-  // Wire summary row toggle (chevron / row click, ignoring the remove button)
+  // Wire summary row toggle, leaving nested action buttons to handle their own input.
   const summary = card.querySelector(".deliverable-card-summary");
   if (summary) {
     summary.addEventListener("click", (e) => {
-      if (e.target.closest(".deliverable-summary-remove")) return;
+      if (e.target.closest("button")) return;
       toggleModalDeliverableCard(card);
     });
     summary.addEventListener("keydown", (e) => {
-      if (e.target.closest(".deliverable-summary-remove")) return;
+      if (e.target.closest("button")) return;
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
         toggleModalDeliverableCard(card);
@@ -26819,10 +27077,8 @@ function readForm() {
       attachmentsMigratedToProjectNotes: existingDeliverable?.attachmentsMigratedToProjectNotes === true,
       statuses,
       attachments,
-      pinned: !!existingDeliverable?.pinned || card.dataset.pinned === "true",
-      pinnedOrder: normalizePinnedDeliverableOrder(
-        existingDeliverable?.pinnedOrder ?? card.dataset.pinnedOrder
-      ),
+      pinned: card.dataset.pinned === "true",
+      pinnedOrder: normalizePinnedDeliverableOrder(card.dataset.pinnedOrder),
     });
 
     out.deliverables.push(deliverable);
@@ -36914,8 +37170,7 @@ function initEventListeners() {
     openAddExpenseProjectDialog();
   document.getElementById("addCustomExpenseBtn").onclick = () =>
     openAddCustomExpenseDialog();
-  document.getElementById("btnSaveExpenseEntry").onclick = () =>
-    saveExpenseEntry();
+  initExpenseEntryEditor();
   document.getElementById("btnSaveCustomExpense").onclick = () =>
     saveCustomExpense();
   initImagePreviewDialog();
