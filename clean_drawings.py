@@ -190,6 +190,8 @@ def _canonicalize_scan(scan):
 
     Keep Path fields verbatim: the CAD worker uses those to detect edits to the
     saved references. Only graph identities (Owner/Resolved/files) are normalized.
+    PDF/image attachments whose files no longer exist display nothing in AutoCAD;
+    they move to missingMedia so the worker removes the broken reference instead.
     """
     cache = {}
     identities = {}
@@ -202,15 +204,25 @@ def _canonicalize_scan(scan):
 
     result = dict(scan)
     result['files'] = list(dict.fromkeys(canonical(p) for p in scan['files']))
+    missing = []
     for field, identity in (('references', 'Name'), ('pdfs', 'Handle'), ('images', 'Handle')):
         records = {}
         for original in scan.get(field, []):
-            record = dict(original, Owner=canonical(original['Owner']), Resolved=canonical(original['Resolved']))
+            try:
+                resolved = canonical(original['Resolved'])
+            except FileNotFoundError:
+                # Missing XREFs already stop the scan; only attachments can be absent here.
+                if field == 'references':
+                    raise
+                missing.append(dict(original, Owner=canonical(original['Owner']), Kind='PDF' if field == 'pdfs' else 'image'))
+                continue
+            record = dict(original, Owner=canonical(original['Owner']), Resolved=resolved)
             key = (record['Owner'], record[identity].casefold())
             if key in records and record != records[key]:
                 raise RuntimeError(f'Conflicting {field} discovered through alternate paths: {record["Owner"]}')
             records[key] = record
         result[field] = list(records.values())
+    result['missingMedia'] = missing
     result['titleblocks'] = list(dict.fromkeys(canonical(p) for p in scan.get('titleblocks', [])))
     return result
 
@@ -244,6 +256,9 @@ def run(project, selection, acad, notify=lambda message: None, worker=run_worker
         if scan.get('media'):
             raise RuntimeError('Headless embedding is not supported for these attachment types. No drawings were cleaned.\n' + '\n'.join(scan['media'][:12]))
         scan = _canonicalize_scan(scan)
+        missing_media = scan['missingMedia']
+        for record in missing_media:
+            notify(f'Missing {record["Kind"]} will be removed: {record["Path"]} ({Path(record["Owner"]).name})')
         copies = {}
         fingerprints = {}
         media_copies = {}
@@ -292,6 +307,21 @@ def run(project, selection, acad, notify=lambda message: None, worker=run_worker
                 for page in plotted['pages']:
                     records.append(dict(page, drawing=relative, profile=plotted.get('profile')))
             return records
+        # Convert attachments before the Original plot: headless plotting omits raster
+        # images, so plotting first would show converted logos as unexpected changes.
+        media_results = []
+        owners = {record['Owner'] for record in scan.get('pdfs', []) + scan.get('images', []) + missing_media}
+        for index, owner in enumerate(sorted(owners), 1):
+            notify(f'Converting PDF/image attachments {index} of {len(owners)}: {Path(owner).name}')
+            staged = Path(copies[owner])
+            converted = workspace / (uuid.uuid4().hex + '.dwg')
+            counts = worker(acad, dll, staged, {'Operation': 'embed-media', 'Output': str(converted),
+                                                'MissingMedia': [r for r in missing_media if r['Owner'] == owner]}, workspace)
+            notify(f'Validating embedded content: {Path(owner).name}')
+            if worker(acad, dll, converted, {'Operation': 'verify-media'}, workspace) != counts:
+                raise RuntimeError(f'Embedded content changed after saving and reopening: {owner}')
+            shutil.copy2(converted, staged)
+            media_results.append({'drawing': owner, 'validation': counts})
         original_pdfs = plot_set('Original', [(Path(copies[str(d)]), d) for d in drawings])
         staged_titleblock = Path(copies[str(titleblock)])
         notify('Removing stamps and signatures from the staged titleblock…')
@@ -299,19 +329,6 @@ def run(project, selection, acad, notify=lambda message: None, worker=run_worker
         mark_removal = worker(acad, dll, staged_titleblock, {'Operation': 'remove-titleblock-marks', 'Output': str(unmarked)}, workspace)
         shutil.copy2(unmarked, staged_titleblock)
         reference_pdfs = plot_set('Reference', [(Path(copies[str(d)]), d) for d in drawings], original_pdfs)
-        media_results = []
-        owners = {record['Owner'] for record in scan.get('pdfs', []) + scan.get('images', [])}
-        for index, owner in enumerate(sorted(owners), 1):
-            notify(f'Converting PDF/image attachments {index} of {len(owners)}: {Path(owner).name}')
-            staged = Path(copies[owner])
-            converted = workspace / (uuid.uuid4().hex + '.dwg')
-            counts = worker(acad, dll, staged, {'Operation': 'embed-media', 'Output': str(converted)}, workspace)
-            notify(f'Validating embedded content: {Path(owner).name}')
-            if worker(acad, dll, converted, {'Operation': 'verify-media'}, workspace) != counts:
-                raise RuntimeError(f'Embedded content changed after saving and reopening: {owner}')
-            shutil.copy2(converted, staged)
-            media_results.append({'drawing': owner, 'validation': counts})
-        staged_titleblock = Path(copies[str(titleblock)])
         output_root = workspace / 'outputs'
         output_root.mkdir()
         cleaned_titleblock = output_root / (uuid.uuid4().hex + '.dwg')
@@ -347,12 +364,15 @@ def run(project, selection, acad, notify=lambda message: None, worker=run_worker
             if _file_hash(source) != digest:
                 raise RuntimeError(f'Source changed during processing. Run again: {source}')
         report = {'status': 'review_required' if needs_review else 'success', 'selection': selection, 'drawings': results, 'mediaConversions': media_results,
+                  'missingMediaRemoved': [{'drawing': r['Owner'], 'kind': r['Kind'], 'path': r['Path'], 'handle': r['Handle']} for r in missing_media],
                   'titleblockMarkRemoval': mark_removal, 'comparison': comparison,
                   'titleblockValidation': title_result, 'sourceHashes': fingerprints,
                   'limitations': ['PDF pages import as native CAD objects; supported raster pixels become native solids.',
                                   'Custom PDF clips/adjustments, PDF markups/layers, complex images, other underlays and linked OLE remain unsupported.',
                                   'Boundary intersection uses conservative entity bounds.',
-                                  'PDF comparison uses Layout at 1:1 inches, zero offset, 510-monochrome.ctb, 144 DPI and a 24/255 channel tolerance; it is not proof of engineering equivalence.']}
+                                  'Image colors are snapped to within 16/255 per channel; partly transparent image edges are blended over white paper.',
+                                  'PDF comparison uses Layout at 1:1 inches, zero offset, 510-monochrome.ctb, 144 DPI and a 24/255 channel tolerance; it is not proof of engineering equivalence.',
+                                  'Original plots are made after PDF/image conversion (headless plotting omits raster images), so the comparison checks cleanup, not the conversion itself.']}
         destination_root = root / 'Cleaned CAD'
         if not _inside(destination_root, root):
             raise RuntimeError('Cleaned CAD resolves outside the project directory.')
@@ -373,12 +393,18 @@ def run(project, selection, acad, notify=lambda message: None, worker=run_worker
         pending.rename(destination)
         # Remove only the unique local directory created by this invocation.
         cleanup_warning = ''
+        media_warning = ''
+        if missing_media:
+            names = sorted({f'{Path(r["Owner"]).name}: {Path(r["Path"]).name}' for r in missing_media})
+            media_warning = (f'Removed {len(missing_media)} broken PDF/image attachment(s) whose files are missing '
+                             '(AutoCAD shows nothing for them in the originals): ' + '; '.join(names[:6])
+                             + (f'; and {len(names) - 6} more' if len(names) > 6 else '') + '.')
         try:
             shutil.rmtree(workspace)
             workspace = None
         except OSError:
             cleanup_warning = f'Drawings delivered successfully. Temporary files could not be removed: {workspace}'
-        return {'status': 'success', 'output': str(destination), 'count': len(drawings), 'cleanupWarning': cleanup_warning,
+        return {'status': 'success', 'output': str(destination), 'count': len(drawings), 'cleanupWarning': cleanup_warning, 'mediaWarning': media_warning,
                 'comparisonWarning': 'Review required: plotted differences remain beyond titleblock stamp/signature removal. Open Review/Comparison.pdf before sharing these drawings.' if needs_review else '',
                 'comparisonStatus': comparison['status']}
     except Exception as exc:

@@ -71,6 +71,8 @@ class CleanDrawingTests(unittest.TestCase):
         self.assertEqual(original, source.read_bytes())
         self.assertLess(self.calls.index('embed-media'), self.calls.index('titleblock'))
         self.assertLess(self.calls.index('verify-media'), self.calls.index('titleblock'))
+        # Headless plots omit raster images; convert first so all three plot sets match.
+        self.assertLess(self.calls.index('verify-media'), self.calls.index('plot-review'))
         self.assertTrue((Path(result['output']) / 'Review/Comparison.pdf').exists())
         self.assertFalse((Path(result['output']) / 'form.pdf').exists())
 
@@ -94,6 +96,25 @@ class CleanDrawingTests(unittest.TestCase):
             self.run_job()
         self.assertNotIn('titleblock', self.calls)
         self.assertFalse((self.root / 'Cleaned CAD').exists())
+
+    def test_missing_attachment_is_removed_by_worker_not_staged(self):
+        present = self.root / 'logo.png'
+        present.write_bytes(b'fixture')
+        missing = self.root / 'Xrefs' / 'architect-logo.jpg'
+        self.images = [{'Owner': str(self.sheet), 'Resolved': str(present), 'Path': str(present), 'Handle': '1'},
+                       {'Owner': str(self.tb), 'Resolved': str(missing), 'Path': 'architect-logo.jpg', 'Handle': '2'}]
+        jobs = []
+        def worker(*args):
+            jobs.append(args[3])
+            if args[3]['Operation'] == 'prepare':
+                self.assertEqual([str(present)], list(args[3]['ImageCopies']))
+            return self.worker(*args)
+        result = self.run_job(worker)
+        embeds = [[r['Path'] for r in job['MissingMedia']] for job in jobs if job['Operation'] == 'embed-media']
+        self.assertEqual([[], ['architect-logo.jpg']], sorted(embeds))
+        self.assertIn('x-TB.dwg: architect-logo.jpg', result['mediaWarning'])
+        report = json.loads((Path(result['output']) / 'cleanup-report.json').read_text())
+        self.assertEqual('architect-logo.jpg', report['missingMediaRemoved'][0]['path'])
 
     def test_mapped_drive_aliases_normalize_the_entire_graph(self):
         stamp = self.root / 'stamp.dwg'

@@ -37666,7 +37666,7 @@ function initEventListeners() {
       updateActivity(activityId, { message: "Inspecting selected drawings…", progress: 22 });
       const result = await window.pywebview.api.run_clean_drawings(selection, launchContext, activityId);
       if (result.status !== "success") throw new Error(result.message);
-      const warning = [result.comparisonWarning, result.cleanupWarning].filter(Boolean).join(" ");
+      const warning = [result.comparisonWarning, result.mediaWarning, result.cleanupWarning].filter(Boolean).join(" ");
       completeActivity(activityId, { status: warning ? ACTIVITY_STATUS.WARNING : ACTIVITY_STATUS.SUCCESS,
         message: warning || `Cleaned ${result.count} drawing(s), removed titleblock stamps/signatures, and compared plotted PDFs. No differences above the comparison tolerance.`,
         openFolderPath: result.output, openFolderLabel: "Open Cleaned CAD" });
