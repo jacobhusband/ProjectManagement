@@ -274,7 +274,14 @@ class ProjectFiltersUiTests(unittest.TestCase):
         self.assertIn(": projectListPriority.sortDueDate", script)
         self.assertIn(": projectListPriority.fallbackDueDate,", script)
         self.assertIn("The highest-priority deliverable is outside this timeframe.", script)
-        self.assertIn('statusFilter !== "all" || deliverablesFilter !== "all"', script)
+        self.assertIn(
+            'activeStatusFilter !== "all" || activeDeliverablesFilter !== "all"', script
+        )
+        # A search sets the timeframe, status and deliverable filters aside.
+        self.assertIn("function areProjectFiltersPausedForSearch() {", script)
+        self.assertIn(
+            'const activeDueFilter = filtersPaused ? "all" : dueFilter;', script
+        )
         self.assertNotIn("function syncProjectsViewToggles() {", script)
         self.assertNotIn('"separateDeliverableCompletionToggle"', script)
         self.assertNotIn('"groupDeliverablesByProjectToggle"', script)

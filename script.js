@@ -18785,8 +18785,8 @@ function shouldSortCompletedProjectsLast() {
   return (
     separateDeliverableCompletionGroups &&
     currentSort.key === "due" &&
-    dueFilter === "all" &&
-    statusFilter === "all"
+    (areProjectFiltersPausedForSearch() ||
+      (dueFilter === "all" && statusFilter === "all"))
   );
 }
 
@@ -18807,6 +18807,12 @@ function compareProjectListSortBuckets(a, b, projectListContextMap = null) {
   return dbb - da;
 }
 
+// A search looks through every project, so the timeframe, status and deliverable
+// filters (including Needs attention) are set aside until the search is cleared.
+function areProjectFiltersPausedForSearch() {
+  return !!val("search");
+}
+
 function getProjectListRenderContext(project) {
   const isBoard = projectsViewMode === "card";
   const projectListPriority = getProjectListPriorityMeta(project);
@@ -18815,19 +18821,27 @@ function getProjectListRenderContext(project) {
   const overviewDeliverables = getOverviewDeliverables(project);
   if (!overviewDeliverables.length) return null;
 
+  const filtersPaused = areProjectFiltersPausedForSearch();
+  const activeDueFilter = filtersPaused ? "all" : dueFilter;
+  const activeStatusFilter = filtersPaused ? "all" : statusFilter;
+  const activeDeliverablesFilter = filtersPaused ? "all" : deliverablesFilter;
+
   // The board pages by week instead of using timeframe filters, except Needs
   // attention, which replaces week paging while it is on.
-  const isTimeframeView = (!isBoard || dueFilter === "attention") && dueFilter !== "all";
+  const isTimeframeView =
+    (!isBoard || activeDueFilter === "attention") && activeDueFilter !== "all";
   const timeframeDeliverables = isTimeframeView
     ? overviewDeliverables.filter((deliverable) =>
-        matchesDueFilter(deliverable, dueFilter)
+        matchesDueFilter(deliverable, activeDueFilter)
       )
     : overviewDeliverables;
   const statusMatchingDeliverables = timeframeDeliverables.filter(
-    (deliverable) => isBoard || matchesProjectStatusFilter(deliverable, statusFilter)
+    (deliverable) =>
+      isBoard || matchesProjectStatusFilter(deliverable, activeStatusFilter)
   );
   const filteredDeliverables = statusMatchingDeliverables.filter((deliverable) =>
-    isBoard || matchesProjectDeliverablesFilter(deliverable, deliverablesFilter)
+    isBoard ||
+    matchesProjectDeliverablesFilter(deliverable, activeDeliverablesFilter)
   );
   const visibleDeliverables = isTimeframeView
     ? filteredDeliverables.slice().sort(compareDeliverablesByDueDesc)
@@ -18839,7 +18853,7 @@ function getProjectListRenderContext(project) {
       )
     : true;
   const hasAdditionalFilters =
-    statusFilter !== "all" || deliverablesFilter !== "all";
+    activeStatusFilter !== "all" || activeDeliverablesFilter !== "all";
   const priorityVisible = visibleDeliverables.some(
     (deliverable) => deliverable.id === priorityDeliverable.id
   );
@@ -18861,11 +18875,11 @@ function getProjectListRenderContext(project) {
         ? projectListPriority.sortDueDate
         : projectListPriority.fallbackDueDate,
     matchesFilters,
-    timeframeLabel: getTimeframeFilterLabel(dueFilter),
+    timeframeLabel: getTimeframeFilterLabel(activeDueFilter),
     showTimeframeNote,
     timeframeNote: showTimeframeNote
       ? buildProjectTimeframeNote(
-          dueFilter,
+          activeDueFilter,
           hasAdditionalFilters,
           priorityMatchesTimeframe
         )
@@ -25624,7 +25638,12 @@ function render() {
   attentionButton?.setAttribute("aria-pressed", String(attentionActive));
   attentionButton?.classList.toggle("is-active", attentionActive);
   const attentionHint = document.getElementById("projectsAttentionHint");
-  if (attentionHint) attentionHint.hidden = !attentionActive;
+  if (attentionHint) {
+    attentionHint.hidden = !attentionActive;
+    attentionHint.textContent = areProjectFiltersPausedForSearch()
+      ? "Searching all projects. Clear the search to return to Needs attention."
+      : "Unfinished deliverables due this week or overdue. Click Needs attention again to restore your previous view.";
+  }
   for (const id of ["weekNavPrev", "weekNavNext"]) {
     const button = document.getElementById(id);
     if (button) button.disabled = attentionActive;
