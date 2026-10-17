@@ -11122,6 +11122,53 @@ function deriveToolActivityProgress(toolId, message, currentProgress = 5) {
   return clampActivityProgress(currentProgress, 12);
 }
 
+// Refreshing linked Excel tables opens each linked drawing in full AutoCAD, which is slow,
+// so each Publish asks first. Resolves "refresh", "quick", or "" when cancelled.
+async function askPublishExcelRefresh(launchContext) {
+  const dialog = document.getElementById("publishExcelRefreshDlg");
+  const refresh = document.getElementById("publishExcelRefreshRefresh");
+  const quick = document.getElementById("publishExcelRefreshQuick");
+  const cancel = document.getElementById("publishExcelRefreshCancel");
+  const workbookNote = document.getElementById("publishExcelRefreshWorkbook");
+  if (!dialog || !refresh || !quick || !cancel) return "refresh";
+
+  workbookNote.hidden = true;
+  workbookNote.textContent = "";
+  const lookup = window.pywebview?.api?.get_publish_excel_workbook?.(launchContext);
+  Promise.resolve(lookup)
+    .then((workbook) => {
+      if (workbook?.status !== "success" || !dialog.open) return;
+      const savedAt = formatActivityDateTime(Date.parse(workbook.savedAt));
+      workbookNote.textContent = workbook.openInExcel
+        ? `${workbook.name} is open in Excel (last saved ${savedAt}). Save it before refreshing.`
+        : `${workbook.name} was last saved ${savedAt}.`;
+      workbookNote.hidden = false;
+    })
+    .catch(() => {});
+
+  return new Promise((resolve) => {
+    let choice = "";
+    const onClose = () => {
+      dialog.removeEventListener("close", onClose);
+      refresh.onclick = quick.onclick = cancel.onclick = null;
+      resolve(choice);
+    };
+    const choose = (value) => {
+      choice = value;
+      dialog.close();
+    };
+    dialog.addEventListener("close", onClose);
+    refresh.onclick = () => choose("refresh");
+    quick.onclick = () => choose("quick");
+    cancel.onclick = () => choose("");
+    if (!showDialog(dialog)) {
+      onClose();
+      return;
+    }
+    refresh.focus();
+  });
+}
+
 // Published sets only move when the user clicks "Move set to PDF folder" on the activity.
 let publishDestinationQueue = Promise.resolve();
 const publishDestinationPending = new Set();
@@ -37496,6 +37543,12 @@ function initEventListeners() {
         return;
       }
       console.debug("CAD launch context (publish):", launchContext);
+      let publishParams = null;
+      if (userSettings.publishDwgOptions?.refreshExcelOleLinks !== false) {
+        const excelChoice = await askPublishExcelRefresh(launchContext);
+        if (!excelChoice) return;
+        publishParams = { refreshExcelOleLinks: excelChoice === "refresh" };
+      }
       const activityId = beginActivity({
         toolId: "toolPublishDwgs",
         message: "Initializing...",
@@ -37505,9 +37558,11 @@ function initEventListeners() {
       });
       if (!(await waitForToolTurn(activityId, "toolPublishDwgs", launchContext))) return;
       try {
-        const result = launchContext
-          ? await window.pywebview.api.run_publish_script(launchContext, activityId)
-          : await window.pywebview.api.run_publish_script(null, activityId);
+        const result = await window.pywebview.api.run_publish_script(
+          launchContext || null,
+          activityId,
+          publishParams
+        );
         if (result?.status === "error") {
           failActivity(activityId, {
             message: result.message || "Failed to start Publish DWGs.",

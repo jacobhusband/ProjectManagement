@@ -1,7 +1,9 @@
 import io
+import os
 import sys
 import tempfile
 import threading
+import time
 import types
 import unittest
 import zipfile
@@ -568,6 +570,42 @@ class WorkroomCadLaunchCommandTests(unittest.TestCase):
         command = captured[0][0]
         refresh_arg_index = command.index("-RefreshExcelOleLinks")
         self.assertEqual("0", command[refresh_arg_index + 1])
+
+    def test_publish_excel_workbook_reports_newest_discipline_workbook(self):
+        with tempfile.TemporaryDirectory(prefix="acies-publish-excel-") as temp_dir:
+            project_path = Path(temp_dir)
+            electrical = project_path / "Electrical"
+            (electrical / "Sheets").mkdir(parents=True)
+            dwg = electrical / "Sheets" / "E07.00.dwg"
+            dwg.write_text("", encoding="utf-8")
+            older = electrical / "Lighting calcs.xlsx"
+            newer = electrical / "12345 Panels.xls"
+            for path, age in ((older, 7200), (newer, 60)):
+                path.write_text("", encoding="utf-8")
+                stamp = time.time() - age
+                os.utime(path, (stamp, stamp))
+            (electrical / "~$12345 Panels.xls").write_text("", encoding="utf-8")
+            (project_path / "Mechanical").mkdir()
+            settings = {"activeDiscipline": "Electrical", "discipline": ["Electrical"]}
+
+            from_files = self.api.get_publish_excel_workbook({"cadFilePaths": [str(dwg)]})
+            with patch.object(self.api, "get_user_settings", return_value=settings):
+                from_project = self.api.get_publish_excel_workbook({
+                    "source": "projects-tab",
+                    "projectPath": str(project_path),
+                })
+                mechanical = self.api.get_publish_excel_workbook({
+                    "source": "projects-tab",
+                    "projectPath": str(project_path),
+                    "discipline": "Mechanical",
+                })
+
+        for result in (from_files, from_project):
+            self.assertEqual("success", result["status"])
+            self.assertEqual("12345 Panels.xls", result["name"])
+            self.assertTrue(result["openInExcel"])
+            self.assertEqual("Electrical", Path(result["folder"]).name)
+        self.assertEqual("none", mechanical["status"])
 
     def test_automatic_project_publish_uses_selected_discipline_and_accepts_detected_size(self):
         publish_case = next(

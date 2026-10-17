@@ -481,6 +481,91 @@ function Test-DwgOpenInAutoCad {
   return $false
 }
 
+# Linked Excel tables (panel schedules) come from workbooks at the top of the
+# discipline folder, for example Electrical\<ProjectNumber> Panels.xls.
+$excelWorkbookExtensions = @(".xls", ".xlsx", ".xlsm", ".xlsb")
+$disciplineFolderNames = @("Electrical", "Mechanical", "Plumbing")
+# A workbook saved this soon before the drawing is too close to call.
+$excelLinkCloseCallSeconds = 120
+
+function Resolve-DisciplineFolder {
+  # The nearest folder above the drawing named for a discipline, or the
+  # drawing's own folder when it is not inside one.
+  param([string]$DwgPath)
+
+  $dwgFolder = Split-Path -Path $DwgPath -Parent
+  $candidate = $dwgFolder
+  while (-not [string]::IsNullOrWhiteSpace($candidate)) {
+    if ($disciplineFolderNames -contains (Split-Path -Path $candidate -Leaf)) { return $candidate }
+    $parent = Split-Path -Path $candidate -Parent
+    if ($parent -eq $candidate) { break }
+    $candidate = $parent
+  }
+  return $dwgFolder
+}
+
+function Get-ExcelLinkFreshness {
+  # Decides whether a drawing's linked Excel content needs the full AutoCAD
+  # refresh: "refresh" when a discipline-folder workbook was saved after the
+  # drawing, "skip" when every workbook is clearly older, and "unsure" when the
+  # timestamps cannot settle it (no workbook, one open in Excel, close saves).
+  # Only "skip" avoids the refresh; the user already chose to refresh links.
+  param([string]$DwgPath)
+
+  $dwgItem = Get-Item -LiteralPath $DwgPath
+  $folder = Resolve-DisciplineFolder -DwgPath $DwgPath
+  $result = [pscustomobject]@{
+    Decision = "unsure"
+    Reason = ""
+    Folder = $folder
+    DwgSavedAt = $dwgItem.LastWriteTime
+    Workbook = $null
+  }
+
+  try {
+    # -Force includes Excel's hidden ~$ lock files.
+    $folderItems = @(Get-ChildItem -LiteralPath $folder -File -Force -ErrorAction Stop)
+  }
+  catch {
+    $result.Reason = "Could not read $folder to check its Excel workbooks."
+    return $result
+  }
+
+  $workbooks = @($folderItems | Where-Object {
+      ($excelWorkbookExtensions -contains $_.Extension.ToLowerInvariant()) -and -not $_.Name.StartsWith('~$')
+    })
+  if ($workbooks.Count -eq 0) {
+    $result.Reason = "No Excel workbook was found in $folder, so there is nothing to compare the drawing against."
+    return $result
+  }
+  $result.Workbook = $workbooks | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+
+  # Excel keeps "~$<name>" beside an open workbook (Word-style names drop the
+  # first two characters). An open workbook may hold unsaved schedule edits.
+  $lockNames = @($folderItems | Where-Object { $_.Name.StartsWith('~$') } | ForEach-Object { $_.Name.Substring(2) })
+  $openWorkbooks = @($workbooks | Where-Object {
+      ($lockNames -contains $_.Name) -or ($_.Name.Length -gt 2 -and $lockNames -contains $_.Name.Substring(2))
+    })
+  if ($openWorkbooks.Count -gt 0) {
+    $result.Reason = "$($openWorkbooks[0].Name) appears to be open in Excel, so it may have unsaved changes."
+    return $result
+  }
+
+  $workbookLeadSeconds = ($result.Workbook.LastWriteTime - $dwgItem.LastWriteTime).TotalSeconds
+  if ($workbookLeadSeconds -gt 0) {
+    $result.Decision = "refresh"
+    $result.Reason = "$($result.Workbook.Name) was saved after the drawing."
+  }
+  elseif (-$workbookLeadSeconds -lt $excelLinkCloseCallSeconds) {
+    $result.Reason = "$($result.Workbook.Name) was saved less than two minutes before the drawing, so it is unclear whether the drawing picked up the change."
+  }
+  else {
+    $result.Decision = "skip"
+    $result.Reason = "$($result.Workbook.Name) has not changed since the drawing was last saved."
+  }
+  return $result
+}
+
 function Invoke-FullAutoCadOleRefresh {
   param(
     [string]$AcadExe,
@@ -879,14 +964,15 @@ function Invoke-CorePlotAttempt {
     [string]$OutputDirectory,
     [string]$PaperSize,
     [string]$LogFile,
-    [bool]$OleRefreshAlreadyAttempted
+    [bool]$OleRefreshAlreadyAttempted,
+    [bool]$RefreshOleLinks = $RefreshExcelOleLinks
   )
 
   $attemptId = [guid]::NewGuid().ToString("N")
   $lispFile = Join-Path $env:TEMP "plot_layouts_$attemptId.lsp"
   $scriptFile = Join-Path $env:TEMP "run_plot_$attemptId.scr"
   $lispOutputDir = $OutputDirectory -replace '\\', '\\'
-  $oleRefreshEnabledLiteral = if ($RefreshExcelOleLinks) { "T" } else { "nil" }
+  $oleRefreshEnabledLiteral = if ($RefreshOleLinks) { "T" } else { "nil" }
   $oleRefreshAttemptedLiteral = if ($OleRefreshAlreadyAttempted) { "T" } else { "nil" }
 
   $lispContent = @"
@@ -1030,7 +1116,7 @@ function Invoke-CorePlotAttempt {
     (progn
       (AciesLog (strcat "${preflightErrorMarker}: " (vl-catch-all-error-message preflightResult)))
       (AciesLog "$plotDecisionSkipMarker")
-      (command "QUIT" "N")
+      (command "_.QUIT")
     )
     (if preflightResult
       (progn
@@ -1050,11 +1136,11 @@ function Invoke-CorePlotAttempt {
             )
           )
         )
-        (command "QUIT" "N")
+        (command "_.QUIT")
       )
       (progn
         (AciesLog "Skipping plot because ARCALIGNEDTEXT support is unavailable in headless mode.")
-        (command "QUIT" "N")
+        (command "_.QUIT")
       )
     )
   )
@@ -1065,14 +1151,14 @@ function Invoke-CorePlotAttempt {
   (cond
     ((< linkedOleCount 0)
       (AciesLog "$plotDecisionSkipMarker")
-      (command "QUIT" "N")
+      (command "_.QUIT")
     )
     ((and *acies-refresh-excel-ole-links*
           (not *acies-ole-refresh-attempted*)
           (> linkedOleCount 0))
       (AciesLog "$oleRefreshRequiredMarker")
       (AciesLog "$plotDecisionRefreshOleMarker")
-      (command "QUIT" "N")
+      (command "_.QUIT")
     )
     (T (PlotLayoutsAfterPreflight))
   )
@@ -1083,9 +1169,14 @@ function Invoke-CorePlotAttempt {
   try {
     Set-Content -Encoding ASCII -LiteralPath $lispFile -Value $lispContent
     $lispPathForScript = $lispFile -replace '\\', '/'
+    # Core Console treats an opened drawing as changed, so QUIT asks "Really
+    # want to discard all changes?" An answer passed inside LISP is ignored and
+    # the prompt's <N> default resaves the DWG, which would make it look newer
+    # than its Excel workbook. Answering Y on its own script line discards.
     $scriptContent = @"
 (load "$lispPathForScript")
 PlotAllLayouts
+_Y
 "@
     Set-Content -Encoding ASCII -LiteralPath $scriptFile -Value $scriptContent
 
@@ -1119,24 +1210,43 @@ foreach ($dwgPath in $files) {
     [void]$existingPerDwgPdfSet.Add($existingPdf.FullName)
   }
 
+  # Compare the discipline folder's Excel workbooks with the drawing before
+  # Core Console opens it. A drawing saved after every workbook already holds
+  # the current linked content, so the slow full AutoCAD refresh is skipped.
+  $refreshOleLinksForDwg = $RefreshExcelOleLinks
+  $excelLinkFreshness = $null
+  $oleRefreshSkipReason = ""
+  if ($RefreshExcelOleLinks) {
+    $excelLinkFreshness = Get-ExcelLinkFreshness -DwgPath $dwgPath
+    "EXCEL_LINK_CHECK: $($excelLinkFreshness.Decision) - $($excelLinkFreshness.Reason)" | Out-File $logFile -Append
+    if ($excelLinkFreshness.Decision -eq "skip") {
+      $refreshOleLinksForDwg = $false
+      $oleRefreshSkipReason = $excelLinkFreshness.Reason
+    }
+  }
+
   $plotAttempt = Invoke-CorePlotAttempt `
     -DwgPath $dwgPath `
     -DwgNameWithoutExt $dwgNameWithoutExt `
     -OutputDirectory $batchOutputDir `
     -PaperSize $selectedPaperSize `
     -LogFile $logFile `
-    -OleRefreshAlreadyAttempted $false
+    -OleRefreshAlreadyAttempted $false `
+    -RefreshOleLinks $refreshOleLinksForDwg
   $plotOutput = @($plotAttempt.Output)
   $code = $plotAttempt.ExitCode
 
   $initialPlotOutputText = ($plotOutput | ForEach-Object { "$_" }) -join [Environment]::NewLine
   $initialPlotOutputNormalized = $initialPlotOutputText -replace ([char]0), ''
-  $oleRefreshRequired = $RefreshExcelOleLinks -and (
+  $oleRefreshRequired = $refreshOleLinksForDwg -and (
     $initialPlotOutputNormalized -match [regex]::Escape($oleRefreshRequiredMarker)
   )
 
   if ($oleRefreshRequired) {
     Write-Host "PROGRESS: Linked Excel OLE content detected in $($dwgItem.Name)."
+    if ($excelLinkFreshness) {
+      Write-Host "PROGRESS: $($dwgItem.Name) - $($excelLinkFreshness.Reason)"
+    }
     Write-Host "PROGRESS: Refreshing linked Excel content in $($dwgItem.Name) and saving the drawing..."
     "OLE_REFRESH: Required for $dwgPath" | Out-File $logFile -Append
     $oleRefreshResult = Invoke-FullAutoCadOleRefresh `
@@ -1219,6 +1329,9 @@ foreach ($dwgPath in $files) {
   }
   elseif ($oleCheckAbsent) {
     Write-Host "PROGRESS: No linked Excel OLE content detected in $($dwgItem.Name); continuing headless publish."
+  }
+  elseif ($oleCheckPresent -and $oleRefreshSkipReason) {
+    Write-Host "PROGRESS: Linked Excel OLE content detected in $($dwgItem.Name); skipped the Excel refresh. $oleRefreshSkipReason"
   }
   elseif ($oleCheckPresent -and -not $RefreshExcelOleLinks) {
     Write-Host "PROGRESS: Linked Excel OLE content detected in $($dwgItem.Name), but automatic refresh is disabled."

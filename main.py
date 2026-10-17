@@ -18390,6 +18390,64 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
             'selection': selection,
         }
 
+    def get_publish_excel_workbook(self, launch_context=None):
+        """Newest Excel workbook in the publish's discipline folder, for the
+        "Refresh Excel links or quick print?" question Publish asks at launch.
+
+        PlotDWGs.ps1 looks in the same folder: the nearest discipline-named folder
+        above the selected DWGs, else the project's discipline folder.
+        """
+        try:
+            folder = ''
+            cad_files = self._get_launch_context_cad_file_paths(launch_context)
+            if cad_files:
+                folder = os.path.dirname(cad_files[0])
+                candidate = folder
+                while candidate and os.path.basename(candidate).lower() not in (
+                        name.lower() for name in DISCIPLINE_OPTIONS):
+                    parent = os.path.dirname(candidate)
+                    candidate = '' if parent == candidate else parent
+                folder = candidate or folder
+            else:
+                settings = self.get_user_settings()
+                context = self._resolve_workroom_context(settings, launch_context)
+                project_path = str(context.get('project_path') or '').strip()
+                discipline = _normalize_active_discipline(
+                    self._normalize_launch_context(launch_context).get('discipline')
+                    or settings.get('activeDiscipline'),
+                    settings.get('discipline'),
+                )
+                if project_path:
+                    folder = str(self._resolve_workroom_discipline_folder(
+                        project_path, discipline).get('resolved_folder') or '').strip()
+            if not folder or not os.path.isdir(folder):
+                return {'status': 'none'}
+            names = os.listdir(folder)
+            workbooks = [
+                os.path.join(folder, name) for name in names
+                if os.path.splitext(name)[1].lower() in ('.xls', '.xlsx', '.xlsm', '.xlsb')
+                and not name.startswith('~$')
+                and os.path.isfile(os.path.join(folder, name))
+            ]
+            if not workbooks:
+                return {'status': 'none', 'folder': folder}
+            newest = max(workbooks, key=os.path.getmtime)
+            newest_name = os.path.basename(newest)
+            lock_names = {name[2:].lower() for name in names if name.startswith('~$')}
+            return {
+                'status': 'success',
+                'folder': folder,
+                'name': newest_name,
+                'savedAt': datetime.datetime.fromtimestamp(
+                    os.path.getmtime(newest)).isoformat(timespec='seconds'),
+                # Excel keeps ~$<name> beside an open workbook (Word-style drops two characters).
+                'openInExcel': newest_name.lower() in lock_names
+                or newest_name[2:].lower() in lock_names,
+            }
+        except Exception as e:
+            logging.warning("get_publish_excel_workbook failed: %s", e)
+            return {'status': 'none'}
+
     def _resolve_project_discipline_publish_selection(self, settings, launch_context):
         return self._resolve_project_discipline_dwg_selection(
             settings,

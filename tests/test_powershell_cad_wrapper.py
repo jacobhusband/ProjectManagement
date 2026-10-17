@@ -303,6 +303,114 @@ class PowerShellCadWrapperTests(unittest.TestCase):
         self.assertNotIn('Publishing cached OLE content.', text)
         self.assertNotIn('(vlax-get-acad-object)', text)
 
+    @unittest.skipUnless(sys.platform == "win32", "Publish runs in Windows PowerShell")
+    def test_publish_compares_discipline_excel_workbooks_with_the_drawing(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+        self.assertIsNotNone(powershell)
+        script = CAD_SCRIPT_PATHS[0].read_text(encoding="utf-8")
+        freshness = script.split(
+            "# Linked Excel tables (panel schedules) come from workbooks", 1
+        )[1].split("function Invoke-FullAutoCadOleRefresh {", 1)[0]
+        harness_body = textwrap.dedent('''
+            function New-Case {
+              param([string]$Name, [string]$DwgFolder, [int]$WorkbookOffsetSeconds,
+                    [string]$WorkbookName = "12345 Panels.xlsx", [string[]]$ExtraFiles = @())
+              $project = Join-Path $Root $Name
+              $electrical = Join-Path $project "Electrical"
+              $dwgDir = if ($DwgFolder) { Join-Path $electrical $DwgFolder } else { $electrical }
+              New-Item -ItemType Directory -Force -Path $dwgDir | Out-Null
+              $dwg = Join-Path $dwgDir "E07.00 Panels.dwg"
+              Set-Content -LiteralPath $dwg -Value "dwg"
+              $saved = (Get-Date).AddDays(-1)
+              (Get-Item -LiteralPath $dwg).LastWriteTime = $saved
+              if ($WorkbookName) {
+                $workbook = Join-Path $electrical $WorkbookName
+                Set-Content -LiteralPath $workbook -Value "xls"
+                (Get-Item -LiteralPath $workbook).LastWriteTime = $saved.AddSeconds($WorkbookOffsetSeconds)
+              }
+              foreach ($extra in $ExtraFiles) {
+                Set-Content -LiteralPath (Join-Path $electrical $extra) -Value "lock"
+              }
+              $result = Get-ExcelLinkFreshness -DwgPath $dwg
+              Write-Output "RESULT:$Name=$($result.Decision)|$(Split-Path -Leaf $result.Folder)"
+            }
+            New-Case -Name "newer" -DwgFolder "" -WorkbookOffsetSeconds 60
+            New-Case -Name "older" -DwgFolder "" -WorkbookOffsetSeconds -3600
+            New-Case -Name "close" -DwgFolder "" -WorkbookOffsetSeconds -30
+            New-Case -Name "missing" -DwgFolder "" -WorkbookOffsetSeconds 0 -WorkbookName ""
+            New-Case -Name "lockonly" -DwgFolder "" -WorkbookOffsetSeconds 0 -WorkbookName "" -ExtraFiles @('~$12345 Panels.xlsx')
+            New-Case -Name "open" -DwgFolder "" -WorkbookOffsetSeconds -3600 -ExtraFiles @('~$12345 Panels.xlsx')
+            New-Case -Name "nested" -DwgFolder "Sheets" -WorkbookOffsetSeconds 60 -WorkbookName "Panels.xls"
+        ''')
+        with tempfile.TemporaryDirectory(prefix="acies-excel-link-") as temp_dir:
+            harness = Path(temp_dir) / "ExcelLinkFreshness.ps1"
+            harness.write_text(
+                "param([string]$Root)\n" + freshness + harness_body, encoding="utf-8"
+            )
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass",
+                 "-File", str(harness), "-Root", str(Path(temp_dir) / "projects")],
+                capture_output=True, text=True, timeout=60,
+            )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        for expected in (
+            "newer=refresh|Electrical",
+            "older=skip|Electrical",
+            "close=unsure|Electrical",
+            "missing=unsure|Electrical",
+            "lockonly=unsure|Electrical",
+            "open=unsure|Electrical",
+            "nested=refresh|Electrical",
+        ):
+            self.assertIn(f"RESULT:{expected}", output)
+
+    def test_publish_skips_refresh_only_for_drawings_saved_after_every_workbook(self):
+        text = (REPO_ROOT / "scripts" / "PlotDWGs.ps1").read_text(encoding="utf-8")
+
+        for expected in (
+            "$excelLinkFreshness = Get-ExcelLinkFreshness -DwgPath $dwgPath",
+            'if ($excelLinkFreshness.Decision -eq "skip") {',
+            "-RefreshOleLinks $refreshOleLinksForDwg",
+            "$oleRefreshRequired = $refreshOleLinksForDwg -and (",
+        ):
+            self.assertIn(expected, text)
+        # The question is asked in the app before launch, never by a script window.
+        self.assertNotIn("ShowDialog() -eq [System.Windows.Forms.DialogResult]::Yes", text)
+
+    def test_publish_asks_refresh_or_quick_print_at_launch(self):
+        script = SCRIPT_JS_PATH.read_text(encoding="utf-8")
+        html = INDEX_HTML_PATH.read_text(encoding="utf-8")
+
+        for expected in (
+            "async function askPublishExcelRefresh(launchContext) {",
+            "if (userSettings.publishDwgOptions?.refreshExcelOleLinks !== false) {",
+            "const excelChoice = await askPublishExcelRefresh(launchContext);",
+            "if (!excelChoice) return;",
+            'publishParams = { refreshExcelOleLinks: excelChoice === "refresh" };',
+            "window.pywebview?.api?.get_publish_excel_workbook?.(launchContext)",
+        ):
+            self.assertIn(expected, script)
+        # The choice must reach the backend as a per-run override.
+        launch = script.split("const excelChoice = await askPublishExcelRefresh", 1)[1]
+        self.assertIn("run_publish_script(\n          launchContext || null,\n          activityId,\n          publishParams\n        )", launch)
+        for control_id in (
+            "publishExcelRefreshDlg",
+            "publishExcelRefreshRefresh",
+            "publishExcelRefreshQuick",
+            "publishExcelRefreshCancel",
+            "publishExcelRefreshWorkbook",
+        ):
+            self.assertIn(f'id="{control_id}"', html)
+
+    def test_publish_core_console_discards_instead_of_resaving_drawings(self):
+        # QUIT's <N> default resaves the DWG, which would make every published
+        # drawing look newer than its Excel workbook.
+        text = (REPO_ROOT / "scripts" / "PlotDWGs.ps1").read_text(encoding="utf-8")
+
+        self.assertNotIn('(command "QUIT" "N")', text)
+        self.assertIn('(load "$lispPathForScript")\nPlotAllLayouts\n_Y\n"@', text)
+
     def test_publish_excel_ole_refresh_setting_is_bound_in_both_uis(self):
         script = SCRIPT_JS_PATH.read_text(encoding="utf-8")
         html = INDEX_HTML_PATH.read_text(encoding="utf-8")

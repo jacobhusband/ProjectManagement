@@ -1930,6 +1930,24 @@
         </div>
     </dialog>
 
+    <!-- Asked at each Publish launch while "Refresh linked Excel OLE" is on -->
+    <dialog id="publishExcelRefreshDlg" aria-labelledby="publishExcelRefreshTitle">
+        <div class="modal-header">
+            <div class="title" id="publishExcelRefreshTitle">Refresh Excel links?</div>
+            <button type="button" class="btn ghost" id="publishExcelRefreshCancel">Cancel</button>
+        </div>
+        <div class="modal-body stack">
+            <p><strong>Refresh Excel links</strong> reloads linked Excel tables, such as panel schedules, in full
+                AutoCAD and saves those drawings before plotting. It is slower.</p>
+            <p><strong>Quick print</strong> plots the drawings as they were last saved.</p>
+            <div class="tiny muted" id="publishExcelRefreshWorkbook" style="overflow-wrap: anywhere;" hidden></div>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn" id="publishExcelRefreshQuick">Quick print</button>
+            <button type="button" class="btn primary" id="publishExcelRefreshRefresh">Refresh Excel links</button>
+        </div>
+    </dialog>
+
     <!-- Tool Settings: Publish -->
     <dialog id="publishSettingsDlg">
         <div class="modal-header">
@@ -1994,9 +2012,10 @@
                 <div class="tool-setting">
                     <div class="tool-setting-text">
                         <div class="tool-setting-title">Refresh linked Excel OLE</div>
-                        <div class="tool-setting-desc">On: opens drawings containing linked Excel OLE objects in full
-                            AutoCAD, refreshes the links, and saves the original DWGs before plotting. If refresh fails,
-                            Publish warns and uses the cached drawing content.</div>
+                        <div class="tool-setting-desc">On: each Publish asks whether to refresh Excel links or quick
+                            print. Refreshing opens drawings containing linked Excel OLE objects in full AutoCAD,
+                            refreshes the links, and saves the original DWGs before plotting, skipping drawings saved
+                            after every workbook in the discipline folder. Off: always quick prints.</div>
                     </div>
                     <div class="tool-setting-control">
                         <span class="toggle-label">Off</span>
