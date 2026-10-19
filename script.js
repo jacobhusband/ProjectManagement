@@ -8860,12 +8860,46 @@ function looksLikeOutlookDrop(types) {
     .some((type) => OUTLOOK_DROP_TYPE_PREFIXES.some((prefix) => type.startsWith(prefix)));
 }
 
+// New Outlook (olk.exe) is a WebView2 app, so a message dragged out of its list
+// carries no file at all: just this custom JSON payload with each row's subject and
+// Exchange item id. Outlook on the web opens that id through its read deeplink.
+const NEW_OUTLOOK_DROP_TYPE = "multimaillistmessagerows";
+const NEW_OUTLOOK_READ_DEEPLINK = "https://outlook.office.com/mail/deeplink/read/";
+
+function parseNewOutlookDropRows(text) {
+  let payload = null;
+  try {
+    payload = JSON.parse(String(text || ""));
+  } catch {
+    return [];
+  }
+  const itemIds = Array.isArray(payload?.latestItemIds) ? payload.latestItemIds : [];
+  const subjects = Array.isArray(payload?.subjects) ? payload.subjects : [];
+  const savedAt = new Date().toISOString();
+  return itemIds
+    .map((itemId, index) => {
+      const id = String(itemId || "").trim();
+      if (!id) return null;
+      const url = `${NEW_OUTLOOK_READ_DEEPLINK}${encodeURIComponent(id)}`;
+      return normalizeEmailRef({
+        raw: url,
+        url,
+        label: String(subjects[index] || "").trim() || "Outlook email",
+        source: "outlook-url",
+        savedAt,
+        messageId: id,
+      });
+    })
+    .filter(Boolean);
+}
+
 function captureEmailDropSources(dt) {
   if (!dt) return null;
   return {
     files: Array.from(dt.files || []),
     entries: captureDropFileEntries(dt),
     urlCandidate: extractEmailUrlFromDropData(dt),
+    newOutlookRefs: parseNewOutlookDropRows(getTransferDataText(dt, NEW_OUTLOOK_DROP_TYPE)),
     types: Array.from(dt.types || []),
   };
 }
@@ -8899,6 +8933,11 @@ async function resolveEmailRefFromCapturedDrop(captured, context = {}) {
       context
     );
     return { emailRef, source: "entry-drop" };
+  }
+
+  const newOutlookRefs = captured.newOutlookRefs || [];
+  if (newOutlookRefs.length) {
+    return { emailRef: newOutlookRefs[0], emailRefs: newOutlookRefs, source: "new-outlook-drop" };
   }
 
   if (captured.urlCandidate) {
@@ -9015,7 +9054,11 @@ async function resolvePageEmailDropRef(event, context = {}) {
   }
   if (result?.emailRef) {
     console.info(`[page-email] attached via ${result.source}`);
-    return { status: "success", emailRef: result.emailRef };
+    return {
+      status: "success",
+      emailRef: result.emailRef,
+      emailRefs: result.emailRefs || [result.emailRef],
+    };
   }
   const outlookDrop = looksLikeOutlookDrop(captured?.types);
   // Some WebView2 versions expose only an empty Files payload. Ask before
@@ -14979,7 +15022,14 @@ function readImportantNodeText(node) {
     target = node.cloneNode(true);
     target.querySelectorAll(".page-email").forEach((chip) => chip.remove());
   }
-  return String(target.textContent || "").replace(/\s+/g, " ").trim();
+  const text = String(target.textContent || "").replace(/\s+/g, " ").trim();
+  // Dropped emails flag their line, so name them by subject after the line's text.
+  const subjects = Array.from(node.querySelectorAll(".page-email[data-email-label]"))
+    .map((chip) => String(chip.getAttribute("data-email-label") || "").trim())
+    .filter(Boolean);
+  if (!subjects.length) return text;
+  const emails = `Email: ${subjects.join(", ")}`;
+  return text ? `${text} · ${emails}` : emails;
 }
 
 function extractImportantPageLines(html, source) {
@@ -15053,6 +15103,20 @@ function getProjectImportantItems(project) {
 
 function getProjectImportantCount(project) {
   return getProjectImportantItems(project).length;
+}
+
+// Workspace pages have no deliverable card, so the Pages tab lists their flags.
+function getGlobalPageImportantItems(page) {
+  if (!page || isCanvasPage(page.page)) return [];
+  return extractImportantPageLines(page.page?.html, {
+    subpageId: null,
+    pageTitle: page.title || "Untitled",
+  });
+}
+
+function openGlobalPageAtImportant(page) {
+  pendingImportantPageScroll = true;
+  void openGlobalPage(page);
 }
 
 function getProjectSubpageAncestors(project, subpage) {
@@ -27405,6 +27469,8 @@ function renderGlobalPagesView() {
   }
   const query = String(notesSearchQuery || "").trim().toLowerCase();
   const visible = pages.filter((p) => globalPageMatchesSearch(p, query));
+  const importantList = createGlobalPagesImportantList(visible);
+  if (importantList) listEl.appendChild(importantList);
   if (!visible.length) {
     listEl.appendChild(
       el("div", {
@@ -27415,6 +27481,41 @@ function renderGlobalPagesView() {
     return;
   }
   visible.forEach((page) => listEl.appendChild(createGlobalPageCard(page, query)));
+}
+
+// Flagged lines (including dropped emails) across workspace pages, so they read as
+// a to-address list. Clearing the "!" flag in the page removes the entry.
+function createGlobalPagesImportantList(pages) {
+  const rows = [];
+  pages.forEach((page) => {
+    getGlobalPageImportantItems(page).forEach((item) => rows.push({ page, item }));
+  });
+  if (!rows.length) return null;
+  const section = el("section", {
+    className: "global-pages-important",
+    "aria-label": "Important items in pages",
+  });
+  section.appendChild(
+    el("div", {
+      className: "global-pages-important-title",
+      textContent: `Important · ${rows.length}`,
+    })
+  );
+  rows.forEach(({ page, item }) => {
+    const row = el("button", {
+      className: "global-pages-important-row",
+      type: "button",
+      title: `Open ${page.title || "Untitled"}`,
+      onclick: () => openGlobalPageAtImportant(page),
+    });
+    row.append(
+      el("span", { className: "global-pages-important-flag", textContent: "!", "aria-hidden": "true" }),
+      el("span", { className: "global-pages-important-text", textContent: item.text || "Flagged line" }),
+      el("span", { className: "global-pages-important-page muted", textContent: page.title || "Untitled" })
+    );
+    section.appendChild(row);
+  });
+  return section;
 }
 
 function createGlobalPageCard(page, searchQuery = "") {
@@ -27436,6 +27537,16 @@ function createGlobalPageCard(page, searchQuery = "") {
     title.appendChild(icon);
   }
   title.appendChild(highlightText(titleText, query));
+  const importantCount = getGlobalPageImportantItems(page).length;
+  if (importantCount) {
+    title.appendChild(
+      el("span", {
+        className: "global-page-important-badge",
+        textContent: `! ${importantCount}`,
+        title: `${importantCount} important item${importantCount === 1 ? "" : "s"}`,
+      })
+    );
+  }
   const preview = el("div", {
     className: "global-page-card-preview muted",
   });
@@ -41572,6 +41683,8 @@ function renderPageView() {
   }
 
   if (globalPage) {
+    const focusImportant = pendingImportantPageScroll;
+    pendingImportantPageScroll = false;
     if (!globalPage.page || typeof globalPage.page !== "object") {
       globalPage.page = { html: "", updatedAt: "" };
     }
@@ -41592,6 +41705,7 @@ function renderPageView() {
         globalPage,
         html: normalizeHtmlForProjectPagesEditor(globalPage.page.html || ""),
         title: globalPage.title || "",
+        focusImportant,
       })
     ) {
       setPageSaveStatus("");

@@ -82,7 +82,9 @@ class PageImportantItemsUiTests(unittest.TestCase):
             main, "const SLASH_COMMANDS = [", "function commandMatches("
         )
         self.assertIn(
-            '{ id: "important", label: "Important", shortcut: "!!", group: "block", projectOnly: true },',
+            # Workspace pages have their own rollup on the Pages tab, so the
+            # command is no longer project-only.
+            '{ id: "important", label: "Important", shortcut: "!!", group: "block" },',
             registry,
         )
         # "/im" substring-matches both entries; Important must rank first.
@@ -241,6 +243,67 @@ class PageImportantItemsUiTests(unittest.TestCase):
             self.assertNotIn(removed, script)
         for removed_css in (".page-item {", ".page-item-badge {", ".page-item-text {"):
             self.assertNotIn(removed_css, css)
+
+    # --- workspace (non-project) pages -----------------------------------
+    def test_pages_tab_lists_important_items_from_workspace_pages(self):
+        script = SCRIPT_JS_PATH.read_text(encoding="utf-8")
+        items_block = self._block(
+            script,
+            "function getGlobalPageImportantItems(page) {",
+            "function openGlobalPageAtImportant(page) {",
+        )
+        self.assertIn("if (!page || isCanvasPage(page.page)) return [];", items_block)
+        self.assertIn("extractImportantPageLines(page.page?.html, {", items_block)
+
+        view_block = self._block(
+            script, "function renderGlobalPagesView() {", "function createGlobalPagesImportantList(pages) {"
+        )
+        self.assertIn("const importantList = createGlobalPagesImportantList(visible);", view_block)
+
+        list_block = self._block(
+            script,
+            "function createGlobalPagesImportantList(pages) {",
+            "function createGlobalPageCard(page, searchQuery = \"\") {",
+        )
+        self.assertIn('className: "global-pages-important"', list_block)
+        self.assertIn("onclick: () => openGlobalPageAtImportant(page),", list_block)
+
+        card_block = self._block(
+            script, "function createGlobalPageCard(page, searchQuery = \"\") {", "function renderChecklistsView() {"
+        )
+        self.assertIn('className: "global-page-important-badge"', card_block)
+
+        css = STYLES_CSS_PATH.read_text(encoding="utf-8")
+        self.assertIn(".global-pages-important {", css)
+        self.assertIn(".global-pages-important-row {", css)
+        self.assertIn(".global-page-important-badge {", css)
+
+    def test_workspace_page_open_scrolls_to_first_important_line(self):
+        script = SCRIPT_JS_PATH.read_text(encoding="utf-8")
+        opener = self._block(
+            script, "function openGlobalPageAtImportant(page) {", "function getProjectSubpageAncestors("
+        )
+        self.assertIn("pendingImportantPageScroll = true;", opener)
+        self.assertIn("void openGlobalPage(page);", opener)
+        render_block = self._block(script, "function renderPageView() {", "  if (!project) return;")
+        self.assertIn("const focusImportant = pendingImportantPageScroll;", render_block)
+        self.assertIn("        focusImportant,\n", render_block)
+        # Reopening the already-loaded page keeps its documentKey, so the editor
+        # also honors the request on every new context.
+        main = EDITOR_MAIN_PATH.read_text(encoding="utf-8")
+        self.assertIn("if (!editor || !context.focusImportant) return undefined;", main)
+        self.assertIn("  }, [context, editor]);", main)
+
+    def test_email_only_important_line_is_named_by_subject(self):
+        script = SCRIPT_JS_PATH.read_text(encoding="utf-8")
+        reader = self._block(
+            script,
+            "function readImportantNodeText(node) {",
+            "function extractImportantPageLines(html, source) {",
+        )
+        self.assertIn('node.querySelectorAll(".page-email[data-email-label]")', reader)
+        self.assertIn('const emails = `Email: ${subjects.join(", ")}`;', reader)
+        self.assertIn("return text ? `${text} · ${emails}` : emails;", reader)
 
     def test_pdf_renderer_preserves_important_lines(self):
         main_py = MAIN_PY_PATH.read_text(encoding="utf-8")

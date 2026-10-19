@@ -101,7 +101,7 @@ class PageEmailAttachmentUiTests(unittest.TestCase):
         main = EDITOR_MAIN_PATH.read_text(encoding="utf-8")
         insert_block = self._block(
             main,
-            "function insertPageEmailAtPos(emailRef, pos) {",
+            "function insertPageEmailAtPos(emailRef, pos, options = {}) {",
             "function resolveAndInsertEmail(pending, pos) {",
         )
         self.assertIn("while (depth > 0 && !$pos.node(depth).isTextblock) depth -= 1;", insert_block)
@@ -166,6 +166,82 @@ class PageEmailAttachmentUiTests(unittest.TestCase):
         self.assertIn('return { emailRef, source: "entry-drop" };', resolve_block)
         self.assertIn('return { emailRef, source: "url-drop" };', resolve_block)
         self.assertIn("outlookDrop: looksLikeOutlookDrop(captured.types),", resolve_block)
+
+    def test_new_outlook_row_payload_becomes_web_deeplink_refs(self):
+        script = SCRIPT_JS_PATH.read_text(encoding="utf-8")
+        # Captured from new Outlook (olk.exe) on 2026-10-19: no file, only this type.
+        self.assertIn('const NEW_OUTLOOK_DROP_TYPE = "multimaillistmessagerows";', script)
+        self.assertIn(
+            'const NEW_OUTLOOK_READ_DEEPLINK = "https://outlook.office.com/mail/deeplink/read/";',
+            script,
+        )
+        parse_block = self._block(
+            script,
+            "function parseNewOutlookDropRows(text) {",
+            "function captureEmailDropSources(dt) {",
+        )
+        self.assertIn("payload?.latestItemIds", parse_block)
+        self.assertIn("payload?.subjects", parse_block)
+        self.assertIn("`${NEW_OUTLOOK_READ_DEEPLINK}${encodeURIComponent(id)}`", parse_block)
+        self.assertIn('source: "outlook-url",', parse_block)
+
+        sources_block = self._block(
+            script, "function captureEmailDropSources(dt) {", "function readEntryAsFile(entry) {"
+        )
+        # Read synchronously with the other sources, before the DataTransfer dies.
+        self.assertIn(
+            "newOutlookRefs: parseNewOutlookDropRows(getTransferDataText(dt, NEW_OUTLOOK_DROP_TYPE)),",
+            sources_block,
+        )
+        resolve_block = self._block(
+            script,
+            "async function resolveEmailRefFromCapturedDrop(captured, context = {}) {",
+            "async function resolveEmailRefFromDrop(event, context = {}) {",
+        )
+        self.assertIn(
+            'return { emailRef: newOutlookRefs[0], emailRefs: newOutlookRefs, source: "new-outlook-drop" };',
+            resolve_block,
+        )
+        page_block = self._block(
+            script,
+            "async function resolvePageEmailDropRef(event, context = {}) {",
+            "async function requestPageEmailRef(context = {}) {",
+        )
+        self.assertIn("emailRefs: result.emailRefs || [result.emailRef],", page_block)
+
+    def test_editor_claims_new_outlook_drops_and_flags_them_important(self):
+        main = EDITOR_MAIN_PATH.read_text(encoding="utf-8")
+        gate = self._block(
+            main,
+            "function looksLikeExternalEmailDrop(dataTransfer) {",
+            "function clearEmailDropTarget(view) {",
+        )
+        self.assertIn('if (types.includes("multimaillistmessagerows")) return true;', gate)
+
+        insert_block = self._block(
+            main,
+            "function insertPageEmailAtPos(emailRef, pos, options = {}) {",
+            "function resolveAndInsertEmail(pending, pos) {",
+        )
+        self.assertIn("if (!options.markImportant) return true;", insert_block)
+        self.assertIn("findImportantBlock(tr.doc.resolve(chipPos))", insert_block)
+        self.assertIn('tr.setNodeAttribute(block.pos, "important", true);', insert_block)
+
+        perform_block = self._block(
+            main,
+            "async function performResolveAndInsertEmail(pending, anchor) {",
+            "function attachDroppedEmail(pending, pos) {",
+        )
+        self.assertIn("result.emailRefs", perform_block)
+        self.assertIn(
+            "insertPageEmailAtPos(emailRef, anchor?.position, { markImportant: true });",
+            perform_block,
+        )
+
+        bundle = (
+            REPO_ROOT / "project-pages-editor" / "dist" / "project-pages-editor.js"
+        ).read_text(encoding="utf-8", errors="ignore")
+        self.assertIn("multimaillistmessagerows", bundle)
 
     def test_existing_drop_call_sites_keep_their_entry_point(self):
         script = SCRIPT_JS_PATH.read_text(encoding="utf-8")

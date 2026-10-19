@@ -102,6 +102,8 @@ const PAGE_EMAIL_DROP_BLOCK_SELECTOR = "p, h1, h2, h3, li, blockquote, td, th, p
 function looksLikeExternalEmailDrop(dataTransfer) {
   const types = Array.from(dataTransfer?.types || []).map((type) => String(type).toLowerCase());
   if (types.includes("files")) return true;
+  // New Outlook carries only a JSON row payload (subject + item id), no file.
+  if (types.includes("multimaillistmessagerows")) return true;
   return types.some(
     (type) => type.startsWith("filegroupdescriptor") || type.startsWith("renprivate") ||
       type.startsWith("filecontents") || type.startsWith("application/x-moz-file-promise")
@@ -661,7 +663,7 @@ const SLASH_COMMANDS = [
   { id: "todo", label: "Todo", shortcut: "[]", group: "block" },
   { id: "quote", label: "Quote", shortcut: ">", group: "block" },
   { id: "callout", label: "Callout", shortcut: "!", group: "block" },
-  { id: "important", label: "Important", shortcut: "!!", group: "block", projectOnly: true },
+  { id: "important", label: "Important", shortcut: "!!", group: "block" },
   { id: "toggle", label: "Toggle", shortcut: ">v", group: "block" },
   { id: "table", label: "Table", shortcut: "3x3", group: "block" },
   { id: "code", label: "Code block", shortcut: "```", group: "block" },
@@ -1167,6 +1169,19 @@ function PageEditor({ context, options }) {
     void hydrateImages();
   }, [context.documentKey, hydrateImages]);
 
+  // Reopening the page that is already loaded keeps its documentKey, so the effect
+  // above does not run again; each setDocument passes a new context, though.
+  useEffect(() => {
+    if (!editor || !context.focusImportant) return undefined;
+    const frame = requestAnimationFrame(() => {
+      if (editor.isDestroyed) return;
+      editor.view.dom
+        .querySelector('[data-important="true"]')
+        ?.scrollIntoView({ block: "center", behavior: "auto" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [context, editor]);
+
   useEffect(() => {
     void hydrateWorkbooks();
   }, [context.documentKey, hydrateWorkbooks]);
@@ -1417,7 +1432,7 @@ function PageEditor({ context, options }) {
     } finally { anchor.release(); }
   }
 
-  function insertPageEmailAtPos(emailRef, pos) {
+  function insertPageEmailAtPos(emailRef, pos, options = {}) {
     if (!editor || editor.isDestroyed || !emailRef) return;
     const attrs = {};
     PAGE_EMAIL_ATTRS.forEach(([key]) => {
@@ -1436,7 +1451,27 @@ function PageEditor({ context, options }) {
       // split a word at the pointer.
       insertAt = depth > 0 ? $pos.end(depth) : pos;
     }
-    editor.chain().focus().insertContentAt(insertAt, { type: "pageEmail", attrs }).run();
+    editor
+      .chain()
+      .focus()
+      .insertContentAt(insertAt, { type: "pageEmail", attrs })
+      .command(({ tr }) => {
+        // A saved email is something to address, so its line joins the important
+        // rollup in the same undo step. Inserting at the document level wraps the
+        // chip in a new paragraph, which shifts it one position right.
+        if (!options.markImportant) return true;
+        const end = Math.min(insertAt + 2, tr.doc.content.size);
+        let chipPos = null;
+        tr.doc.nodesBetween(Math.max(0, insertAt - 1), end, (node, nodePos) => {
+          if (chipPos == null && node.type.name === "pageEmail" && node.attrs.raw === attrs.raw) {
+            chipPos = nodePos;
+          }
+        });
+        const block = chipPos == null ? null : findImportantBlock(tr.doc.resolve(chipPos));
+        if (block) tr.setNodeAttribute(block.pos, "important", true);
+        return true;
+      })
+      .run();
   }
 
   function resolveAndInsertEmail(pending, pos) {
@@ -1456,7 +1491,13 @@ function PageEditor({ context, options }) {
       if (result?.message) context.onToast?.(result.message);
       return;
     }
-    insertPageEmailAtPos(result.emailRef, anchor?.position);
+    // New Outlook can drag several messages at once; each gets its own chip.
+    const emailRefs = Array.isArray(result.emailRefs) && result.emailRefs.length
+      ? result.emailRefs
+      : [result.emailRef];
+    emailRefs.forEach((emailRef) => {
+      insertPageEmailAtPos(emailRef, anchor?.position, { markImportant: true });
+    });
   }
 
   function attachDroppedEmail(pending, pos) {
