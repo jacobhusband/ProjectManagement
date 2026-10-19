@@ -179,6 +179,34 @@ class PrepareXrefsCoreTests(unittest.TestCase):
             self.assertEqual(4, int(flags[0]) & 4)
             self.assertIn(int(flags[1]), (0, -1))
 
+    def test_selected_drawing_with_image_keeps_it_by_file_name(self):
+        # Revit sheet exports carry title block logos as images. The sheet is still delivered,
+        # with each image's saved folder dropped so it resolves beside the DWG in Xrefs.
+        png = bytes.fromhex(
+            '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489'
+            '0000000d49444154789c6360f8cfc000000301010018dd8db00000000049454e44ae426082')
+        with tempfile.TemporaryDirectory(prefix='acies-xref-logo-') as temporary:
+            project = Path(temporary)
+            arch = project / 'Arch'
+            arch.mkdir()
+            logo = arch / 'logo.png'
+            logo.write_bytes(png)
+            source = self.fixture(arch, 'A07-07.dwg',
+                '(command "_.LINE" "0,0" "1,0" "")\n'
+                f'(command "_.-IMAGE" "_Attach" "{logo.as_posix()}" "0,0" 1 0)')
+            output = self.run_tool(source)
+            self.assertNotIn('failed to process', output)
+            self.assertIn('Verified clean on reopen', output)
+            target = project / 'Xrefs/A07-07 (E).dwg'
+            self.assertTrue(target.is_file(), output)
+            report = project / 'logo.txt'
+            self.core(project, f'''(setq f (open "{report.as_posix()}" "w"))
+(setq d (dictsearch (namedobjdict) "ACAD_IMAGE_DICT"))
+(prin1 (cdr (assoc 1 (entget (cdr (assoc 350 d))))) f)
+(close f)''', target)
+            saved = report.read_text().strip().strip('"')
+            self.assertEqual('logo.png', saved.removeprefix('.\\\\').removeprefix('.\\'))
+
     def test_setbylayer_skips_empty_modelspace_without_failing(self):
         # Cover and notes sheets can have nothing in modelspace. SETBYLAYER then
         # asks no questions, and the drawing must not be reported as failed.

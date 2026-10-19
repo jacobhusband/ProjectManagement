@@ -167,6 +167,7 @@ namespace Acies.PrepareXrefs
                     HostApplicationServices.WorkingDatabase = db;
                     DetachMissing(db, source);
                     var refs = new Dictionary<ObjectId, string>();
+                    var media = new HashSet<ObjectId>();
                     using (var tr = db.TransactionManager.StartTransaction())
                     {
                         foreach (ObjectId id in (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead))
@@ -185,7 +186,14 @@ namespace Acies.PrepareXrefs
                                 {
                                     var entity = tr.GetObject(entityId, OpenMode.ForRead);
                                     if ((entity is RasterImage && !(entity is Wipeout)) || entity is UnderlayReference)
-                                        throw new UnbindableException("External image or underlay in " + source + ". Prepare this drawing manually to preserve its supporting media.");
+                                    {
+                                        // A nested reference with media cannot be bound in Core Console. The selected
+                                        // drawing is only saved, so its images (e.g. title block logos) stay attached.
+                                        if (nested)
+                                            throw new UnbindableException("External image or underlay in " + source + ". Prepare this drawing manually to preserve its supporting media.");
+                                        var definitionId = entity is RasterImage image ? image.ImageDefId : ((UnderlayReference)entity).DefinitionId;
+                                        if (!definitionId.IsNull) media.Add(definitionId);
+                                    }
                                     // AutoCAD refuses to bind an XREF holding proxy (e.g. AEC) objects.
                                     if (nested && entity is ProxyEntity)
                                         throw new UnbindableException("Proxy objects in " + source + " cannot be bound.");
@@ -197,6 +205,26 @@ namespace Acies.PrepareXrefs
                                             throw new UnbindableException("Clipped XREF in " + source + ". Prepare this reference manually to preserve its clipping.");
                                     }
                                 }
+                        }
+                        // Drop the saved folder so each image resolves by file name beside the delivered DWG.
+                        foreach (var id in media)
+                        {
+                            var definition = tr.GetObject(id, OpenMode.ForWrite);
+                            var path = definition is RasterImageDef imageDef ? imageDef.SourceFileName : ((UnderlayDefinition)definition).SourceFileName;
+                            var fileName = Path.GetFileName(path);
+                            // ".\logo.png" already resolves beside the drawing.
+                            if (string.IsNullOrEmpty(fileName) || fileName == path || path == "." + Path.DirectorySeparatorChar + fileName) continue;
+                            var console = Application.DocumentManager.MdiActiveDocument.Editor;
+                            try
+                            {
+                                if (definition is RasterImageDef rasterDef) rasterDef.SourceFileName = fileName;
+                                else ((UnderlayDefinition)definition).SourceFileName = fileName;
+                                console.WriteMessage("\nPROGRESS: Removed saved path from image/underlay '" + path + "'\n");
+                            }
+                            catch (Autodesk.AutoCAD.Runtime.Exception error)
+                            {
+                                console.WriteMessage("\nPROGRESS: WARNING: Kept saved path of image/underlay '" + path + "' (" + error.Message + ")\n");
+                            }
                         }
                         tr.Commit();
                     }

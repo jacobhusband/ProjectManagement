@@ -22,9 +22,11 @@ A referenced drawing that cannot be bound faithfully is left attached as an XREF
 with a `WARNING` progress line, and the wrapper copies it to Xrefs when no file of
 that name is there yet (an existing file is never replaced). This covers drawings
 holding external images or underlays (title blocks with the ACIES logo), clipped
-XREFs, and proxy objects, which AutoCAD cannot bind in Core Console. The same
-conditions in the selected drawing itself still fail it, since nothing else can
-carry them.
+XREFs, and proxy objects, which AutoCAD cannot bind in Core Console. Clipped
+XREFs in the selected drawing itself still fail it, since nothing else can carry
+them. Its own images and underlays (title block logos on sheet exports) stay
+attached with their saved folder removed, so they resolve by file name beside the
+delivered DWG.
 
 Binding first merges symbol names (Insert style). If AutoCAD rejects that
 (`eInvalidSymbolTableName`), the drawing is prepared again from the originals with
