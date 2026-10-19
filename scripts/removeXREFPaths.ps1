@@ -556,11 +556,18 @@ $lisp = Join-Path $env:TEMP "cleanup_tmp.lsp"
 $setByLayerBlock = ""
 if ($SetByLayer) {
   $setByLayerBlock = @'
-  ;; Use SETBYLAYER on everything in the current space
-  ;;   "Y" => Change ByBlock to ByLayer?
-  ;;   "Y" => Include blocks?
-  (command
-    "_.-SETBYLAYER" "All" "" "Y" "Y")
+  ;; Use SETBYLAYER on everything in the current space, then answer "Yes" to
+  ;; each prompt it actually asks ("Change ByBlock to ByLayer?", "Include
+  ;; blocks?"). It skips prompts that do not apply and asks none when nothing
+  ;; is selectable (empty modelspace); fixed answers would then run as
+  ;; "Unknown command" and fail the drawing. CMDACTIVE bit 1 is the command
+  ;; itself (script and AutoLISP set other bits).
+  (command "_.-SETBYLAYER" "All" "")
+  (setq i 0)
+  (while (and (= 1 (logand 1 (getvar "CMDACTIVE"))) (< i 4))
+    (command "_Y")
+    (setq i (1+ i))
+  )
 
 '@
 }

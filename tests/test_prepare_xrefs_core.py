@@ -34,10 +34,11 @@ class PrepareXrefsCoreTests(unittest.TestCase):
         self.assertTrue(drawing.is_file(), output)
         return drawing
 
-    def run_tool(self, source, manifest=False):
+    def run_tool(self, source, manifest=False, set_by_layer=False):
         args = ['powershell.exe', '-NoProfile', '-File', str(ROOT / 'scripts/removeXREFPaths.ps1'),
                 '-AcadCore', os.environ['ACIES_TEST_CORE'], '-DisciplineShort', 'E',
-                '-StripXrefs', '0', '-SetByLayer', '0', '-HatchColor', '0', '-Audit', '1', '-Purge', '1']
+                '-StripXrefs', '0', '-SetByLayer', '1' if set_by_layer else '0',
+                '-HatchColor', '0', '-Audit', '1', '-Purge', '1']
         if manifest:
             args += ['-SourceManifestPath', str(source)]
         else:
@@ -177,6 +178,46 @@ class PrepareXrefsCoreTests(unittest.TestCase):
             # title stays an XREF (flag 4 set); leaf was bound into an ordinary block (flag 4 clear).
             self.assertEqual(4, int(flags[0]) & 4)
             self.assertIn(int(flags[1]), (0, -1))
+
+    def test_setbylayer_skips_empty_modelspace_without_failing(self):
+        # Cover and notes sheets can have nothing in modelspace. SETBYLAYER then
+        # asks no questions, and the drawing must not be reported as failed.
+        with tempfile.TemporaryDirectory(prefix='acies-xref-empty-') as temporary:
+            project = Path(temporary)
+            arch = project / 'Arch'
+            arch.mkdir()
+            source = self.fixture(arch, 'A05-05.dwg', '(setvar "USERI1" 1)')
+            output = self.run_tool(source, set_by_layer=True)
+            self.assertNotIn('Unknown command', output)
+            self.assertNotIn('failed to process', output)
+            self.assertIn('Verified clean on reopen', output)
+
+    def test_setbylayer_still_resets_modelspace_colors(self):
+        with tempfile.TemporaryDirectory(prefix='acies-xref-bylayer-') as temporary:
+            project = Path(temporary)
+            arch = project / 'Arch'
+            arch.mkdir()
+            # A block reference with a ByBlock line makes SETBYLAYER ask both questions.
+            source = self.fixture(arch, 'A06-06.dwg',
+                '(command "_.LINE" "0,0" "1,0" "")\n'
+                '(command "_.CHPROP" (entlast) "" "_Color" "1" "")\n'
+                '(command "_.LINE" "5,0" "6,0" "")\n'
+                '(command "_.CHPROP" (entlast) "" "_Color" "_ByBlock" "")\n'
+                '(command "_.-BLOCK" "BB" "5,0" (entlast) "")\n'
+                '(command "_.-INSERT" "BB" "5,0" 1 1 0)')
+            output = self.run_tool(source, set_by_layer=True)
+            self.assertNotIn('Unknown command', output)
+            self.assertNotIn('failed to process', output)
+            target = project / 'Xrefs/A06-06 (E).dwg'
+            report = project / 'color.txt'
+            self.core(project, f'''(setq f (open "{report.as_posix()}" "w"))
+(prin1 (cdr (assoc 62 (entget (ssname (ssget "_X" '((0 . "LINE"))) 0)))) f)
+(write-line "" f)
+(prin1 (cdr (assoc 62 (entget (cdr (assoc -2 (tblsearch "BLOCK" "BB")))))) f)
+(close f)''', target)
+            # Group 62 is absent (nil) or 256 when the color is ByLayer.
+            for color in report.read_text().splitlines():
+                self.assertIn(color.strip(), ('nil', '256'))
 
 
 if __name__ == '__main__':

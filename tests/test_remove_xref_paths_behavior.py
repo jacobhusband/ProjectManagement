@@ -332,6 +332,16 @@ class RemoveXrefPathsBehaviorTests(unittest.TestCase):
         self.assertIn('(setvar "CTAB" "Model")', text)
         self.assertNotIn('(command "_.MODEL")', text)
 
+    def test_cleanup_lisp_answers_only_the_setbylayer_prompts_asked(self):
+        text = SCRIPT_PATH.read_text(encoding="utf-8")
+
+        # An empty modelspace selects nothing, so SETBYLAYER ends before its
+        # Yes/No prompts. Fixed "Y" "Y" answers then ran as "Unknown command"
+        # and flagged a correctly cleaned drawing as failed.
+        self.assertIn('(command "_.-SETBYLAYER" "All" "")', text)
+        self.assertIn('(while (and (= 1 (logand 1 (getvar "CMDACTIVE"))) (< i 4))', text)
+        self.assertNotIn('"_.-SETBYLAYER" "All" "" "Y" "Y"', text)
+
     def test_script_verifies_processed_drawings_reopen_cleanly(self):
         text = SCRIPT_PATH.read_text(encoding="utf-8")
 
