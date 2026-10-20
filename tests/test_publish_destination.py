@@ -114,5 +114,95 @@ class PublishDestinationTests(unittest.TestCase):
         self.assertFalse((outside / 'set.pdf').exists())
 
 
+class PublishSaveAsTests(unittest.TestCase):
+    """"Save set as..." moves the set to any chosen path, replacing only when asked."""
+
+    def setUp(self):
+        self.api = Api.__new__(Api)
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        base = Path(self.temp.name)
+        self.source = base / 'AutoCAD Plots' / 'Example - Electrical.pdf'
+        self.source.parent.mkdir()
+        self.source.write_bytes(b'%PDF-1.4\nnew set')
+        self.folder = base / 'Anywhere'
+        self.folder.mkdir()
+
+    def place(self, name, replace=False):
+        return self.api.place_published_pdf(str(self.source), str(self.folder / name), replace)
+
+    def test_saves_under_new_name_in_any_folder(self):
+        result = self.place('2026-10-19 MEP IFP.pdf')
+        self.assertEqual('success', result['status'])
+        target = self.folder / '2026-10-19 MEP IFP.pdf'
+        self.assertEqual(str(target), result['combinedPdfPath'])
+        self.assertEqual(str(self.folder), result['openFolderPath'])
+        self.assertEqual(b'%PDF-1.4\nnew set', target.read_bytes())
+        self.assertFalse(self.source.exists())
+
+    def test_replaces_existing_pdf_when_confirmed(self):
+        target = self.folder / 'Issued set.pdf'
+        target.write_bytes(b'old set')
+        result = self.place(target.name, replace=True)
+        self.assertEqual('success', result['status'])
+        self.assertIn('replaced', result['message'])
+        self.assertEqual(b'%PDF-1.4\nnew set', target.read_bytes())
+        self.assertFalse(self.source.exists())
+        self.assertEqual(['Issued set.pdf'], [p.name for p in self.folder.iterdir()])
+
+    def test_existing_pdf_kept_without_confirmation(self):
+        target = self.folder / 'Issued set.pdf'
+        target.write_bytes(b'old set')
+        self.assertEqual('error', self.place(target.name)['status'])
+        self.assertEqual(b'old set', target.read_bytes())
+        self.assertTrue(self.source.exists())
+
+    def test_locked_existing_pdf_is_left_alone(self):
+        target = self.folder / 'Issued set.pdf'
+        target.write_bytes(b'old set')
+        with patch('main.os.replace', side_effect=PermissionError('open in Bluebeam')):
+            result = self.place(target.name, replace=True)
+        self.assertEqual('error', result['status'])
+        self.assertIn('open in another program', result['message'])
+        self.assertEqual(b'old set', target.read_bytes())
+        self.assertTrue(self.source.exists())
+        self.assertEqual(['Issued set.pdf'], [p.name for p in self.folder.iterdir()])
+
+    def test_missing_folder_or_non_pdf_target_leaves_source(self):
+        missing = self.api.place_published_pdf(str(self.source), str(self.folder / 'Gone' / 'x.pdf'))
+        self.assertEqual('error', missing['status'])
+        self.assertEqual('error', self.place('set.txt')['status'])
+        self.assertTrue(self.source.exists())
+
+    def test_default_name_matches_plot_script(self):
+        dwg = r'M:\Client\2026\251391 San Mateo HS Pool\Electrical\E-1.0 Power.dwg'
+        self.assertEqual('San Mateo HS Pool - Electrical.pdf', self.api._default_publish_pdf_name(dwg))
+        self.assertEqual(
+            'San Mateo HS Pool.pdf',
+            self.api._default_publish_pdf_name('', r'M:\Client\2026\251391 San Mateo HS Pool'),
+        )
+        self.assertEqual('combined.pdf', self.api._default_publish_pdf_name())
+
+    def test_dialog_starts_in_pdf_folder_and_flags_replacement(self):
+        project = Path(self.temp.name) / '251391 Example'
+        pdf = project / 'PDF'
+        pdf.mkdir(parents=True)
+        existing = pdf / 'Old.pdf'
+        existing.write_bytes(b'old')
+        calls = []
+
+        def fake_dialog(dialog_type, **kwargs):
+            calls.append(kwargs)
+            return (str(existing),)
+
+        with patch.object(Api, '_create_file_dialog', side_effect=fake_dialog, create=True), \
+                patch.object(Api, '_get_file_dialog_type', return_value='SAVE', create=True):
+            result = self.api.select_publish_pdf_target(str(project))
+        self.assertEqual('success', result['status'])
+        self.assertTrue(result['replace'])
+        self.assertEqual(os.path.normcase(str(pdf)), os.path.normcase(calls[0]['directory']))
+        self.assertEqual('Example.pdf', calls[0]['save_filename'])
+
+
 if __name__ == '__main__':
     unittest.main()

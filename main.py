@@ -11904,6 +11904,138 @@ Return ONLY the JSON object.
                 except OSError:
                     pass  # Leave a folder another process has started using.
 
+    def _default_publish_pdf_name(self, sample_path='', project_path=''):
+        """Matches PlotDWGs.ps1: '<project> - <DWG folder>.pdf', else the project name."""
+        def project_label(folder):
+            name = os.path.basename(os.path.normpath(folder)) if folder else ''
+            return re.sub(r'^\s*\d{5,}\s*[-_.]*\s*', '', name).strip() or name
+
+        sample = str(sample_path or '').strip()
+        if sample.lower().endswith('.dwg'):
+            dwg_folder = os.path.dirname(sample)
+            project = project_label(os.path.dirname(dwg_folder))
+            name = f'{project} - {os.path.basename(dwg_folder)}' if project else ''
+        else:
+            name = project_label(str(project_path or '').strip())
+        name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '', name).strip(' .')
+        return f'{name or "combined"}.pdf'
+
+    def select_publish_pdf_target(self, project_path='', current_target='', sample_path=''):
+        """Asks where a Publish run's combined set goes, starting in the project PDF folder."""
+        try:
+            current = str(current_target or '').strip()
+            if current:
+                directory, file_name = os.path.split(current)
+            else:
+                root = str(project_path or '').strip()
+                if not root and str(sample_path or '').strip():
+                    root = self._find_project_root_by_id(str(sample_path).strip())
+                pdf_folder = self._resolve_deliverable_pdf_folder(
+                    {'path': root, 'localProjectPath': root}) if root else ''
+                directory = pdf_folder or root
+                file_name = self._default_publish_pdf_name(sample_path, root)
+            if not directory or not os.path.isdir(self._to_windows_extended_path(directory)):
+                directory = get_default_documents_dir()
+            selected = self._create_file_dialog(
+                self._get_file_dialog_type('SAVE'),
+                directory=directory,
+                save_filename=file_name,
+                file_types=('PDF Files (*.pdf)',),
+            )
+            if isinstance(selected, (list, tuple)):
+                selected = selected[0] if selected else ''
+            selected = str(selected or '').strip()
+            if not selected:
+                return {'status': 'cancelled'}
+            if not selected.lower().endswith('.pdf'):
+                selected += '.pdf'
+            selected = os.path.abspath(selected)
+            # The Windows Save As dialog has already asked before an existing file is chosen.
+            return {
+                'status': 'success', 'path': selected,
+                'replace': os.path.isfile(self._to_windows_extended_path(selected)),
+            }
+        except Exception as exc:
+            logging.error('Publish save-as dialog failed: %s', exc)
+            return {'status': 'error', 'message': str(exc)}
+
+    def place_published_pdf(self, combined_pdf_path, target_path, replace_existing=False):
+        """Moves the combined set to the chosen path, replacing that file only when asked."""
+        destination = None
+        destination_created = False
+        temp_path = ''
+        try:
+            source = os.path.abspath(str(combined_pdf_path or '').strip())
+            if not source.lower().endswith('.pdf') or not os.path.isfile(
+                self._to_windows_extended_path(source)
+            ):
+                raise ValueError('The published PDF is no longer available at its saved location.')
+            raw_target = str(target_path or '').strip()
+            if not raw_target.lower().endswith('.pdf'):
+                raise ValueError('Choose a PDF file to save the set as.')
+            target = os.path.abspath(raw_target)
+            folder, name = os.path.split(target)
+            if not os.path.isdir(self._to_windows_extended_path(folder)):
+                raise ValueError(f'The folder {folder} is no longer available.')
+            result = {
+                'status': 'success', 'combinedPdfPath': target, 'openFolderPath': folder,
+                'message': f'Published set saved as {name}.',
+            }
+            if os.path.normcase(os.path.realpath(source)) == os.path.normcase(os.path.realpath(target)):
+                return result
+            extended_target = self._to_windows_extended_path(target)
+            if os.path.exists(extended_target):
+                if replace_existing is not True:
+                    raise FileExistsError(target)
+                if not os.path.isfile(extended_target):
+                    raise ValueError(f'{name} is a folder, not a PDF.')
+                # Copy beside the old file first so it is only swapped out once the
+                # new set is complete; os.replace fails cleanly if the PDF is open.
+                handle, temp_path = tempfile.mkstemp(
+                    prefix='~publish-', suffix='.tmp',
+                    dir=self._to_windows_extended_path(folder),
+                )
+                with os.fdopen(handle, 'wb') as dst, open(self._to_windows_extended_path(source), 'rb') as src:
+                    shutil.copyfileobj(src, dst)
+                    dst.flush()
+                    os.fsync(dst.fileno())
+                try:
+                    os.replace(temp_path, extended_target)
+                except PermissionError:
+                    raise ValueError(
+                        f'{name} is open in another program. Close it and choose Save set as again.'
+                    ) from None
+                temp_path = ''
+                result['message'] = f'Published set replaced {name}.'
+            else:
+                destination = target
+                with open(self._to_windows_extended_path(source), 'rb') as src:
+                    with open(extended_target, 'xb') as dst:
+                        destination_created = True
+                        shutil.copyfileobj(src, dst)
+                        dst.flush()
+                        os.fsync(dst.fileno())
+                destination = None
+            try:
+                os.unlink(self._to_windows_extended_path(source))
+            except OSError as exc:
+                logging.warning('Saved published set but could not remove %s: %s', source, exc)
+            return result
+        except FileExistsError:
+            return {
+                'status': 'error',
+                'message': 'A PDF with that name now exists. Choose Save set as again to replace it; nothing was overwritten.',
+            }
+        except (OSError, ValueError) as exc:
+            return {'status': 'error', 'message': f'Could not save the set: {exc}'}
+        finally:
+            for leftover in (temp_path, destination if destination_created else ''):
+                if leftover:
+                    try:
+                        os.unlink(self._to_windows_extended_path(leftover))
+                    except OSError:
+                        logging.warning('Could not remove incomplete published PDF copy: %s', leftover)
+
     def _coerce_issue_date(self, match):
         """Builds a date from a YYYY/MM/DD regex match, rejecting nonsense years."""
         if not match:

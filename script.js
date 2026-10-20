@@ -9866,6 +9866,16 @@ function renderActivityTray() {
     });
     const isTerminal = isTerminalActivityStatus(status);
     const isQueued = isQueuedActivityStatus(status);
+    const publishTargetPath = !isTerminal ? String(item.publishTarget?.path || "") : "";
+    const publishTargetLine = publishTargetPath
+      ? el("div", {
+          className: "activity-card-target",
+          textContent: `Saves as: ${getWindowsPathLeaf(publishTargetPath)}${
+            item.publishTarget.replace ? " (replaces the existing PDF)" : ""
+          }`,
+          title: publishTargetPath,
+        })
+      : null;
     const startedAt = normalizeActivityTimestamp(item.startedAt, item.createdAt);
     const endedAt = isTerminal
       ? normalizeActivityTimestamp(item.endedAt, item.updatedAt)
@@ -9970,6 +9980,22 @@ function renderActivityTray() {
         })
       );
     }
+    if (canSavePublishedSetAs(item)) {
+      actions.appendChild(el("button", {
+        className: "activity-card-action", type: "button",
+        textContent: publishTargetPath ? "Change Save As" : "Save set as...",
+        title: isPublishedSetReady(item)
+          ? "Choose a folder and file name for the combined PDF"
+          : "Choose a folder and file name for the combined PDF; it is saved there when Publish finishes",
+        "data-activity-action": "save-published-set-as",
+        "data-activity-id": item.id,
+        onclick: (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          void handleActivitySavePublishedSetAs(item.id);
+        },
+      }));
+    }
     if (item.toolId === "toolPublishDwgs" && item.status === ACTIVITY_STATUS.SUCCESS && item.combinedPdfPath) {
       actions.appendChild(el("button", {
         className: "activity-card-action", type: "button", textContent: "Move set to PDF folder",
@@ -10071,7 +10097,9 @@ function renderActivityTray() {
       );
     }
 
-    content.append(header, message, timing, progress);
+    content.append(header, message);
+    if (publishTargetLine) content.append(publishTargetLine);
+    content.append(timing, progress);
     if (actions.childNodes.length) {
       content.appendChild(actions);
     }
@@ -10404,6 +10432,9 @@ function upsertActivity(nextItem, { autoExpandReason = "update" } = {}) {
     combinedPdfPath: String(
       incoming.combinedPdfPath || existing?.combinedPdfPath || ""
     ).trim(),
+    publishTarget: incoming.publishTarget === undefined
+      ? existing?.publishTarget || null
+      : incoming.publishTarget || null,
     dwgComparePairs: mergedDwgComparePairs,
     workflowTitle: String(
       incoming.workflowTitle || existing?.workflowTitle || ""
@@ -10873,6 +10904,11 @@ function buildActivityHistoryItem(entry) {
   if (entry.toolId === "toolPublishDwgs" && entry.status === ACTIVITY_STATUS.SUCCESS && entry.combinedPdfPath) {
     addAction("move-published-pdf", "Move set to PDF folder");
   }
+  if (isPublishedSetReady(entry)) {
+    addAction("save-published-set-as", "Save set as...", {
+      title: "Choose a folder and file name for the combined PDF",
+    });
+  }
   const comparePairs = entry.dwgComparePairs;
   comparePairs.forEach((pair, pairIndex) => {
     addAction(
@@ -11000,6 +11036,11 @@ async function handleActivityHistoryAction(button) {
   }
   if (action === "copy-combined-pdf") {
     await handleActivityTrayCopyCombinedPdf(activityId);
+    return;
+  }
+  if (action === "save-published-set-as") {
+    closeDlg("activityHistoryDlg");
+    void handleActivitySavePublishedSetAs(activityId);
     return;
   }
   if (action === "move-published-pdf") {
@@ -11212,6 +11253,86 @@ async function askPublishExcelRefresh(launchContext) {
   });
 }
 
+function getPublishActivityProjectPath(activity) {
+  return getLaunchContextProjectRoot(getServerLaunchContext(activity?.rerunLaunchContext)) ||
+    activity?.rerunDefaultPath || getActivityHistoryDrawingPaths(activity)[0] || "";
+}
+
+function isPublishedSetReady(activity) {
+  const status = String(activity?.status || "").trim().toLowerCase();
+  return activity?.toolId === "toolPublishDwgs" && Boolean(activity.combinedPdfPath) &&
+    (status === ACTIVITY_STATUS.SUCCESS || status === ACTIVITY_STATUS.WARNING);
+}
+
+function canSavePublishedSetAs(activity) {
+  if (activity?.toolId !== "toolPublishDwgs") return false;
+  return !isTerminalActivityStatus(activity.status) || isPublishedSetReady(activity);
+}
+
+// "Save set as..." on a queued or running Publish only records the path; the set is
+// moved there once it is combined. On a finished run it moves the set straight away.
+async function handleActivitySavePublishedSetAs(activityId) {
+  const activity = getActivityRecordById(activityId);
+  const api = window.pywebview?.api;
+  if (!activity || !api?.select_publish_pdf_target) return;
+  let result;
+  try {
+    result = await api.select_publish_pdf_target(
+      getPublishActivityProjectPath(activity),
+      activity.publishTarget?.path || "",
+      getActivityHistoryDrawingPaths(activity)[0] || ""
+    );
+  } catch (error) {
+    result = { status: "error", message: error?.message };
+  }
+  if (result?.status === "cancelled") return;
+  if (result?.status !== "success" || !result.path) {
+    toast(result?.message || "Could not choose where to save the set.");
+    return;
+  }
+  const publishTarget = { path: result.path, replace: result.replace === true };
+  // The run may have finished while the dialog was open.
+  const current = getActivityRecordById(activityId);
+  if (isPublishedSetReady(current)) {
+    await placePublishedSet(activityId, publishTarget);
+  } else if (current && !isTerminalActivityStatus(current.status)) {
+    updateActivity(activityId, { publishTarget });
+    toast(`The set will be saved as ${getWindowsPathLeaf(result.path)} when Publish finishes.`);
+  } else {
+    toast("Publish ended without a combined PDF, so there is nothing to save.");
+  }
+}
+
+const publishPlacementPending = new Set();
+
+async function placePublishedSet(activityId, target) {
+  const activity = getActivityRecordById(activityId);
+  const api = window.pywebview?.api;
+  if (!activity?.combinedPdfPath || !target?.path || !api?.place_published_pdf ||
+      publishPlacementPending.has(activityId)) return;
+  publishPlacementPending.add(activityId);
+  let patch;
+  try {
+    const placed = await api.place_published_pdf(
+      activity.combinedPdfPath, target.path, target.replace === true
+    );
+    if (placed?.status !== "success") throw new Error(placed?.message || "Could not save the set.");
+    patch = {
+      combinedPdfPath: placed.combinedPdfPath, openFolderPath: placed.openFolderPath,
+      openFolderLabel: "Open PDF Folder", message: placed.message, publishTarget: null,
+    };
+    toast(placed.message || "Published set saved.");
+  } catch (failure) {
+    const message = `${failure?.message || "Could not save the set."} It is still in the output folder.`;
+    patch = { message, publishTarget: null };
+    toast(message);
+  } finally {
+    publishPlacementPending.delete(activityId);
+  }
+  if (getActivityById(activityId)) updateActivity(activityId, patch);
+  else recordActivityHistory({ ...activity, ...patch });
+}
+
 // Published sets only move when the user clicks "Move set to PDF folder" on the activity.
 let publishDestinationQueue = Promise.resolve();
 const publishDestinationPending = new Set();
@@ -11232,8 +11353,7 @@ async function showPublishDestination(activityId) {
   const api = window.pywebview?.api;
   const dialog = document.getElementById("publishDestinationDlg");
   if (!activity?.combinedPdfPath || !dialog || !api?.get_publish_pdf_destinations) return;
-  const projectPath = getLaunchContextProjectRoot(getServerLaunchContext(activity.rerunLaunchContext)) ||
-    activity.rerunDefaultPath || getActivityHistoryDrawingPaths(activity)[0] || "";
+  const projectPath = getPublishActivityProjectPath(activity);
   const result = await api.get_publish_pdf_destinations(activity.combinedPdfPath, projectPath);
   if (result?.status !== "success") {
     toast(result?.message || "Could not find the project PDF folder.");
@@ -11469,6 +11589,10 @@ function updateActivityStatusFromPayload(payload = {}) {
       ...commonPatch,
       status,
     });
+    const finished = getActivityById(activityId);
+    if (finished?.publishTarget?.path && isPublishedSetReady(finished)) {
+      void placePublishedSet(activityId, finished.publishTarget);
+    }
     return activityId;
   }
   updateActivity(activityId, {

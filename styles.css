@@ -8004,6 +8004,13 @@ dialog::backdrop {
   overflow-wrap: anywhere;
 }
 
+.activity-card-target {
+  font-size: 0.74rem;
+  line-height: 1.4;
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
+
 .activity-card-timing {
   display: flex;
   flex-wrap: wrap;
