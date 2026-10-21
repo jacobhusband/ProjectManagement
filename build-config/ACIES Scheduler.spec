@@ -26,7 +26,7 @@ a = Analysis(
         (os.path.join(project_root, 'panel_schedule_export.css'), '.'),
         (os.path.join(project_root, 'panel_schedule_export_ui.js'), '.'),
         (os.path.join(project_root, 'vendor', 'chart.umd.min.js'), 'vendor'),
-        (os.path.join(project_root, '.env'), '.'),
+        (os.environ.get('ACIES_BUILD_ENV_FILE') or os.path.join(project_root, '.env'), '.'),
         (os.path.join(project_root, 'assets', 'acies.png'), 'assets'),
         (os.path.join(project_root, 'assets', 'acies-modern-logo.png'), 'assets'),
         (os.path.join(project_root, 'assets', 'lighting'), os.path.join('assets', 'lighting')),

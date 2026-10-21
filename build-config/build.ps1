@@ -1,4 +1,11 @@
+[CmdletBinding()]
+param(
+    # Include only desktop sign-in configuration; users enter their own AI API keys.
+    [switch]$ForDistribution
+)
+
 $ErrorActionPreference = "Stop"
+$originalBuildEnvFile = $env:ACIES_BUILD_ENV_FILE
 
 function Invoke-CheckedCommand {
     param(
@@ -132,7 +139,17 @@ try {
     # PyInstaller copies .env into the installer, and the installer is published publicly, so
     # anyone can read it. The release workflow leaves the Gemini key out; a local .env used for
     # running from source usually has one, so say so before it ends up in a build.
-    if ((Get-Content -Raw -LiteralPath $envPath) -match '(?m)^\s*GOOGLE_API_KEY\s*=\s*["'']?[^"''\s]') {
+    if ($ForDistribution) {
+        $distributionEnvPath = Join-Path $projectRoot "build\distribution-config\.env"
+        Invoke-CheckedCommand -Description "Prepare distribution configuration" -Command {
+            & $venvPython (Join-Path $PSScriptRoot "distribution_env.py") $envPath $distributionEnvPath
+        }
+        $env:ACIES_BUILD_ENV_FILE = $distributionEnvPath
+        Write-Host "Distribution build: personal API keys are excluded; desktop sign-in configuration is included." -ForegroundColor Gray
+    } else {
+        $env:ACIES_BUILD_ENV_FILE = $envPath
+    }
+    if (-not $ForDistribution -and (Get-Content -Raw -LiteralPath $envPath) -match '(?m)^\s*GOOGLE_API_KEY\s*=\s*["'']?[^"''\s]') {
         Write-Warning ".env contains GOOGLE_API_KEY, so it will be bundled into this build. Do not publish or share this installer; the release workflow builds without it."
     }
     Write-Host "Using Python: $venvPython" -ForegroundColor Gray
@@ -201,6 +218,11 @@ try {
     $bundleInternal = Join-Path $bundleOutput "_internal"
     $setupOutput = Join-Path $projectRoot "dist\setup"
     foreach ($path in @($bundleOutput, $setupOutput)) {
+        $resolvedOutput = [System.IO.Path]::GetFullPath($path)
+        $expectedParent = [System.IO.Path]::GetFullPath((Join-Path $projectRoot "dist"))
+        if ((Split-Path $resolvedOutput -Parent) -ne $expectedParent) {
+            throw "Refusing to clean output outside the project's dist directory: $resolvedOutput"
+        }
         if (Test-Path $path) {
             Write-Host "Cleaning $path" -ForegroundColor Gray
             Remove-Item -Recurse -Force $path
@@ -330,4 +352,6 @@ try {
 } catch {
     Write-Error $_
     exit 1
+} finally {
+    $env:ACIES_BUILD_ENV_FILE = $originalBuildEnvFile
 }

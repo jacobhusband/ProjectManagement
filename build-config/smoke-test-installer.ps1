@@ -248,7 +248,7 @@ try {
     $env:USERPROFILE = $profileDir; $env:APPDATA = "$profileDir\AppData\Roaming"; $env:LOCALAPPDATA = "$profileDir\AppData\Local"
     $env:TEMP = "$profileDir\Temp"; $env:TMP = "$profileDir\Temp"; $env:ACIES_NONINTERACTIVE = "1"
     $logPath = "$profileDir\Documents\ProjectManagementApp\logs\acies-scheduler.log"
-    $app = Start-Process -FilePath $exe -WorkingDirectory $appDir -PassThru
+    $app = Start-Process -FilePath $exe -WorkingDirectory $appDir -WindowStyle Hidden -PassThru
     foreach ($name in $saved.Keys) { Set-Item -Path "Env:$name" -Value $saved[$name] }
     $bootOk = $false; $bootDetail = ""
     $deadline = (Get-Date).AddSeconds($BootTimeoutSeconds)
@@ -283,7 +283,13 @@ try {
     Add-Result "Smoke test ran to the end" $false $_.Exception.Message
 } finally {
     $env:ACIES_PDF_PYTHON = $null
-    Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+    $resolvedWork = [System.IO.Path]::GetFullPath($work)
+    $expectedTempParent = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\')
+    if ((Split-Path $resolvedWork -Parent) -eq $expectedTempParent -and (Split-Path $resolvedWork -Leaf) -match '^acies-smoke-[0-9a-f]{8}$') {
+        Remove-Item -LiteralPath $resolvedWork -Recurse -Force -ErrorAction SilentlyContinue
+    } else {
+        throw "Refusing to clean an unexpected smoke-test directory: $resolvedWork"
+    }
 }
 
 # ---------------------------------------------------------------- report
