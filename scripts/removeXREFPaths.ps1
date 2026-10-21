@@ -4,6 +4,7 @@ param(
   [string]$FilesListPath = "",
   [string]$SourceManifestPath = "",
   [string]$DefaultDirectory = "",
+  [string]$SelectionOutputPath = "",
   [int]$StripXrefs = 1,
   [int]$SetByLayer = 1,
   [int]$Purge = 1,
@@ -60,6 +61,7 @@ if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
   if ($SourceManifestPath) { $argsList += @("-SourceManifestPath", "`"$SourceManifestPath`"") }
   $argsList += @('-BindExplode', $BindExplode)
   if ($DefaultDirectory) { $argsList += @("-DefaultDirectory", "`"$DefaultDirectory`"") }
+  if ($SelectionOutputPath) { $argsList += @("-SelectionOutputPath", "`"$SelectionOutputPath`"") }
   if ($PSBoundParameters.ContainsKey('StripXrefs')) { $argsList += @("-StripXrefs", $StripXrefs) }
   if ($PSBoundParameters.ContainsKey('SetByLayer')) { $argsList += @("-SetByLayer", $SetByLayer) }
   if ($PSBoundParameters.ContainsKey('Purge')) { $argsList += @("-Purge", $Purge) }
@@ -399,6 +401,78 @@ function Read-SourceManifest {
   return @($items)
 }
 
+# Opens the DWG/ZIP picker, then the drawing list for each chosen ZIP. Returns
+# nothing when the user cancels or picks nothing.
+function Select-SourceItemsWithDialog {
+  param([string]$InitialDirectory = "")
+
+  Write-Host "PROGRESS: Opening DWG file picker..."
+  $sourceSelections = Show-DwgFileDialog -InitialDirectory $InitialDirectory
+  if (-not $sourceSelections -or @($sourceSelections).Count -eq 0) { return @() }
+
+  $filesFromDialog = @(
+    @($sourceSelections) |
+      ForEach-Object { $_.ToString().Trim() } |
+      Where-Object {
+        $_ -and
+        (Test-Path -LiteralPath $_) -and
+        ([IO.Path]::GetExtension($_) -iin @('.dwg', '.zip'))
+      } |
+      ForEach-Object { [IO.Path]::GetFullPath($_) } |
+      Select-Object -Unique
+  )
+  return @($filesFromDialog | ForEach-Object {
+    if ([IO.Path]::GetExtension($_) -ieq '.zip') {
+      Show-ZipDwgDialog -ZipPath $_
+    }
+    else { New-FileSourceItem -Path $_ }
+  })
+}
+
+# Writes source items in the format Read-SourceManifest reads back.
+function Write-SourceManifest {
+  param(
+    [object[]]$SourceItems = @(),
+    [Parameter(Mandatory = $true)][string]$ManifestPath
+  )
+
+  $entries = @(@($SourceItems) | Where-Object { $_ } | ForEach-Object {
+    if ($_.Kind -eq "zipEntry") {
+      [ordered]@{
+        kind = "zipEntry"
+        zipPath = [string]$_.ZipPath
+        entryName = [string]$_.EntryName
+        projectRoot = [string]$_.ProjectRoot
+        displayPath = [string]$_.DisplayPath
+      }
+    }
+    else {
+      [ordered]@{
+        kind = "file"
+        path = [string]$_.Path
+        projectRoot = [string]$_.ProjectRoot
+        displayPath = [string]$_.DisplayPath
+      }
+    }
+  })
+  $json = ConvertTo-Json -InputObject $entries -Depth 3
+  [IO.File]::WriteAllText($ManifestPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+# The app asks for the drawings before a run waits for its turn, so a queued run
+# starts without input. This mode only asks and records the answer.
+if ($SelectionOutputPath) {
+  $selectedItems = @(Select-SourceItemsWithDialog -InitialDirectory $DefaultDirectory)
+  Write-SourceManifest -SourceItems $selectedItems -ManifestPath $SelectionOutputPath
+  if ($selectedItems.Count -eq 0) {
+    Write-Host "PROGRESS: Cancelled. No DWG files selected."
+  }
+  else {
+    Write-Host "PROGRESS: Selected $($selectedItems.Count) DWG source(s)."
+  }
+  exit 0
+}
+
 function Resolve-SourceItemToWorkingSource {
   param(
     [Parameter(Mandatory = $true)]$SourceItem,
@@ -692,7 +766,7 @@ $sourceItems = @()
 if (-not [string]::IsNullOrWhiteSpace($SourceManifestPath) -and (Test-Path -LiteralPath $SourceManifestPath)) {
   $sourceItems = @(Read-SourceManifest -ManifestPath $SourceManifestPath)
   if ($sourceItems.Count -gt 0) {
-    Write-Host "PROGRESS: Using $($sourceItems.Count) DWG source(s) from workflow selection."
+    Write-Host "PROGRESS: Using $($sourceItems.Count) selected DWG source(s)."
   }
   else {
     Write-Host "PROGRESS: Provided source manifest was empty. Opening DWG file picker..."
@@ -727,30 +801,7 @@ elseif (($sourceItems.Count -eq 0) -and -not [string]::IsNullOrWhiteSpace($Files
 }
 
 if ($sourceItems.Count -eq 0) {
-  Write-Host "PROGRESS: Opening DWG file picker..."
-  $sourceSelections = Show-DwgFileDialog -InitialDirectory $DefaultDirectory
-  if (-not $sourceSelections -or @($sourceSelections).Count -eq 0) {
-    Write-Host "PROGRESS: Cancelled. No files selected."
-    return
-  }
-
-  $filesFromDialog = @(
-    @($sourceSelections) |
-      ForEach-Object { $_.ToString().Trim() } |
-      Where-Object {
-        $_ -and
-        (Test-Path -LiteralPath $_) -and
-        ([IO.Path]::GetExtension($_) -iin @('.dwg', '.zip'))
-      } |
-      ForEach-Object { [IO.Path]::GetFullPath($_) } |
-      Select-Object -Unique
-  )
-  $sourceItems = @($filesFromDialog | ForEach-Object {
-    if ([IO.Path]::GetExtension($_) -ieq '.zip') {
-      Show-ZipDwgDialog -ZipPath $_
-    }
-    else { New-FileSourceItem -Path $_ }
-  })
+  $sourceItems = @(Select-SourceItemsWithDialog -InitialDirectory $DefaultDirectory)
 }
 
 if ($sourceItems.Count -eq 0) {

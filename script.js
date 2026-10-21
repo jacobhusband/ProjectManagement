@@ -37913,6 +37913,28 @@ function initEventListeners() {
         await showAutocadSelectModal();
         return;
       }
+      // Ask for the drawings before queueing, so a run waiting behind another
+      // starts on its own. Reruns keep the original context and ask again.
+      let runContext = launchContext;
+      try {
+        const selection = await window.pywebview.api.select_clean_xrefs_sources(
+          launchContext || null
+        );
+        if (selection?.status === "cancelled") return;
+        if (selection?.status === "error") {
+          toast(selection.message || "Could not select drawings for XREF.");
+          return;
+        }
+        if (selection?.status === "success") {
+          runContext = { ...(launchContext || {}), dwgFileSources: selection.sources };
+        }
+      } catch (error) {
+        toast(error?.message || "Could not select drawings for XREF.");
+        return;
+      }
+      const sourcePaths = (runContext?.dwgFileSources || []).map(
+        (source) => source.projectRoot || source.path || source.zipPath
+      );
       const activityId = beginActivity({
         toolId: "toolCleanXrefs",
         message: "Initializing...",
@@ -37920,10 +37942,10 @@ function initEventListeners() {
         rerunLaunchContext: launchContext,
         rerunDefaultPath: getLaunchContextProjectRoot(launchContext),
       });
-      if (!(await waitForToolTurn(activityId, "toolCleanXrefs", launchContext))) return;
+      if (!(await waitForToolTurn(activityId, "toolCleanXrefs", runContext, sourcePaths))) return;
       try {
-        const result = launchContext
-          ? await window.pywebview.api.run_clean_xrefs_script(launchContext, activityId)
+        const result = runContext
+          ? await window.pywebview.api.run_clean_xrefs_script(runContext, activityId)
           : await window.pywebview.api.run_clean_xrefs_script(null, activityId);
         if (result?.status === "error") {
           failActivity(activityId, {

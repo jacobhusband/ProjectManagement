@@ -1,5 +1,6 @@
 import os
 import json
+import shutil
 import sys
 import tempfile
 import types
@@ -764,6 +765,153 @@ class WorkflowCleanXrefsSourceManifestTests(unittest.TestCase):
                 self.assertEqual([{"kind": "file", "path": str(arch_dwg), "displayPath": str(arch_dwg)}], manifest)
             finally:
                 manifest_path.unlink(missing_ok=True)
+
+
+class CleanXrefsSelectBeforeQueueTests(unittest.TestCase):
+    """XREF asks for its drawings before it waits for its turn in the queue."""
+
+    def setUp(self):
+        self.api = Api.__new__(Api)
+        self.api.test_mode = False
+        self.settings = {
+            "autocadPath": r"C:\Program Files\Autodesk\AutoCAD 2025\accoreconsole.exe",
+        }
+
+    def _select(self, launch_context, context, script_answer, auto_selection=None,
+                default_directory="", arch_folder=""):
+        """Runs the selection with a fake script that writes script_answer."""
+        commands = []
+
+        def fake_script(command):
+            commands.append(command)
+            output_path = Path(command[command.index("-SelectionOutputPath") + 1])
+            if isinstance(script_answer, tuple):
+                return script_answer
+            output_path.write_text(json.dumps(script_answer), encoding="utf-8")
+            return 0, ""
+
+        with patch.object(self.api, "get_user_settings", return_value=self.settings), \
+                patch.object(self.api, "_resolve_workroom_context", return_value=context), \
+                patch.object(self.api, "_resolve_workroom_auto_file_selection",
+                             return_value=auto_selection) as auto_mock, \
+                patch.object(self.api, "_resolve_launch_context_default_directory",
+                             return_value=default_directory), \
+                patch.object(self.api, "_resolve_workroom_arch_folder",
+                             return_value=arch_folder), \
+                patch.object(self.api, "_run_selection_script", side_effect=fake_script):
+            result = self.api.select_clean_xrefs_sources(launch_context)
+        return result, commands, auto_mock
+
+    def test_manual_pick_returns_sources_for_the_queued_run(self):
+        with tempfile.TemporaryDirectory(prefix="acies-xref-select-") as temp_dir:
+            project = Path(temp_dir) / "260010 Example"
+            dwg = project / "Arch" / "A01-01.dwg"
+            dwg.parent.mkdir(parents=True)
+            dwg.write_text("arch", encoding="utf-8")
+            zip_path = project / "Arch" / "CAD.zip"
+            zip_path.write_bytes(b"zip")
+
+            result, commands, _ = self._select(
+                {"projectPath": str(project)},
+                {"source": "manual"},
+                [
+                    {"kind": "file", "path": str(dwg), "projectRoot": "", "displayPath": str(dwg)},
+                    {"kind": "zipEntry", "zipPath": str(zip_path), "entryName": "CAD/A02-01.dwg",
+                     "projectRoot": str(project), "displayPath": ""},
+                ],
+                default_directory=str(project),
+            )
+
+            self.assertEqual("success", result["status"])
+            self.assertEqual([str(dwg), str(zip_path)],
+                             [source.get("path") or source["zipPath"] for source in result["sources"]])
+            self.assertEqual(str(project), result["sources"][1]["projectRoot"])
+            command = commands[0]
+            self.assertEqual(str(project), command[command.index("-DefaultDirectory") + 1])
+            self.assertFalse(Path(command[command.index("-SelectionOutputPath") + 1]).exists())
+
+            # The run then uses the picked drawings without opening a picker.
+            captured = []
+            with patch.object(self.api, "get_user_settings", return_value=self.settings), \
+                    patch.object(self.api, "_resolve_workroom_context", return_value={"source": "manual"}), \
+                    patch.object(self.api, "_run_script_with_progress",
+                                 side_effect=lambda command, tool_id, **kwargs: captured.append(command)), \
+                    patch.object(self.api, "_notify_tool_status"):
+                run = self.api.run_clean_xrefs_script(
+                    {"projectPath": str(project), "dwgFileSources": result["sources"]})
+            self.assertEqual("success", run["status"])
+            manifest_path = Path(captured[0][captured[0].index("-SourceManifestPath") + 1])
+            try:
+                self.assertEqual(2, len(json.loads(manifest_path.read_text(encoding="utf-8"))))
+            finally:
+                manifest_path.unlink(missing_ok=True)
+
+    def test_workroom_pick_opens_in_the_arch_folder(self):
+        result, commands, auto_mock = self._select(
+            {"source": "workroom"},
+            {"source": "workroom"},
+            [],
+            arch_folder=r"P:\260011 Example\Arch",
+        )
+
+        self.assertEqual("cancelled", result["status"])
+        command = commands[0]
+        self.assertEqual(r"P:\260011 Example\Arch", command[command.index("-DefaultDirectory") + 1])
+        auto_mock.assert_not_called()
+
+    def test_cancelled_pick_starts_nothing(self):
+        result, commands, _ = self._select(None, {"source": "none"}, [])
+
+        self.assertEqual({"status": "cancelled"}, result)
+        self.assertNotIn("-DefaultDirectory", commands[0])
+
+    def test_script_error_is_reported(self):
+        result, _, _ = self._select(
+            None, {"source": "none"}, (1, "AutoCAD Core Console (2020 or newer) was not found."))
+
+        self.assertEqual("error", result["status"])
+        self.assertIn("AutoCAD Core Console", result["message"])
+
+    def test_auto_selected_drawings_need_no_question(self):
+        with tempfile.TemporaryDirectory(prefix="acies-xref-auto-") as temp_dir:
+            files_list = Path(temp_dir) / "dwg-list.txt"
+            files_list.write_text("x.dwg\n", encoding="utf-8")
+
+            result, commands, _ = self._select(
+                {"cadFilePaths": ["x.dwg"]},
+                {"source": "manual"},
+                [],
+                auto_selection={"files_list_path": str(files_list)},
+            )
+
+            self.assertEqual({"status": "skipped"}, result)
+            self.assertEqual([], commands)
+            self.assertFalse(files_list.exists())
+
+    def test_workflow_sources_need_no_question(self):
+        with tempfile.TemporaryDirectory(prefix="acies-xref-workflow-") as temp_dir:
+            dwg = Path(temp_dir) / "A01-01.dwg"
+            dwg.write_text("arch", encoding="utf-8")
+            with patch.object(self.api, "_run_selection_script") as script_mock:
+                result = self.api.select_clean_xrefs_sources(
+                    {"dwgFileSources": [{"kind": "file", "path": str(dwg)}]})
+
+        self.assertEqual({"status": "skipped"}, result)
+        script_mock.assert_not_called()
+
+    @unittest.skipUnless(sys.platform == "win32", "runs removeXREFPaths.ps1")
+    def test_real_script_selection_mode_reports_a_cancelled_pick(self):
+        # ACIES_NONINTERACTIVE makes the script skip its picker, as if cancelled.
+        powershell = shutil.which("powershell.exe")
+        if powershell is None:
+            self.skipTest("powershell.exe is required")
+        with patch.dict(os.environ, {"ACIES_NONINTERACTIVE": "1"}), \
+                patch.object(self.api, "get_user_settings", return_value={"autocadPath": powershell}), \
+                patch.object(self.api, "_resolve_workroom_context", return_value={"source": "none"}), \
+                patch.object(self.api, "_resolve_workroom_auto_file_selection", return_value=None):
+            result = self.api.select_clean_xrefs_sources(None)
+
+        self.assertEqual({"status": "cancelled"}, result)
 
 
 class ResolveWorkflowDefaultsTests(unittest.TestCase):

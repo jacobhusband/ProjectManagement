@@ -169,7 +169,7 @@ class RemoveXrefPathsBehaviorTests(unittest.TestCase):
 
             self.assertEqual(0, result.returncode, msg=output)
             self.assertEqual("manifest-arch-source", canonical_target.read_text(encoding="utf-8"))
-            self.assertIn("Using 1 DWG source(s) from workflow selection.", output)
+            self.assertIn("Using 1 selected DWG source(s).", output)
             self.assertIn("Staged Arch source in Xrefs as __incoming__", output)
 
     def test_multiple_replacements_report_one_compare_pair_per_drawing(self):
@@ -457,6 +457,85 @@ Write-Output ('RESULT:' + (ConvertTo-Json -InputObject $items -Compress))
                         self.assertEqual('zipEntry', items[0]['Kind'])
                         self._same_path(root, items[0]['ProjectRoot'])
             self.assertFalse((root / 'Xrefs').exists())
+
+    def test_selection_mode_only_records_the_answer(self):
+        # ACIES_NONINTERACTIVE skips the picker, which the script treats as a cancel.
+        with tempfile.TemporaryDirectory(prefix="acies-xref-select-only-") as temporary:
+            root = Path(temporary)
+            (root / "Arch").mkdir()
+            (root / "Arch" / "A01-01.dwg").write_text("arch", encoding="utf-8")
+            output_path = root / "selection.json"
+            result = subprocess.run(
+                [self.powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                 str(SCRIPT_PATH), "-AcadCore", self.powershell,
+                 "-SelectionOutputPath", str(output_path),
+                 "-DefaultDirectory", str(root / "Arch")],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+            )
+            output = result.stdout + result.stderr
+
+            self.assertEqual(0, result.returncode, output)
+            self.assertIn("Opening DWG file picker...", output)
+            self.assertIn("Cancelled. No DWG files selected.", output)
+            self.assertEqual([], json.loads(output_path.read_text(encoding="utf-8")))
+            self.assertNotIn("Processing", output)
+            self.assertFalse((root / "Xrefs").exists())
+
+    def test_written_selection_reads_back_as_the_same_sources(self):
+        with tempfile.TemporaryDirectory(prefix="acies-xref-manifest-roundtrip-") as temporary:
+            root = Path(temporary)
+            dwg = root / "Arch" / "A01-01.dwg"
+            dwg.parent.mkdir()
+            dwg.write_text("arch", encoding="utf-8")
+            archive = root / "Arch" / "CAD.zip"
+            with zipfile.ZipFile(archive, "w") as bundle:
+                bundle.writestr("CAD/A02-01.dwg", "zip")
+            harness = root / "roundtrip.ps1"
+            harness.write_text(r'''
+param([string]$ScriptPath, [string]$DwgPath, [string]$ZipPath, [string]$Root)
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($ScriptPath, [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw $errors[0] }
+foreach ($definition in $ast.FindAll({ param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+  }, $false)) {
+  . ([scriptblock]::Create($definition.Extent.Text))
+}
+$zipItem = [pscustomobject]@{ Kind = 'zipEntry'; Path = ''; ZipPath = $ZipPath
+  EntryName = 'CAD/A02-01.dwg'; ProjectRoot = $Root; DisplayPath = "${ZipPath}::CAD/A02-01.dwg" }
+$single = Join-Path $Root 'single.json'
+$both = Join-Path $Root 'both.json'
+Write-SourceManifest -SourceItems @(New-FileSourceItem -Path $DwgPath) -ManifestPath $single
+Write-SourceManifest -SourceItems @((New-FileSourceItem -Path $DwgPath), $zipItem) -ManifestPath $both
+Write-Output ('SINGLE:' + (Get-Content -LiteralPath $single -Raw))
+$read = @(Read-SourceManifest -ManifestPath $both)
+Write-Output ('READ:' + (ConvertTo-Json -InputObject $read -Compress))
+''', encoding="utf-8")
+            result = subprocess.run(
+                [self.powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness),
+                 "-ScriptPath", str(SCRIPT_PATH), "-DwgPath", str(dwg), "-ZipPath", str(archive),
+                 "-Root", str(root)],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+            )
+            output = result.stdout + result.stderr
+            self.assertEqual(0, result.returncode, output)
+
+            # One drawing is still written as a list.
+            single_text = output.split("SINGLE:", 1)[1].split("READ:", 1)[0]
+            single = json.loads(single_text)
+            self.assertEqual(1, len(single))
+            self.assertEqual("file", single[0]["kind"])
+            self._same_path(dwg, single[0]["path"])
+
+            read = json.loads(next(line[len("READ:"):] for line in output.splitlines()
+                                   if line.startswith("READ:")))
+            self.assertEqual(["file", "zipEntry"], [item["Kind"] for item in read])
+            self._same_path(dwg, read[0]["Path"])
+            self._same_path(archive, read[1]["ZipPath"])
+            self.assertEqual("CAD/A02-01.dwg", read[1]["EntryName"])
+            self._same_path(root, read[1]["ProjectRoot"])
 
     def test_zip_traversal_does_not_replace_existing_background(self):
         with tempfile.TemporaryDirectory(prefix="acies-xref-unsafe-zip-") as temporary:

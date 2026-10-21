@@ -19783,6 +19783,120 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
             self._notify_tool_status(tool_id, f"ERROR: {e}", activity_id=activity_id)
             return {'status': 'error', 'message': str(e), 'activityId': activity_key}
 
+    def select_clean_xrefs_sources(self, launch_context=None):
+        """Asks for the drawings XREF will prepare before the run waits for its turn.
+
+        Opens the same DWG/ZIP pickers as the run itself, so a run queued behind
+        another one starts without input. Returns 'skipped' when the run picks its
+        drawings without asking (test mode, workflow or launch-context drawings).
+        """
+        try:
+            if self.test_mode or self._get_launch_context_dwg_file_sources(launch_context):
+                return {'status': 'skipped'}
+            script_path = os.path.join(BASE_DIR, "scripts", "removeXREFPaths.ps1")
+            if not os.path.exists(script_path):
+                raise Exception(
+                    "removeXREFPaths.ps1 not found in scripts directory.")
+            settings = self.get_user_settings()
+            acad_path = settings.get('autocadPath', '')
+            if not acad_path:
+                raise Exception("No AutoCAD version selected in settings.")
+
+            # Mirror the run's choice between asking and auto-selecting.
+            context = self._resolve_workroom_context(settings, launch_context)
+            if self._should_force_workroom_clean_xrefs_manual_selection(context):
+                default_directory = self._resolve_workroom_arch_folder(
+                    settings, launch_context)
+            else:
+                auto_selection = self._resolve_workroom_auto_file_selection(
+                    settings, launch_context, 'run_clean_xrefs_script')
+                if auto_selection:
+                    try:
+                        os.remove(auto_selection.get('files_list_path') or '')
+                    except OSError:
+                        pass
+                    return {'status': 'skipped'}
+                default_directory = self._resolve_launch_context_default_directory(
+                    launch_context)
+
+            output_fd, output_path = tempfile.mkstemp(
+                prefix='xref-selection-', suffix='.json',
+                dir=self._get_cad_handoff_dir())
+            os.close(output_fd)
+            try:
+                command = self._build_powershell_script_command(
+                    script_path,
+                    '-AcadCore',
+                    acad_path,
+                    '-SelectionOutputPath',
+                    output_path,
+                )
+                if default_directory:
+                    command.extend(['-DefaultDirectory', default_directory])
+                return_code, last_error = self._run_selection_script(command)
+                if return_code != 0:
+                    raise Exception(
+                        last_error or f"Drawing selection finished with error code {return_code}.")
+                try:
+                    with open(output_path, 'r', encoding='utf-8-sig') as handle:
+                        raw_sources = json.load(handle)
+                except (OSError, ValueError):
+                    raw_sources = []
+            finally:
+                try:
+                    os.remove(output_path)
+                except OSError:
+                    pass
+
+            sources = self._normalize_dwg_file_sources(raw_sources, require_exists=True)
+            if not sources:
+                return {'status': 'cancelled'}
+            return {'status': 'success', 'sources': sources}
+        except Exception as e:
+            logging.error(f"select_clean_xrefs_sources failed: {e}")
+            return {'status': 'error', 'message': str(e)}
+
+    def _run_selection_script(self, command):
+        """Runs a script that only asks the user something and waits for it.
+
+        The process is tracked like a CAD run so closing the app also closes an
+        open picker. Returns the exit code and the last reported error.
+        """
+        self._ensure_script_worker_state()
+        if self._script_shutdown_event.is_set():
+            raise Exception('The application is shutting down.')
+        startupinfo = None
+        if sys.platform == "win32":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            startupinfo=startupinfo,
+        )
+        with self._script_worker_lock:
+            self._script_processes.add(process)
+        last_error = ''
+        try:
+            for line in iter(process.stdout.readline, ''):
+                line = line.strip()
+                logging.debug("Selection script output: %a", line)
+                if line.startswith("PROGRESS: ERROR:"):
+                    last_error = line[len("PROGRESS: ERROR:"):].strip()
+            process.stdout.close()
+            return_code = process.wait()
+        finally:
+            with self._script_worker_lock:
+                self._script_processes.discard(process)
+        if self._script_shutdown_event.is_set():
+            raise Exception('The application is shutting down.')
+        return return_code, last_error
+
     def run_clean_xrefs_script(self, launch_context=None, activity_id=None, params_override=None):
         """Runs the removeXREFPaths.ps1 PowerShell script with progress updates.
 
