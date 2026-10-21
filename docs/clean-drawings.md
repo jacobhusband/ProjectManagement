@@ -44,6 +44,11 @@ then removed from the staged titleblock only. Logos are not removal targets. The
 same sheets are plotted again to form a reference containing only those intentional
 removals. Sheet-level signatures outside the titleblock are not removal targets.
 Removed handles, names and layers are recorded in `titleblockMarkRemoval`.
+Mark removal walks layout contents and retained local block insertions. Named
+stamp/signature insertions are removed without editing their block definitions,
+which can contain protected proxy entities. Unused definitions are left for the
+later purge/proxy stage. A protected mark in retained content still stops cleanup
+with its handle, layer and containing block identified.
 Anonymous/exploded marks without identifying names/layers require visual review.
 
 After cleanup, every original DWG/layout is plotted again. Layout identity and

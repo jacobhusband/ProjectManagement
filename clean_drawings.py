@@ -168,7 +168,8 @@ def run_worker(acad, dll, drawing, job, workspace, timeout=300, notify=lambda me
                          'plot-review': 'review PDF plotting', 'remove-titleblock-marks': 'titleblock stamp/signature removal',
                          'embed-media': 'PDF and image conversion', 'verify-media': 'embedded content validation',
                          'titleblock': 'titleblock cleanup', 'sheet': 'sheet cleanup',
-                         'verify': 'saved drawing validation'}.get(job['Operation'], job['Operation'])
+                         'verify': 'saved drawing validation', 'strip-proxies': 'proxy object removal',
+                         'verify-proxies': 'proxy removal validation'}.get(job['Operation'], job['Operation'])
                 notify(f'AutoCAD {stage}: running ({elapsed}s elapsed)…')
     if not result.is_file():
         raise RuntimeError(f'Worker returned no result (exit {code}). Update the plugin; log: {folder / "worker.log"}')
@@ -224,6 +225,7 @@ def _canonicalize_scan(scan):
         result[field] = list(records.values())
     result['missingMedia'] = missing
     result['titleblocks'] = list(dict.fromkeys(canonical(p) for p in scan.get('titleblocks', [])))
+    result['proxies'] = [dict(record, File=canonical(record['File'])) for record in scan.get('proxies', [])]
     return result
 
 
@@ -295,7 +297,7 @@ def run(project, selection, acad, notify=lambda message: None, worker=run_worker
         worker(acad, dll, seed, {'Operation': 'prepare', 'Copies': copies, 'References': scan['references'],
                               'Pdfs': scan.get('pdfs', []), 'PdfCopies': asset_map(scan.get('pdfs', [])),
                               'Images': scan.get('images', []), 'ImageCopies': asset_map(scan.get('images', []))}, workspace)
-        def plot_set(label, paths, layout_source=None):
+        def plot_set(label, paths, layout_source=None, freeze_revision_layers=False):
             records = []
             for index, (source, drawing) in enumerate(paths, 1):
                 relative = str(drawing.relative_to(root))
@@ -303,6 +305,8 @@ def run(project, selection, acad, notify=lambda message: None, worker=run_worker
                 job = {'Operation': 'plot-review', 'Output': str(workspace / f'{label}-{index}'), 'Width': width, 'Height': height}
                 if layout_source is not None:
                     job['Layouts'] = [r['layout'] for r in layout_source if r['drawing'] == relative]
+                if freeze_revision_layers:
+                    job['FreezeRevisionLayers'] = True
                 plotted = worker(acad, dll, source, job, workspace)
                 for page in plotted['pages']:
                     records.append(dict(page, drawing=relative, profile=plotted.get('profile')))
@@ -328,7 +332,25 @@ def run(project, selection, acad, notify=lambda message: None, worker=run_worker
         unmarked = workspace / 'titleblock-without-marks.dwg'
         mark_removal = worker(acad, dll, staged_titleblock, {'Operation': 'remove-titleblock-marks', 'Output': str(unmarked)}, workspace)
         shutil.copy2(unmarked, staged_titleblock)
-        reference_pdfs = plot_set('Reference', [(Path(copies[str(d)]), d) for d in drawings], original_pdfs)
+        # Sheet cleanup freezes revision cloud/delta layers on purpose; so does the reference.
+        reference_pdfs = plot_set('Reference', [(Path(copies[str(d)]), d) for d in drawings], original_pdfs,
+                                  freeze_revision_layers=True)
+        # Core Console cannot bind an XREF holding add-on objects it has no enabler for
+        # (Express Tools ARCTEXT, Civil 3D settings). Strip them from the staged XREF copies
+        # after the reference plots, so the comparison checks that nothing visible changed.
+        proxy_removal = []
+        selected = {str(d) for d in drawings}
+        for record in scan['proxies']:
+            if record['File'] in selected:
+                continue
+            staged = Path(copies[record['File']])
+            notify(f'Removing add-on proxy objects that block binding: {staged.name}')
+            stripped = workspace / (uuid.uuid4().hex + '.dwg')
+            removed = worker(acad, dll, staged, {'Operation': 'strip-proxies', 'Output': str(stripped)}, workspace)
+            if worker(acad, dll, stripped, {'Operation': 'verify-proxies'}, workspace) != {'proxyEntities': 0, 'proxyObjects': 0}:
+                raise RuntimeError(f'Proxy objects remained after saving and reopening: {record["File"]}')
+            shutil.copy2(stripped, staged)
+            proxy_removal.append(dict(removed, drawing=record['File']))
         output_root = workspace / 'outputs'
         output_root.mkdir()
         cleaned_titleblock = output_root / (uuid.uuid4().hex + '.dwg')
@@ -354,7 +376,7 @@ def run(project, selection, acad, notify=lambda message: None, worker=run_worker
             outputs.append((output, drawing.relative_to(root)))
             results.append({'drawing': str(drawing.relative_to(root)), 'validation': reopened})
         cleaned_pdfs = plot_set('Cleaned', [(path, root / relative) for path, relative in outputs[1:]], original_pdfs)
-        notify('Comparing original and cleaned PDFs, accounting for titleblock stamp/signature removal…')
+        notify('Comparing original and cleaned PDFs, accounting for stamp/signature and revision cloud/delta removal…')
         review_directory = workspace / 'Review'
         comparison = compare_sets(original_pdfs, reference_pdfs, cleaned_pdfs, review_directory, notify=notify)
         needs_review = comparison['status'] == 'review_required'
@@ -365,14 +387,15 @@ def run(project, selection, acad, notify=lambda message: None, worker=run_worker
                 raise RuntimeError(f'Source changed during processing. Run again: {source}')
         report = {'status': 'review_required' if needs_review else 'success', 'selection': selection, 'drawings': results, 'mediaConversions': media_results,
                   'missingMediaRemoved': [{'drawing': r['Owner'], 'kind': r['Kind'], 'path': r['Path'], 'handle': r['Handle']} for r in missing_media],
-                  'titleblockMarkRemoval': mark_removal, 'comparison': comparison,
+                  'titleblockMarkRemoval': mark_removal, 'proxyRemoval': proxy_removal, 'comparison': comparison,
                   'titleblockValidation': title_result, 'sourceHashes': fingerprints,
                   'limitations': ['PDF pages import as native CAD objects; supported raster pixels become native solids.',
                                   'Custom PDF clips/adjustments, PDF markups/layers, complex images, other underlays and linked OLE remain unsupported.',
                                   'Boundary intersection uses conservative entity bounds.',
                                   'Image colors are snapped to within 16/255 per channel; partly transparent image edges are blended over white paper.',
                                   'PDF comparison uses Layout at 1:1 inches, zero offset, 510-monochrome.ctb, 144 DPI and a 24/255 channel tolerance; it is not proof of engineering equivalence.',
-                                  'Original plots are made after PDF/image conversion (headless plotting omits raster images), so the comparison checks cleanup, not the conversion itself.']}
+                                  'Original plots are made after PDF/image conversion (headless plotting omits raster images), so the comparison checks cleanup, not the conversion itself.',
+                                  'Add-on proxy objects in XREFs (e.g. Express Tools ARCTEXT, Civil 3D settings) are removed before binding: unused blocks holding them are purged, others become their stored proxy graphics.']}
         destination_root = root / 'Cleaned CAD'
         if not _inside(destination_root, root):
             raise RuntimeError('Cleaned CAD resolves outside the project directory.')
@@ -405,7 +428,7 @@ def run(project, selection, acad, notify=lambda message: None, worker=run_worker
         except OSError:
             cleanup_warning = f'Drawings delivered successfully. Temporary files could not be removed: {workspace}'
         return {'status': 'success', 'output': str(destination), 'count': len(drawings), 'cleanupWarning': cleanup_warning, 'mediaWarning': media_warning,
-                'comparisonWarning': 'Review required: plotted differences remain beyond titleblock stamp/signature removal. Open Review/Comparison.pdf before sharing these drawings.' if needs_review else '',
+                'comparisonWarning': 'Review required: plotted differences remain beyond stamp/signature and revision cloud/delta removal. Open Review/Comparison.pdf before sharing these drawings.' if needs_review else '',
                 'comparisonStatus': comparison['status']}
     except Exception as exc:
         raise RuntimeError(str(exc) + (f'\nWorking files and logs retained at: {workspace}' if workspace else '')) from exc

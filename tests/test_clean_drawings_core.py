@@ -64,6 +64,64 @@ _Y
                              'Keep both layout regions and erase only the unrelated third line.\n' +
                              result.stdout.decode('utf-16-le', errors='replace'))
 
+    def test_exploded_block_contents_keep_their_plotted_appearance(self):
+        with tempfile.TemporaryDirectory(prefix='acies-clean-explode-') as temporary:
+            root = Path(temporary)
+            drawing = root / 'block.dwg'
+            output = root / 'exploded.dwg'
+            dump = root / 'entities.txt'
+            fixture = root / 'fixture.scr'
+            # Layer-0 and BYBLOCK content inherits from the insert, and MText indents
+            # and absolute heights are drawing units that must scale with the insert.
+            fixture.write_text(f'''(setvar "FILEDIA" 0)
+(command "_.-LAYER" "_M" "TAG" "_C" "3" "" "_LW" "0.70" "" "_M" "OTHER" "_C" "5" "" "")
+(setvar "CLAYER" "0")
+(entmake '((0 . "LINE") (8 . "0") (10 0.0 0.0 0.0) (11 10.0 0.0 0.0)))
+(setq a (entlast))
+(entmake '((0 . "LINE") (8 . "OTHER") (62 . 0) (370 . -2) (10 0.0 2.0 0.0) (11 10.0 2.0 0.0)))
+(setq b (entlast))
+(entmake '((0 . "MTEXT") (100 . "AcDbEntity") (8 . "OTHER") (100 . "AcDbMText") (10 0.0 6.0 0.0) (40 . 1.0) (41 . 20.0) (71 . 1) (1 . "\\\\pxi10,l2,t4,6;RJ45\\\\P\\\\H2;Typ\\\\H0.5x;ical")))
+(setq c (entlast))
+(command "_.-BLOCK" "LBL" "0,0" a b c "")
+(setvar "CLAYER" "TAG")
+(command "_.-INSERT" "LBL" "2,2" 0.1 0.1 0)
+(command "_.QSAVE" "{drawing.as_posix()}")
+_.QUIT
+_Y
+''', encoding='utf-8')
+            result = subprocess.run([os.environ['ACIES_TEST_CORE'], '/s', str(fixture)],
+                                    cwd=root, capture_output=True, timeout=60,
+                                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            self.assertEqual(0, result.returncode, result.stdout[-3000:])
+            clean.run_worker(os.environ['ACIES_TEST_CORE'], os.environ['ACIES_TEST_CLEAN_DLL'], drawing,
+                             {'Operation': 'titleblock', 'Width': 36, 'Height': 24, 'Output': str(output)}, root)
+            probe = root / 'probe.scr'
+            probe.write_text(f'''(setq f (open "{dump.as_posix()}" "w"))
+(setq s (ssget "_X" '((410 . "Model"))) i 0)
+(while (< i (sslength s))
+  (setq e (entget (ssname s i)) i (1+ i))
+  (prin1 (list (cdr (assoc 0 e)) (cdr (assoc 8 e)) (cdr (assoc 62 e)) (cdr (assoc 370 e))
+               (cdr (assoc 1 e)) (cdr (assoc 10 e))) f)
+  (princ "\\n" f))
+(close f)
+_.QUIT
+_Y
+''', encoding='utf-8')
+            result = subprocess.run([os.environ['ACIES_TEST_CORE'], '/i', str(output), '/s', str(probe)],
+                                    cwd=root, capture_output=True, timeout=60,
+                                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            self.assertEqual(0, result.returncode, result.stdout[-3000:])
+            rows = dump.read_text().splitlines()
+            lines = sorted(row for row in rows if row.startswith('("LINE"'))
+            self.assertEqual(2, len(lines), rows)
+            # Layer-0 line moves to the insert's layer; the BYBLOCK line on another
+            # layer takes the insert layer's color 3 and 0.70 mm lineweight.
+            self.assertTrue(any(row.startswith('("LINE" "OTHER" 3 70 ') for row in lines), rows)
+            self.assertTrue(any(row.startswith('("LINE" "TAG" nil nil ') for row in lines), rows)
+            mtext = [row for row in rows if row.startswith('("MTEXT"')]
+            self.assertEqual(1, len(mtext), rows)
+            self.assertIn(r'\\pxi1,l0.2,t0.4,0.6;RJ45\\P\\H0.2;Typ\\H0.5x;ical', mtext[0])
+
     def test_external_raster_image_still_blocks_cleanup(self):
         with tempfile.TemporaryDirectory(prefix='acies-clean-raster-') as temporary:
             root = Path(temporary)

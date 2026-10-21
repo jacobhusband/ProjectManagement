@@ -76,6 +76,58 @@ class CleanDrawingTests(unittest.TestCase):
         self.assertTrue((Path(result['output']) / 'Review/Comparison.pdf').exists())
         self.assertFalse((Path(result['output']) / 'form.pdf').exists())
 
+    def test_only_reference_plot_freezes_revision_layers_like_sheet_cleanup(self):
+        plots = []
+        def worker(*args):
+            if args[3]['Operation'] == 'plot-review':
+                plots.append((Path(args[3]['Output']).name, args[3].get('FreezeRevisionLayers', False)))
+            return self.worker(*args)
+        self.run_job(worker)
+        self.assertEqual([('Original-1', False), ('Reference-1', True), ('Cleaned-1', False)], plots)
+
+    def test_proxies_are_stripped_from_staged_xrefs_after_reference_plots(self):
+        jobs = []
+        def worker(*args):
+            drawing, job = args[2], args[3]
+            jobs.append((job['Operation'], Path(drawing).name))
+            if job['Operation'] == 'scan':
+                scan = self.worker(*args)
+                # Only XREF copies are stripped; the selected sheet's own proxies cannot block a bind.
+                scan['proxies'] = [{'File': str(self.tb), 'Entities': 2, 'Objects': 5},
+                                   {'File': str(self.sheet), 'Entities': 0, 'Objects': 1}]
+                return scan
+            if job['Operation'] == 'strip-proxies':
+                self.assertTrue(clean._inside(drawing, args[4]))
+                Path(job['Output']).write_bytes(b'stripped')
+                return {'proxyEntities': 2, 'removedObjects': 5}
+            if job['Operation'] == 'verify-proxies':
+                return {'proxyEntities': 0, 'proxyObjects': 0}
+            return self.worker(*args)
+        result = self.run_job(worker)
+        operations = [op for op, _ in jobs]
+        self.assertEqual([('strip-proxies', 'x-TB.dwg')], [j for j in jobs if j[0] == 'strip-proxies'])
+        reference_plots = [i for i, (op, _) in enumerate(jobs) if op == 'plot-review'][:2]
+        self.assertLess(reference_plots[-1], operations.index('strip-proxies'))
+        self.assertLess(operations.index('verify-proxies'), operations.index('titleblock'))
+        report = json.loads((Path(result['output']) / 'cleanup-report.json').read_text())
+        self.assertEqual(str(self.tb), report['proxyRemoval'][0]['drawing'])
+        self.assertEqual(b'titleblock original', self.tb.read_bytes())
+
+    def test_proxy_removal_that_does_not_reopen_clean_blocks_delivery(self):
+        def worker(*args):
+            job = args[3]
+            if job['Operation'] == 'scan':
+                return dict(self.worker(*args), proxies=[{'File': str(self.tb), 'Entities': 1, 'Objects': 0}])
+            if job['Operation'] == 'strip-proxies':
+                Path(job['Output']).write_bytes(b'stripped')
+                return {}
+            if job['Operation'] == 'verify-proxies':
+                return {'proxyEntities': 1, 'proxyObjects': 0}
+            return self.worker(*args)
+        with self.assertRaisesRegex(RuntimeError, 'Proxy objects remained'):
+            self.run_job(worker)
+        self.assertFalse((self.root / 'Cleaned CAD').exists())
+
     def test_unexpected_visual_changes_are_delivered_for_review_not_marked_match(self):
         def comparison(*args, **kwargs):
             Path(args[3]).mkdir()

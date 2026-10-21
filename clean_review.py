@@ -73,7 +73,7 @@ def compare_sets(originals, reference, cleaned, output, notify=lambda message: N
                 width, height = sizes[0]
                 page = comparison.new_page(width=width, height=height + 40)
                 page.insert_text((12, 15), f'{index}: {key[0]} / {key[1]}', fontsize=9)
-                page.insert_text((12, 29), f'{records[-1]["status"]}: {changed:,} unexpected pixels. Red = changes beyond stamp/signature removal.', fontsize=9)
+                page.insert_text((12, 29), f'{records[-1]["status"]}: {changed:,} unexpected pixels. Red = changes beyond stamp/signature and revision cloud/delta removal.', fontsize=9)
                 rectangle = fitz.Rect(0, 40, width, height + 40)
                 page.show_pdf_page(rectangle, documents[2], 0)
                 if changed:
@@ -91,7 +91,7 @@ def compare_sets(originals, reference, cleaned, output, notify=lambda message: N
         comparison.save(output / 'Comparison.pdf', garbage=4, deflate=True)
         report = {'status': 'review_required' if any(r['unexpectedPixels'] for r in records) else 'match_within_tolerance',
                   'dpi': dpi, 'channelTolerance': tolerance, 'pages': records,
-                  'method': 'Original-to-cleaned differences and reference-to-cleaned differences. Reference has only named titleblock stamps/signatures removed. No excluded regions.',
+                  'method': 'Original-to-cleaned differences and reference-to-cleaned differences. Reference has only named titleblock stamps/signatures removed and revision cloud/delta layers frozen, as sheet cleanup does. No excluded regions.',
                   'limitation': 'A rendered comparison at finite resolution/tolerance is not proof of CAD or engineering equivalence. Review highlighted differences; fonts and native PDF import can affect rendering.'}
         (output / 'comparison.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
         return report
