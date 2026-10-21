@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { Zap, Copy, CheckCircle2, AlertTriangle, Info } from 'lucide-react';
 import { AppState } from './types';
-import { calculateEverything, formatFeederSpec, formatWireSize, getHotCount, isThreePhaseAllowed, neutralMustCarryCurrent, validateInputs } from './utils/electricalMath';
+import { calculateEverything, formatFeederSpec, formatShorthandSpec, formatWireSize, getHotCount, isThreePhaseAllowed, neutralMustCarryCurrent, validateInputs } from './utils/electricalMath';
 import { WIRE_DATA, MIN_RECOMMENDED_CONDUCTOR_SIZE } from './constants';
 
 const inputClass = 'w-full p-2.5 border border-gray-300 rounded-lg bg-white text-slate-900 focus:ring-2 focus:ring-blue-500 disabled:bg-slate-100 disabled:text-slate-400';
@@ -38,11 +38,11 @@ export default function App() {
   const numeric = (key: 'amperage' | 'continuousAmperage' | 'breakerAmperage' | 'distance' | 'maxVoltageDrop' | 'sets' | 'ambientTemperature' | 'neutralDesignAmperage', label: string, min: number, max: number, step = 'any') =>
     <Field label={label}><input type="number" className={inputClass} value={state[key]} min={min} max={max} step={step} onChange={e => change(key, e.target.value === '' ? '' : Number(e.target.value))} /></Field>;
   const wireOptions = sizes.map(w => <option key={w.size} value={w.size}>{formatWireSize(w.size)}</option>);
-  const copy = async () => {
+  const copy = async (shorthand = false) => {
     if (!result?.valid) return;
     try {
-      await navigator.clipboard.writeText(formatFeederSpec(state, result));
-      setCopyFeedback('Copied!');
+      await navigator.clipboard.writeText(shorthand ? formatShorthandSpec(state, result) : formatFeederSpec(state, result));
+      setCopyFeedback(shorthand ? 'Shorthand copied!' : 'Copied!');
     } catch {
       setCopyFeedback('Clipboard unavailable. Select and copy the specification below.');
     }
@@ -54,7 +54,10 @@ export default function App() {
     <header className="bg-white border-b sticky top-0 z-10">
       <div className="max-w-7xl mx-auto px-5 py-3 flex items-center justify-between gap-3">
         <div className="flex items-center gap-3"><div className="bg-blue-600 rounded-lg p-2"><Zap className="text-white" size={22} /></div><div><h1 className="text-lg font-bold">ACIES Wire Sizer</h1><p className="text-xs text-slate-500">Feeder sizing & voltage drop</p></div></div>
-        <button onClick={copy} disabled={!result?.valid} className="flex items-center gap-2 px-4 py-2 border rounded-lg text-sm font-semibold bg-white disabled:opacity-40 disabled:cursor-not-allowed">{copyFeedback === 'Copied!' ? <CheckCircle2 size={16} /> : <Copy size={16} />}{copyFeedback === 'Copied!' ? 'Copied!' : 'Copy Spec'}</button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => copy(true)} disabled={!result?.valid} title={result?.valid ? formatShorthandSpec(state, result) : undefined} className="flex items-center gap-2 px-4 py-2 border rounded-lg text-sm font-semibold bg-white disabled:opacity-40 disabled:cursor-not-allowed">{copyFeedback === 'Shorthand copied!' ? <CheckCircle2 size={16} /> : <Copy size={16} />}{copyFeedback === 'Shorthand copied!' ? 'Copied!' : 'Copy Shorthand'}</button>
+          <button onClick={() => copy()} disabled={!result?.valid} className="flex items-center gap-2 px-4 py-2 border rounded-lg text-sm font-semibold bg-white disabled:opacity-40 disabled:cursor-not-allowed">{copyFeedback === 'Copied!' ? <CheckCircle2 size={16} /> : <Copy size={16} />}{copyFeedback === 'Copied!' ? 'Copied!' : 'Copy Spec'}</button>
+        </div>
       </div>
     </header>
     <main className="max-w-7xl mx-auto p-5 grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">

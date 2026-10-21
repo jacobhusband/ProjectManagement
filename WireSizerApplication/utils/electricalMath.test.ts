@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { WIRE_DATA } from '../constants';
 import { AppState } from '../types';
-import { calculateEverything, formatFeederSpec, formatWireSize, validateInputs } from './electricalMath';
+import { calculateEverything, formatFeederSpec, formatShorthandSpec, formatWireSize, validateInputs } from './electricalMath';
 
 const createState = (overrides: Partial<AppState> = {}): AppState => ({
   voltage: 240, amperage: 90, continuousAmperage: 0, breakerAmperage: 90,
@@ -220,5 +220,25 @@ describe('input validation and specifications', () => {
     expect(spec).toContain('ONE-WAY LENGTH');
     expect(spec).toContain('OCPD: 90 A');
     expect(formatWireSize('4/0')).toBe('#4/0 AWG');
+  });
+  it('copies drawing shorthand for conduit, conductors and ground', () => {
+    const s = createState({ forceWireSize: true, forcedWireSize: '3', terminalRating: 75 });
+    const r = calculateEverything(s);
+    expect(r.valid).toBe(true);
+    expect(formatShorthandSpec(s, r)).toBe(`(N)${r.conduitSize}"C., 2#3 H, 1#3 N, 1#${r.groundWireSize} GND`);
+  });
+  it('marks parallel sets, kcmil, aluminum and omitted neutrals in shorthand', () => {
+    const s = createState({ forceWireSize: true, forcedWireSize: '250', sets: 2, groundMaterial: 'Aluminum', neutralMode: 'none' });
+    const r = calculateEverything(s);
+    expect(r.valid).toBe(true);
+    const shorthand = formatShorthandSpec(s, r);
+    expect(shorthand).toMatch(/^\(2\) SETS OF \(N\)/);
+    expect(shorthand).toContain('2#250 kcmil H');
+    expect(shorthand).not.toContain(' N,');
+    expect(shorthand).toMatch(/1#\S+ AL GND$/);
+  });
+  it('refuses to format shorthand for a failed calculation', () => {
+    const s = createState({ forceWireSize: true, forcedWireSize: '12' });
+    expect(() => formatShorthandSpec(s, calculateEverything(s))).toThrow(/Resolve/);
   });
 });

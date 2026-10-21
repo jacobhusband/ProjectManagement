@@ -185,3 +185,17 @@ export function formatFeederSpec(state: AppState, results: CalculationResult): s
     ...(state.neutralMode === 'custom' ? [`NEUTRAL DESIGN LOAD: ${state.neutralDesignAmperage} A (user calculated)`] : []),
   ].join('\n');
 }
+
+// Drawing shorthand, e.g. (N)1"C., 2#3 H, 1#3 N, 1#8 GND. Copper is implied; aluminum is marked AL.
+export function formatShorthandSpec(state: AppState, results: CalculationResult): string {
+  if (!results.valid || validateInputs(state).length) throw new Error('Resolve calculation errors before copying a specification.');
+  const wire = (size: string, material: AppState['material']) =>
+    `#${size}${Number(size) >= 250 ? ' kcmil' : ''}${material === 'Aluminum' ? ' AL' : ''}`;
+  const parts = [
+    `(N)${results.conduitSize}"C.`,
+    `${getHotCount(state.phase, state.voltage)}${wire(results.selectedSize, state.material)} H`,
+    ...(results.neutralSize ? [`1${wire(results.neutralSize, state.material)} N`] : []),
+    `1${wire(results.groundWireSize, state.groundMaterial)} GND`,
+  ].join(', ');
+  return results.sets > 1 ? `(${results.sets}) SETS OF ${parts}` : parts;
+}
