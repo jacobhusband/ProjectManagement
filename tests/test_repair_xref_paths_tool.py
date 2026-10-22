@@ -107,7 +107,10 @@ class RepairXrefPathsToolTests(unittest.TestCase):
             "Editable = (-not $dependent)",
             '"Nested/orphaned - edit parent DWG"',
             "ACIESXREFUPDATE",
-            "(entmod changedRecord)",
+            '(command "_.-XREF" "_Path" (_acies-escape-wildcards name) newPath)',
+            '(while (= 1 (logand 1 (getvar "CMDACTIVE"))) (command ""))',
+            "Show-FormWindow $form",
+            "Show-FormWindow $promptForm",
             '"ALREADY_SET"',
             '"UPDATED"',
             '"SAVE_OK"',
@@ -118,6 +121,8 @@ class RepairXrefPathsToolTests(unittest.TestCase):
 
         self.assertNotIn('Filter = "All files (*.*)|*.*"', text)
         self.assertNotIn("vlax-get-acad-object", text)
+        # entmod returns nil for XREF block definitions, so it never changed a path.
+        self.assertNotIn("(entmod changedRecord)", text)
         self.assertIn('"_.QUIT", "_N"', text)
         self.assertNotIn("$items = @($_.Occurrences)", text)
         self.assertIn(

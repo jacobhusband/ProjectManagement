@@ -36,6 +36,19 @@ function Ensure-WinFormsAssemblies {
   Add-Type -AssemblyName System.Drawing
 }
 
+# The desktop app starts this script with SW_HIDE to keep the console out of
+# sight, and Windows applies that to the first window the script shows as well.
+# Without an explicit show, that dialog stays invisible and the tool waits forever.
+function Show-FormWindow {
+  param([System.Windows.Forms.Form]$TargetForm)
+
+  if ($null -eq $TargetForm) { return }
+  if (-not ('AciesUi.NativeWindow' -as [type])) {
+    Add-Type -Namespace AciesUi -Name NativeWindow -MemberDefinition '[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);'
+  }
+  [void][AciesUi.NativeWindow]::ShowWindow($TargetForm.Handle, 5)  # SW_SHOW
+}
+
 function Resolve-DialogInitialDirectory {
   param(
     [string]$CandidatePath,
@@ -147,6 +160,7 @@ function Show-DwgFileSelectionPrompt {
     })
 
   $promptForm.add_Shown({
+      Show-FormWindow $promptForm
       $promptForm.Activate()
       $promptForm.BringToFront()
       $btnSelectFiles.PerformClick()
@@ -890,6 +904,7 @@ $form.AcceptButton = $okButton
 $form.Controls.Add($okButton)
 
 $form.add_Shown({
+    Show-FormWindow $form
     $form.TopMost = $true
     $form.WindowState = [System.Windows.Forms.FormWindowState]::Normal
     Move-FormToPrimaryScreen $form

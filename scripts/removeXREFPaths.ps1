@@ -74,6 +74,19 @@ if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
 
 Add-Type -AssemblyName System.Windows.Forms
 
+# The desktop app starts this script with SW_HIDE to keep the console out of
+# sight, and Windows applies that to the first window the script shows as well.
+# Without an explicit show, that dialog stays invisible and the tool waits forever.
+function Show-FormWindow {
+  param([System.Windows.Forms.Form]$TargetForm)
+
+  if ($null -eq $TargetForm) { return }
+  if (-not ('AciesUi.NativeWindow' -as [type])) {
+    Add-Type -Namespace AciesUi -Name NativeWindow -MemberDefinition '[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);'
+  }
+  [void][AciesUi.NativeWindow]::ShowWindow($TargetForm.Handle, 5)  # SW_SHOW
+}
+
 function Get-DisciplineShort([string]$value) {
   $short = ($value -split '[,;/\s]')[0]
   if ([string]::IsNullOrWhiteSpace($short)) { return "E" }
@@ -247,6 +260,7 @@ function Show-ZipDwgDialog {
     $form.TopMost = $true
     $form.ShowInTaskbar = $true
     $form.add_Shown({
+      Show-FormWindow $form
       $form.Activate()
       $form.BringToFront()
       $list.Focus() | Out-Null

@@ -108,6 +108,19 @@ if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
+# The desktop app starts this script with SW_HIDE to keep the console out of
+# sight, and Windows applies that to the first window the script shows as well.
+# Without an explicit show, that dialog stays invisible and the tool waits forever.
+function Show-FormWindow {
+  param([System.Windows.Forms.Form]$TargetForm)
+
+  if ($null -eq $TargetForm) { return }
+  if (-not ('AciesUi.NativeWindow' -as [type])) {
+    Add-Type -Namespace AciesUi -Name NativeWindow -MemberDefinition '[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);'
+  }
+  [void][AciesUi.NativeWindow]::ShowWindow($TargetForm.Handle, 5)  # SW_SHOW
+}
+
 function Show-DwgFileSelectionPrompt {
   # Automated runs (tests, CI) set ACIES_NONINTERACTIVE=1. Nobody can answer a
   # picker there, and it would open in the last folder PowerShell used.
@@ -182,6 +195,7 @@ function Show-DwgFileSelectionPrompt {
     })
 
   $promptForm.add_Shown({
+      Show-FormWindow $promptForm
       $promptForm.Activate()
       $promptForm.BringToFront()
       $btnSelectFiles.PerformClick()
@@ -922,6 +936,7 @@ $form.Controls.Add($btnCancel)
 $form.CancelButton = $btnCancel
 
 $form.add_Shown({
+    Show-FormWindow $form
     $form.TopMost = $true
     $form.WindowState = [System.Windows.Forms.FormWindowState]::Normal
     Move-FormToPrimaryScreen $form

@@ -86,6 +86,19 @@ if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
+# The desktop app starts this script with SW_HIDE to keep the console out of
+# sight, and Windows applies that to the first window the script shows as well.
+# Without an explicit show, that dialog stays invisible and the tool waits forever.
+function Show-FormWindow {
+  param([System.Windows.Forms.Form]$TargetForm)
+
+  if ($null -eq $TargetForm) { return }
+  if (-not ('AciesUi.NativeWindow' -as [type])) {
+    Add-Type -Namespace AciesUi -Name NativeWindow -MemberDefinition '[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);'
+  }
+  [void][AciesUi.NativeWindow]::ShowWindow($TargetForm.Handle, 5)  # SW_SHOW
+}
+
 function Move-FormToPrimaryScreen {
   param([System.Windows.Forms.Form]$TargetForm)
 
@@ -158,7 +171,10 @@ function Show-DwgFileSelectionPrompt {
         $promptForm.BringToFront()
       }
     })
-  $promptForm.add_Shown({ $selectButton.PerformClick() })
+  $promptForm.add_Shown({
+      Show-FormWindow $promptForm
+      $selectButton.PerformClick()
+    })
   $promptForm.AcceptButton = $selectButton
   $promptForm.CancelButton = $exitButton
 
@@ -680,6 +696,7 @@ try {
     })
 
   $form.add_Shown({
+      Show-FormWindow $form
       $form.Activate()
       $form.BringToFront()
     })
@@ -750,40 +767,62 @@ try {
   (if pair (cdr pair) 0)
 )
 
-(defun _acies-update-path (name newPath / entity record flags pathPair changedRecord actual)
-  (setq entity (tblobjname "BLOCK" name))
-  (if (null entity)
+(defun _acies-saved-path (record)
+  (if (and record (assoc 1 record)) (cdr (assoc 1 record)) "")
+)
+
+; -XREF reads the name as a wildcard pattern, so "A1.0" would also match
+; "A1-0" and a comma would split it into two names. Backquote escapes each
+; special character.
+(defun _acies-escape-wildcards (text / result index char)
+  (setq result "")
+  (setq index 1)
+  (while (<= index (strlen text))
+    (setq char (substr text index 1))
+    (if (vl-string-search char "#@.*?~[]-,`")
+      (setq result (strcat result "`" char))
+      (setq result (strcat result char))
+    )
+    (setq index (1+ index))
+  )
+  result
+)
+
+; entmod cannot change the saved path of an XREF block definition (it returns
+; nil), so the path goes through -XREF _Path, which also reloads the XREF.
+(defun _acies-update-path (name newPath / record flags oldPath actual)
+  (setq record (tblsearch "BLOCK" name))
+  (if (null record)
     (list "NOT_FOUND" "")
     (progn
-      (setq record (entget entity))
       (setq flags (_acies-flags record))
+      (setq oldPath (_acies-saved-path record))
       (cond
         ((= 0 (logand flags 12))
           (list "NOT_XREF" "")
         )
         ((/= 0 (logand flags 16))
-          (list "READ_ONLY_DEPENDENT" (if (assoc 1 record) (cdr (assoc 1 record)) ""))
+          (list "READ_ONLY_DEPENDENT" oldPath)
         )
-        ((and (assoc 1 record) (= (strcase (cdr (assoc 1 record))) (strcase newPath)))
-          (list "ALREADY_SET" (cdr (assoc 1 record)))
+        ((= (strcase oldPath) (strcase newPath))
+          (list "ALREADY_SET" oldPath)
         )
         (T
-          (setq pathPair (assoc 1 record))
-          (setq changedRecord
-            (if pathPair
-              (subst (cons 1 newPath) pathPair record)
-              (append record (list (cons 1 newPath)))
+          (command "_.-XREF" "_Path" (_acies-escape-wildcards name) newPath)
+          ; Bit 1 only: the script that runs this command sets bit 4 for its
+          ; whole run, and Enter at the Command prompt repeats the last command.
+          (while (= 1 (logand 1 (getvar "CMDACTIVE"))) (command ""))
+          (setq actual (_acies-saved-path (tblsearch "BLOCK" name)))
+          (cond
+            ((= (strcase actual) (strcase newPath))
+              (list "UPDATED" actual)
             )
-          )
-          (if (entmod changedRecord)
-            (progn
-              (setq actual (cdr (assoc 1 (entget entity))))
-              (if (and actual (= (strcase actual) (strcase newPath)))
-                (list "UPDATED" actual)
-                (list "VERIFY_FAILED" (if actual actual ""))
-              )
+            ((= (strcase actual) (strcase oldPath))
+              (list "UPDATE_FAILED" actual)
             )
-            (list "UPDATE_FAILED" (if pathPair (cdr pathPair) ""))
+            (T
+              (list "VERIFY_FAILED" actual)
+            )
           )
         )
       )
