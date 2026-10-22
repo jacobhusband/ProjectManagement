@@ -16020,3 +16020,10 @@ button.page-crumb:hover {
 .workflow-preflight-input-value { flex: 1; min-width: 0; overflow-wrap: anywhere; white-space: pre-line; }
 .workflow-preflight-input-help { font-size: 12px; color: var(--text-secondary); }
 #workflowBuilderError, #workflowPreFlightError { color: var(--danger, #dc2626); }
+.publish-partial-dialog { width: min(640px, 92vw); }
+.publish-partial-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.publish-partial-list { max-height: 320px; overflow: auto; margin: 0; padding: 4px; border: 1px solid var(--glass-border); border-radius: 8px; }
+.publish-partial-list label { display: flex; align-items: center; gap: 8px; padding: 6px; cursor: pointer; overflow-wrap: anywhere; }
+.publish-partial-list input[type="checkbox"], #publishPartialRefresh { width: 16px; height: 16px; padding: 0; flex: 0 0 16px; margin: 0 6px 0 0; accent-color: var(--accent); }
+.publish-partial-list .tiny { margin-left: auto; text-align: right; }
+#publishPartialCount { margin-left: auto; }

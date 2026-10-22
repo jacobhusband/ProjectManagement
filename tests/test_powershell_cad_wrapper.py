@@ -400,8 +400,27 @@ class PowerShellCadWrapperTests(unittest.TestCase):
             "publishExcelRefreshQuick",
             "publishExcelRefreshCancel",
             "publishExcelRefreshWorkbook",
+            "publishExcelRefreshPartial",
+            "publishPartialDlg",
+            "publishPartialList",
+            "publishPartialBrowse",
+            "publishPartialRefresh",
+            "publishPartialPrint",
+            "publishPartialCancel",
         ):
             self.assertIn(f'id="{control_id}"', html)
+        self.assertIn(">Partial Print</button>", html)
+        # Partial Print lists the discipline folder's DWGs and hands the picked ones
+        # to Publish as preselected files.
+        partial = launch.split('if (excelChoice === "partial") {', 1)[1]
+        for expected in (
+            "const partial = await askPublishPartialPrint(launchContext);",
+            "cadFilePaths: partial.files,",
+            "workflowPreselectedDwgFiles: true,",
+            "publishParams = { refreshExcelOleLinks: partial.refresh };",
+        ):
+            self.assertIn(expected, partial)
+        self.assertIn("api?.get_workroom_cad_files?.(launchContext)", script)
 
     def test_publish_core_console_discards_instead_of_resaving_drawings(self):
         # QUIT's <N> default resaves the DWG, which would make every published

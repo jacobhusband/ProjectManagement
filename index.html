@@ -1940,11 +1940,36 @@
             <p><strong>Refresh Excel links</strong> reloads linked Excel tables, such as panel schedules, in full
                 AutoCAD and saves those drawings before plotting. It is slower.</p>
             <p><strong>Quick print</strong> plots the drawings as they were last saved.</p>
+            <p><strong>Partial Print</strong> plots only the sheets you pick.</p>
             <div class="tiny muted" id="publishExcelRefreshWorkbook" style="overflow-wrap: anywhere;" hidden></div>
         </div>
         <div class="modal-footer">
+            <button type="button" class="btn" id="publishExcelRefreshPartial">Partial Print</button>
             <button type="button" class="btn" id="publishExcelRefreshQuick">Quick print</button>
             <button type="button" class="btn primary" id="publishExcelRefreshRefresh">Refresh Excel links</button>
+        </div>
+    </dialog>
+
+    <!-- Opened by Partial Print: pick discipline-folder sheets or browse for other DWGs -->
+    <dialog id="publishPartialDlg" class="publish-partial-dialog" aria-labelledby="publishPartialTitle">
+        <div class="modal-header">
+            <div class="title" id="publishPartialTitle">Partial Print</div>
+            <button type="button" class="btn ghost" id="publishPartialCancel">Cancel</button>
+        </div>
+        <div class="modal-body stack">
+            <div class="tiny muted" id="publishPartialFolder" style="overflow-wrap: anywhere;"></div>
+            <div class="publish-partial-toolbar">
+                <button type="button" class="btn ghost" id="publishPartialAll">Select all</button>
+                <button type="button" class="btn ghost" id="publishPartialNone">Clear</button>
+                <button type="button" class="btn" id="publishPartialBrowse">Browse for DWGs...</button>
+                <span class="tiny muted" id="publishPartialCount"></span>
+            </div>
+            <fieldset id="publishPartialList" class="publish-partial-list" aria-label="Sheets to print"></fieldset>
+            <label class="radio-label"><input type="checkbox" id="publishPartialRefresh">
+                Refresh Excel links in the selected drawings first</label>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn primary" id="publishPartialPrint" disabled>Print selected</button>
         </div>
     </dialog>
 

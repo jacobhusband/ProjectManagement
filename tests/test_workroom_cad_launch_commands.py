@@ -671,6 +671,70 @@ class WorkroomCadLaunchCommandTests(unittest.TestCase):
                 activity_id=None,
             )
 
+    def test_partial_print_plots_only_the_picked_sheets(self):
+        # Partial Print preselects sheets, which must win over automatic discipline
+        # publish and over the Workroom's cached discipline DWG list.
+        publish_case = next(
+            case for case in TOOL_CASES if case["method_name"] == "run_publish_script"
+        )
+        settings = {
+            **publish_case["settings"],
+            "discipline": ["Electrical"],
+            "activeDiscipline": "Electrical",
+            "publishDwgOptions": {
+                **publish_case["settings"]["publishDwgOptions"],
+                "automateProjectDisciplinePublish": True,
+            },
+        }
+        with tempfile.TemporaryDirectory(prefix="acies-partial-print-") as temp_dir:
+            project_path = Path(temp_dir) / "Project"
+            electrical = project_path / "Electrical"
+            electrical.mkdir(parents=True)
+            sheets = [electrical / name for name in ("E00.00.dwg", "E01.00.dwg", "E02.00.dwg")]
+            elsewhere = Path(temp_dir) / "Other" / "M-1.dwg"
+            elsewhere.parent.mkdir()
+            for dwg_path in (*sheets, elsewhere):
+                dwg_path.write_text("", encoding="utf-8")
+            self.api._set_workroom_cad_file_cache_entry(
+                str(project_path), "Electrical", str(electrical),
+                [str(path) for path in sheets], "workroom_discipline_folder",
+            )
+            picked = [str(sheets[1]), str(elsewhere)]
+
+            captured = []
+            with patch.object(self.api, "get_user_settings", return_value=settings), patch.object(
+                self.api,
+                "_run_script_with_progress",
+                side_effect=lambda command, tool_id, **kwargs: captured.append(
+                    (command, tool_id, kwargs)
+                ),
+            ), patch.object(
+                self.api,
+                "_select_cad_files_in_app",
+            ) as picker_mock:
+                result = self.api.run_publish_script(
+                    {
+                        "source": "workroom",
+                        "projectPath": str(project_path),
+                        "cadFilePaths": picked,
+                        "workflowPreselectedDwgFiles": True,
+                    },
+                    None,
+                    {"refreshExcelOleLinks": False},
+                )
+
+            self.assertEqual("success", result["status"])
+            picker_mock.assert_not_called()
+            command = captured[0][0]
+            self.assertEqual("0", command[command.index("-RefreshExcelOleLinks") + 1])
+            files_list_path = Path(command[command.index("-FilesListPath") + 1])
+            try:
+                self.assertEqual(
+                    picked, files_list_path.read_text(encoding="utf-8").splitlines()
+                )
+            finally:
+                files_list_path.unlink(missing_ok=True)
+
     def test_automatic_project_publish_missing_selected_discipline_notifies_and_prompts(self):
         publish_case = next(
             case for case in TOOL_CASES if case["method_name"] == "run_publish_script"

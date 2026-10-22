@@ -11211,11 +11211,12 @@ function deriveToolActivityProgress(toolId, message, currentProgress = 5) {
 }
 
 // Refreshing linked Excel tables opens each linked drawing in full AutoCAD, which is slow,
-// so each Publish asks first. Resolves "refresh", "quick", or "" when cancelled.
+// so each Publish asks first. Resolves "refresh", "quick", "partial", or "" when cancelled.
 async function askPublishExcelRefresh(launchContext) {
   const dialog = document.getElementById("publishExcelRefreshDlg");
   const refresh = document.getElementById("publishExcelRefreshRefresh");
   const quick = document.getElementById("publishExcelRefreshQuick");
+  const partial = document.getElementById("publishExcelRefreshPartial");
   const cancel = document.getElementById("publishExcelRefreshCancel");
   const workbookNote = document.getElementById("publishExcelRefreshWorkbook");
   if (!dialog || !refresh || !quick || !cancel) return "refresh";
@@ -11239,6 +11240,7 @@ async function askPublishExcelRefresh(launchContext) {
     const onClose = () => {
       dialog.removeEventListener("close", onClose);
       refresh.onclick = quick.onclick = cancel.onclick = null;
+      if (partial) partial.onclick = null;
       resolve(choice);
     };
     const choose = (value) => {
@@ -11248,12 +11250,150 @@ async function askPublishExcelRefresh(launchContext) {
     dialog.addEventListener("close", onClose);
     refresh.onclick = () => choose("refresh");
     quick.onclick = () => choose("quick");
+    if (partial) partial.onclick = () => choose("partial");
     cancel.onclick = () => choose("");
     if (!showDialog(dialog)) {
       onClose();
       return;
     }
     refresh.focus();
+  });
+}
+
+// Partial Print lists the DWGs in the project's discipline folder and can add any
+// other DWG from the computer. Resolves { files, refresh }, or null when cancelled.
+async function askPublishPartialPrint(launchContext) {
+  const dialog = document.getElementById("publishPartialDlg");
+  const list = document.getElementById("publishPartialList");
+  const folderNote = document.getElementById("publishPartialFolder");
+  const count = document.getElementById("publishPartialCount");
+  const print = document.getElementById("publishPartialPrint");
+  const browse = document.getElementById("publishPartialBrowse");
+  const selectAll = document.getElementById("publishPartialAll");
+  const clear = document.getElementById("publishPartialNone");
+  const cancel = document.getElementById("publishPartialCancel");
+  const refresh = document.getElementById("publishPartialRefresh");
+  if (!dialog || !list || !print || !browse || !cancel) return null;
+  const api = window.pywebview?.api;
+
+  const boxes = new Map();
+  let disciplineFolder = "";
+  const empty = document.createElement("p");
+  empty.className = "tiny muted";
+  empty.textContent = "Finding sheets...";
+  list.replaceChildren(empty);
+  folderNote.textContent = "";
+  refresh.checked = false;
+
+  const sync = () => {
+    const all = [...boxes.values()];
+    const selected = all.filter((box) => box.checked).length;
+    count.textContent = all.length ? `${selected} of ${all.length} selected` : "";
+    print.disabled = !selected;
+    selectAll.disabled = clear.disabled = !all.length;
+    empty.hidden = all.length > 0;
+  };
+  const addSheet = (path, checked) => {
+    const key = path.toLowerCase();
+    if (boxes.has(key)) {
+      if (checked) boxes.get(key).checked = true;
+      return;
+    }
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.value = path;
+    box.checked = checked;
+    box.onchange = sync;
+    const label = document.createElement("label");
+    label.append(box, getWindowsPathLeaf(path));
+    const folder = path.slice(0, path.lastIndexOf("\\"));
+    if (folder.toLowerCase() !== disciplineFolder.toLowerCase()) {
+      const where = document.createElement("span");
+      where.className = "tiny muted";
+      where.textContent = folder;
+      label.append(where);
+    }
+    list.append(label);
+    boxes.set(key, box);
+  };
+  const preselected = (Array.isArray(launchContext?.cadFilePaths) ? launchContext.cadFilePaths : [])
+    .map((path) => String(path || "").trim())
+    .filter(Boolean);
+
+  Promise.resolve(api?.get_workroom_cad_files?.(launchContext))
+    .catch((error) => ({ status: "error", message: error?.message }))
+    .then((result) => {
+      if (!dialog.open) return;
+      disciplineFolder = String(result?.folderPath || "").trim();
+      const files = Array.isArray(result?.files) ? result.files : [];
+      const preselectedKeys = new Set(preselected.map((path) => path.toLowerCase()));
+      folderNote.textContent = disciplineFolder ||
+        `${result?.message || "No discipline folder was found."} Browse for the DWGs to print.`;
+      empty.textContent = disciplineFolder
+        ? "This folder has no DWGs. Browse for the DWGs to print."
+        : "No sheets yet. Browse for the DWGs to print.";
+      for (const file of files) {
+        const path = String(file?.path || "").trim();
+        if (path) addSheet(path, preselectedKeys.has(path.toLowerCase()));
+      }
+      preselected.forEach((path) => addSheet(path, true));
+      sync();
+    });
+
+  return new Promise((resolve) => {
+    let picked = null;
+    const onClose = () => {
+      dialog.removeEventListener("close", onClose);
+      print.onclick = browse.onclick = selectAll.onclick = clear.onclick = cancel.onclick = null;
+      resolve(picked);
+    };
+    dialog.addEventListener("close", onClose);
+    selectAll.onclick = () => {
+      boxes.forEach((box) => { box.checked = true; });
+      sync();
+    };
+    clear.onclick = () => {
+      boxes.forEach((box) => { box.checked = false; });
+      sync();
+    };
+    browse.onclick = async () => {
+      if (!api?.select_files) {
+        toast("The DWG file picker is unavailable.");
+        return;
+      }
+      browse.disabled = true;
+      try {
+        const selection = await api.select_files({
+          allow_multiple: true,
+          file_types: ["Drawing Files (*.dwg)", "All Files (*.*)"],
+          default_directory: disciplineFolder || getLaunchContextProjectRoot(launchContext) || undefined,
+        });
+        if (selection?.status === "success" && dialog.open) {
+          (Array.isArray(selection.paths) ? selection.paths : [])
+            .map((path) => String(path || "").trim())
+            .filter((path) => /\.dwg$/i.test(path))
+            .forEach((path) => addSheet(path, true));
+          sync();
+        } else if (selection && !["success", "cancelled"].includes(selection.status)) {
+          toast(selection.message || "Could not select DWG files.");
+        }
+      } finally {
+        browse.disabled = false;
+      }
+    };
+    print.onclick = () => {
+      const files = [...boxes.values()].filter((box) => box.checked).map((box) => box.value);
+      if (!files.length) return;
+      picked = { files, refresh: refresh.checked };
+      dialog.close();
+    };
+    cancel.onclick = () => dialog.close();
+    sync();
+    if (!showDialog(dialog)) {
+      onClose();
+      return;
+    }
+    browse.focus();
   });
 }
 
@@ -37787,6 +37927,17 @@ function initEventListeners() {
         const excelChoice = await askPublishExcelRefresh(launchContext);
         if (!excelChoice) return;
         publishParams = { refreshExcelOleLinks: excelChoice === "refresh" };
+        if (excelChoice === "partial") {
+          const partial = await askPublishPartialPrint(launchContext);
+          if (!partial) return;
+          // Preselected files skip Workroom auto-select and automatic discipline publish.
+          launchContext = {
+            ...launchContext,
+            cadFilePaths: partial.files,
+            workflowPreselectedDwgFiles: true,
+          };
+          publishParams = { refreshExcelOleLinks: partial.refresh };
+        }
       }
       const activityId = beginActivity({
         toolId: "toolPublishDwgs",
