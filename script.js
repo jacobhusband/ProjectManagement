@@ -4295,6 +4295,9 @@ async function resolveCadFilesBeforeLaunch(launchContext = null, toolId = "") {
     userSettings.manageLayersOptions?.autoSelectProjectDisciplineDwgs === true;
   const automaticDisciplineSelection =
     automaticDisciplinePublish || automaticDisciplineManageLayers;
+  // Repair XREF Paths always scans the project's discipline DWGs when a
+  // project is selected; there is no setting for it.
+  const automaticDisciplineRepairXrefs = toolId === "toolRepairXrefPaths";
 
   // Workroom launches resolve the discipline folder in the backend. Every
   // other launch selects files in the app so a hidden PowerShell child never
@@ -4302,7 +4305,8 @@ async function resolveCadFilesBeforeLaunch(launchContext = null, toolId = "") {
   if (
     source === "workroom" ||
     existingFiles.length ||
-    (automaticDisciplineSelection && hasLaunchContextProjectPath(context))
+    ((automaticDisciplineSelection || automaticDisciplineRepairXrefs) &&
+      hasLaunchContextProjectPath(context))
   ) {
     return { ...context, cadFilePaths: existingFiles };
   }

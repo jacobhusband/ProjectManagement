@@ -46,6 +46,22 @@ function Resolve-DialogInitialDirectory {
   return $FallbackPath
 }
 
+# The project's Xrefs folder: the nearest "Xrefs" folder beside the host
+# drawing's folder or one of its parents (<Project>\Electrical -> <Project>\Xrefs).
+function Find-ProjectXrefsFolder {
+  param([string]$HostDwg)
+
+  $folder = Get-ParentDirectory -Path $HostDwg
+  while (-not [string]::IsNullOrWhiteSpace($folder)) {
+    $candidate = Join-Path $folder "Xrefs"
+    if (Test-Path -LiteralPath $candidate -PathType Container) { return $candidate }
+    $parent = Get-ParentDirectory -Path $folder
+    if ($parent -eq $folder) { break }
+    $folder = $parent
+  }
+  return ""
+}
+
 Write-Host "PROGRESS: Initializing XREF path repair..."
 
 if ($AcadCore -and (Test-Path -LiteralPath $AcadCore -PathType Leaf)) {
@@ -666,6 +682,9 @@ try {
       $candidateDirectory = ""
       if (-not [string]::IsNullOrWhiteSpace($group.NewPath)) {
         $candidateDirectory = Get-ParentDirectory -Path $group.NewPath
+      }
+      if (-not $candidateDirectory) {
+        $candidateDirectory = Find-ProjectXrefsFolder -HostDwg ([string]$group.Occurrences[0].SourceDwg)
       }
       if (-not $candidateDirectory) {
         $candidateDirectory = Get-ParentDirectory -Path ([string]$group.Occurrences[0].SourceDwg)

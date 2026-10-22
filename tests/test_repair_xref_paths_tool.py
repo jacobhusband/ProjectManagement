@@ -1,5 +1,6 @@
 import os
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -63,6 +64,82 @@ class RepairXrefPathsToolTests(unittest.TestCase):
             "toolRepairXrefPaths",
             "Using selected DWGs (1)...",
             activity_id="repair-activity",
+        )
+
+    def _run_without_selected_files(self, launch_context, picker_result=None):
+        api = main_module.Api.__new__(main_module.Api)
+        api.test_mode = False
+        captured = []
+        with patch.object(
+            api,
+            "get_user_settings",
+            return_value={
+                "autocadPath": r"C:\AutoCAD\accoreconsole.exe",
+                "activeDiscipline": "Electrical",
+            },
+        ), patch.object(
+            api,
+            "_select_cad_files_in_app",
+            return_value=picker_result or {"status": "cancelled"},
+        ) as picker_mock, patch.object(
+            api,
+            "_run_script_with_progress",
+            side_effect=lambda command, tool_id, **kwargs: captured.append(command)
+            or {"status": "started"},
+        ), patch.object(api, "_trace_cad_auto_select"), patch.object(
+            api, "_notify_tool_status"
+        ) as notify_mock:
+            result = api.run_repair_xref_paths_script(launch_context, "repair-activity")
+        return result, captured, picker_mock, notify_mock
+
+    def test_backend_scans_every_discipline_dwg_when_a_project_is_selected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "260001 Example"
+            electrical = project / "Electrical"
+            (electrical / "Calculations").mkdir(parents=True)
+            for name in ("E01.00 Power.dwg", "E02.00 Lighting.dwg"):
+                (electrical / name).write_bytes(b"")
+            (electrical / "Calculations" / "nested.dwg").write_bytes(b"")
+
+            result, captured, picker_mock, notify_mock = self._run_without_selected_files(
+                {"source": "manual", "projectPath": str(project)}
+            )
+
+            self.assertEqual("success", result["status"])
+            picker_mock.assert_not_called()
+            command = captured[0]
+            listed = Path(command[command.index("-FilesListPath") + 1]).read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("E01.00 Power.dwg", listed)
+            self.assertIn("E02.00 Lighting.dwg", listed)
+            self.assertNotIn("nested.dwg", listed)
+            notify_mock.assert_called_once_with(
+                "toolRepairXrefPaths",
+                "Using all Electrical DWGs (2)...",
+                activity_id="repair-activity",
+            )
+
+    def test_backend_asks_for_dwgs_when_no_project_is_selected(self):
+        result, captured, picker_mock, _ = self._run_without_selected_files(
+            {"source": "manual"},
+            picker_result={
+                "status": "success",
+                "paths": [r"C:\Temp\E01.00.dwg"],
+                "selection": {"files_list_path": r"C:\Temp\picked.txt"},
+            },
+        )
+
+        self.assertEqual("success", result["status"])
+        picker_mock.assert_called_once()
+        self.assertEqual(r"C:\Temp\picked.txt", captured[0][captured[0].index("-FilesListPath") + 1])
+
+    def test_choose_dialog_starts_in_the_project_xrefs_folder(self):
+        text = POWERSHELL_PATH.read_text(encoding="utf-8")
+        self.assertIn("function Find-ProjectXrefsFolder", text)
+        self.assertIn(
+            "$candidateDirectory = Find-ProjectXrefsFolder -HostDwg ([string]$group.Occurrences[0].SourceDwg)",
+            text,
         )
 
     def test_tool_is_registered_in_backend_frontend_and_build(self):

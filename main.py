@@ -19730,9 +19730,37 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
             workflow_blocking = self._normalize_launch_context(launch_context).get('workflowBlocking') is True
 
             dwg_files = self._get_launch_context_cad_file_paths(launch_context)
+            discipline_selection = None
+            if not dwg_files and self._normalize_launch_context(launch_context).get(
+                    'workflowPreselectedDwgFiles') is not True:
+                # With a project selected, scan every DWG in its discipline folder.
+                resolution = self._resolve_project_discipline_dwg_selection(
+                    settings,
+                    launch_context,
+                    tool_id=tool_id,
+                    resolution_mode='project_discipline_auto_repair_xref_paths',
+                    trace_event='auto_repair_xref_paths_discipline_selected',
+                )
+                if resolution.get('status') == 'success':
+                    discipline_selection = resolution['selection']
+                elif resolution.get('reason') in (
+                        'discipline_folder_not_found', 'no_dwgs_in_discipline_folder'):
+                    self._notify_tool_status(
+                        tool_id,
+                        f"No {resolution.get('discipline')} DWGs found at "
+                        f"{resolution.get('folder_path')}. Select the DWG files manually.",
+                        activity_id=activity_id,
+                    )
+
             if dwg_files:
                 files_list_path = self._write_files_list_temp(dwg_files)
-                selected_count = len(dwg_files)
+                status_message = f"Using selected DWGs ({len(dwg_files)})..."
+            elif discipline_selection:
+                files_list_path = discipline_selection['files_list_path']
+                status_message = (
+                    f"Using all {discipline_selection['discipline']} DWGs "
+                    f"({discipline_selection['count']})..."
+                )
             else:
                 picker_result = self._select_cad_files_in_app(
                     self._resolve_launch_context_default_directory(launch_context, allow_workroom=True)
@@ -19742,13 +19770,9 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
                 if picker_result.get('status') != 'success':
                     raise Exception(picker_result.get('message') or 'Could not select DWG files.')
                 files_list_path = picker_result['selection']['files_list_path']
-                selected_count = len(picker_result.get('paths') or [])
+                status_message = f"Using selected DWGs ({len(picker_result.get('paths') or [])})..."
 
-            self._notify_tool_status(
-                tool_id,
-                f"Using selected DWGs ({selected_count})...",
-                activity_id=activity_id,
-            )
+            self._notify_tool_status(tool_id, status_message, activity_id=activity_id)
             command = self._build_powershell_script_command(
                 script_path,
                 '-AcadCore',

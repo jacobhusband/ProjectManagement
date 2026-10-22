@@ -584,7 +584,8 @@ class PowerShellCadWrapperTests(unittest.TestCase):
         for expected in (
             'async function resolveCadFilesBeforeLaunch(launchContext = null, toolId = "") {',
             'userSettings.publishDwgOptions?.automateProjectDisciplinePublish === true',
-            '(automaticDisciplineSelection && hasLaunchContextProjectPath(context))',
+            '((automaticDisciplineSelection || automaticDisciplineRepairXrefs) &&\n      hasLaunchContextProjectPath(context))',
+            'const automaticDisciplineRepairXrefs = toolId === "toolRepairXrefPaths";',
             "window.pywebview.api.select_files({",
             'file_types: ["Drawing Files (*.dwg)", "All Files (*.*)"],',
             "default_directory: getLaunchContextProjectRoot(context) || undefined,",
