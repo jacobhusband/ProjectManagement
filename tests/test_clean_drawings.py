@@ -76,6 +76,27 @@ class CleanDrawingTests(unittest.TestCase):
         self.assertTrue((Path(result['output']) / 'Review/Comparison.pdf').exists())
         self.assertFalse((Path(result['output']) / 'form.pdf').exists())
 
+    def test_pdf_markups_are_flattened_into_the_staged_copy_only(self):
+        source = self.root / 'form.pdf'
+        with fitz.open() as document:
+            page = document.new_page()
+            page.insert_text((72, 72), 'Energy form')
+            page.add_freetext_annot(fitz.Rect(72, 100, 300, 120), 'Wilson Lee, PE')
+            document.save(source)
+        original = source.read_bytes()
+        self.pdfs = [{'Owner': str(self.sheet), 'Resolved': str(source), 'Path': str(source), 'Handle': '1', 'Page': '1'}]
+        def worker(*args):
+            job = args[3]
+            if job['Operation'] == 'prepare':
+                # PDFIMPORT drops annotations, so the markup must already be page content.
+                with fitz.open(job['PdfCopies'][str(source)]) as staged:
+                    self.assertIsNone(staged[0].first_annot)
+                    self.assertIn('Wilson Lee, PE', staged[0].get_text())
+            return self.worker(*args)
+        result = self.run_job(worker)
+        self.assertEqual(original, source.read_bytes())
+        self.assertEqual('success', result['status'])
+
     def test_only_reference_plot_freezes_revision_layers_like_sheet_cleanup(self):
         plots = []
         def worker(*args):

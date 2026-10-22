@@ -276,10 +276,18 @@ def run(project, selection, acad, notify=lambda message: None, worker=run_worker
                 target.chmod(stat.S_IREAD | stat.S_IWRITE)
                 fingerprints[str(source)] = _file_hash(target)
                 if kind == 'PDF':
-                    # PDFIMPORT omits annotations. Refuse rather than silently lose form entries or markups.
+                    # PDFIMPORT omits annotations, so bake markups and form entries into the staged
+                    # copy's page content. Layers and passwords have no faithful conversion: refuse.
+                    baked = target.with_name(target.stem + '.baked.pdf')
                     with fitz.open(target) as document:
-                        if document.needs_pass or document.get_ocgs() or any(list(page.widgets()) or list(page.annots()) for page in document):
-                            raise RuntimeError(f'PDF contains interactive fields, annotations, optional layers, or requires a password. Flatten a working PDF before cleanup: {source}')
+                        if document.needs_pass or document.get_ocgs():
+                            raise RuntimeError(f'PDF contains optional layers or requires a password. Flatten a working PDF before cleanup: {source}')
+                        if any(page.first_annot or page.first_widget for page in document):
+                            notify(f'Flattening PDF markups and form fields in the working copy: {source.name}')
+                            document.bake()
+                            document.save(baked, garbage=3, deflate=True)
+                    if baked.exists():
+                        os.replace(baked, target)
                 media_copies[str(source)] = str(target)
         def asset_map(records):
             return {record['Resolved']: media_copies[str(Path(record['Resolved']).resolve(strict=True))] for record in records}
@@ -390,7 +398,8 @@ def run(project, selection, acad, notify=lambda message: None, worker=run_worker
                   'titleblockMarkRemoval': mark_removal, 'proxyRemoval': proxy_removal, 'comparison': comparison,
                   'titleblockValidation': title_result, 'sourceHashes': fingerprints,
                   'limitations': ['PDF pages import as native CAD objects; supported raster pixels become native solids.',
-                                  'Custom PDF clips/adjustments, PDF markups/layers, complex images, other underlays and linked OLE remain unsupported.',
+                                  'PDF markups and form fields are flattened into the imported page content.',
+                                  'Custom PDF clips/adjustments, PDF layers, complex images, other underlays and linked OLE remain unsupported.',
                                   'Boundary intersection uses conservative entity bounds.',
                                   'Image colors are snapped to within 16/255 per channel; partly transparent image edges are blended over white paper.',
                                   'PDF comparison uses Layout at 1:1 inches, zero offset, 510-monochrome.ctb, 144 DPI and a 24/255 channel tolerance; it is not proof of engineering equivalence.',
