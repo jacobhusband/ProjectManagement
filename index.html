@@ -593,7 +593,7 @@
                                         <path d="m9.5 13.5 2.5 2.5 2.5-2.5"></path>
                                     </svg>
                                 </div>
-                                <div class="tool-card-header">Repair XREF Paths</div>
+                                <div class="tool-card-header">XREF</div>
                                 <div class="tool-card-body">
                                     Scans the project's discipline DWGs (or the DWGs you select), shows each unique XREF and its
                                     status, and replaces editable saved paths across every scanned host drawing.
@@ -604,7 +604,7 @@
                         <!-- Card 4: Clean XREFs -->
                         <div id="toolCleanXrefs" class="tool-card" role="button" tabindex="0">
                             <button type="button" class="tool-card-settings" data-settings-target="cleanSettingsDlg"
-                                aria-label="XREF settings" title="Settings">⚙️</button>
+                                aria-label="New Backgrounds settings" title="Settings">⚙️</button>
                             <div class="tool-card-content">
                                 <div class="tool-icon">
                                     <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -614,9 +614,11 @@
                                         </path>
                                     </svg>
                                 </div>
-                                <div class="tool-card-header">XREF</div>
+                                <div class="tool-card-header">New Backgrounds</div>
                                 <div class="tool-card-body">
-                                    Strips saved XREF paths. Sets all objects color to "by layer". Purges & Audits.
+                                    Finds the newest Arch drawings (loose or zipped) for the XREFs your discipline's DWGs
+                                    use, archives the current Xrefs and replaces them. Strips saved XREF paths, sets
+                                    colors "by layer", purges & audits.
                                 </div>
                             </div>
                             <div class="tool-card-status"></div>
@@ -1677,7 +1679,7 @@
             <!-- CAD Cleanup Defaults Section -->
             <h3 class="section-title" style="margin-top: 1rem;">CAD Cleanup Defaults</h3>
             <div class="cad-settings-panel">
-                <p class="cad-settings-intro">Choose the cleanup steps applied when you run <code>XREF</code>.</p>
+                <p class="cad-settings-intro">Choose the cleanup steps applied when you run <code>New Backgrounds</code>.</p>
                 <fieldset class="cad-cleanup-group">
                     <legend>References &amp; appearance</legend>
                     <label class="cad-cleanup-row">
@@ -1754,8 +1756,9 @@
                             Auto-select DWGs when compatible tools are launched from a Workroom</label>
                     </div>
                     <div class="tiny muted" style="margin-top: 0.35rem;">On: Publish and Freeze / Thaw launched from a
-                        project Workroom auto-select base-level DWGs from the active discipline folder. XREF always opens
-                        the Arch folder for manual file selection.
+                        project Workroom auto-select base-level DWGs from the active discipline folder. New Backgrounds always finds
+                        its own drawings: the newest Arch versions of the XREFs the discipline's DWGs use, or the
+                        Arch folder for manual selection when it finds none.
                     </div>
                 </div>
             </div>
@@ -2138,7 +2141,7 @@
     <!-- Tool Settings: Prepare CAD DWG for Reference -->
     <dialog id="cleanSettingsDlg">
         <div class="modal-header">
-            <div class="title">XREF Settings</div>
+            <div class="title">New Backgrounds Settings</div>
             <button class="btn ghost" data-close-dialog="cleanSettingsDlg">Close</button>
         </div>
         <div class="modal-body stack tool-settings-body">
@@ -2570,7 +2573,7 @@
                         <li>Tools for different projects run at the same time. Tools for the same project run one at a
                             time: a tool you start while its project is busy shows as <em>Queued</em> in the activity
                             tray and starts on its own when the earlier one finishes. <strong>Freeze / Thaw</strong> and
-                            <strong>XREF</strong> also run one at a time across all projects.</li>
+                            <strong>New Backgrounds</strong> also run one at a time across all projects.</li>
                         <li>Finished tools stay in <strong>Activity History</strong> (the clock icon in the header, or
                             <em>History</em> in the activity tray) after you clear them. From there you can reopen
                             output folders, PDFs and drawings, or rerun the tool.</li>

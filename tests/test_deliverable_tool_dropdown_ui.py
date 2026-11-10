@@ -20,7 +20,7 @@ class DeliverableToolDropdownUiTests(unittest.TestCase):
             'id: "toolManageLayers"',
             'menuLabel: "Freeze / Thaw"',
             'id: "toolCleanXrefs"',
-            'menuLabel: "XREF"',
+            'menuLabel: "New Backgrounds"',
             'id: "toolCreateNarrativeTemplate"',
             'menuLabel: "Narrative"',
             'id: "toolCreatePlanCheckTemplate"',

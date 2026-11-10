@@ -266,7 +266,7 @@ function Show-ZipDwgDialog {
       $list.Focus() | Out-Null
     })
     $label = New-Object System.Windows.Forms.Label
-    $label.Text = 'Check the drawings you want to prepare for XREF. Paths are shown as stored in the ZIP.'
+    $label.Text = 'Check the drawings you want to prepare as new backgrounds. Paths are shown as stored in the ZIP.'
     $label.Dock = 'Top'
     $label.Height = 35
     $list = New-Object System.Windows.Forms.CheckedListBox

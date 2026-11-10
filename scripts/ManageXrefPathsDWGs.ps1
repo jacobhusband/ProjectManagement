@@ -544,7 +544,7 @@ try {
     }
     [System.Windows.Forms.MessageBox]::Show(
       $message,
-      "Repair XREF Paths",
+      "XREF",
       [System.Windows.Forms.MessageBoxButtons]::OK,
       [System.Windows.Forms.MessageBoxIcon]::Information
     ) | Out-Null
@@ -904,7 +904,7 @@ try {
         [System.Windows.Forms.MessageBox]::Show(
           $form,
           "An XREF path has to end in .dwg.",
-          "Repair XREF Paths",
+          "XREF",
           [System.Windows.Forms.MessageBoxButtons]::OK,
           [System.Windows.Forms.MessageBoxIcon]::Warning
         ) | Out-Null
@@ -920,7 +920,7 @@ try {
         [System.Windows.Forms.MessageBox]::Show(
           $form,
           "Select one or more rows first. Hold Ctrl or Shift to select several.",
-          "Repair XREF Paths",
+          "XREF",
           [System.Windows.Forms.MessageBoxButtons]::OK,
           [System.Windows.Forms.MessageBoxIcon]::Information
         ) | Out-Null

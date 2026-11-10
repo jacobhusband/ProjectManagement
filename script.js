@@ -3917,8 +3917,8 @@ const SHARED_TOOL_LAUNCH_REGISTRY = Object.freeze([
   },
   {
     id: "toolRepairXrefPaths",
-    label: "Repair XREF Paths",
-    menuLabel: "Repair XREF Paths",
+    label: "XREF",
+    menuLabel: "XREF",
     launchType: "user-selects-files",
     category: "general",
     iconSvg:
@@ -3936,8 +3936,8 @@ const SHARED_TOOL_LAUNCH_REGISTRY = Object.freeze([
   },
   {
     id: "toolCleanXrefs",
-    label: "XREF",
-    menuLabel: "XREF",
+    label: "New Backgrounds",
+    menuLabel: "New Backgrounds",
     launchType: "user-selects-files",
     category: "general",
     iconSvg:
@@ -4295,7 +4295,7 @@ async function resolveCadFilesBeforeLaunch(launchContext = null, toolId = "") {
     userSettings.manageLayersOptions?.autoSelectProjectDisciplineDwgs === true;
   const automaticDisciplineSelection =
     automaticDisciplinePublish || automaticDisciplineManageLayers;
-  // Repair XREF Paths always scans the project's discipline DWGs when a
+  // XREF (repair paths) always scans the project's discipline DWGs when a
   // project is selected; there is no setting for it.
   const automaticDisciplineRepairXrefs = toolId === "toolRepairXrefPaths";
 
@@ -28962,10 +28962,12 @@ const PLUGIN_DOC_OVERRIDES = {
   },
   LFSCommands: {
     replace: true,
-    order: ["LFS", "LIGHTPLANSCAN", "LPSCAN", "LIGHTPLANAPPLY", "LPAPPLY"],
+    order: ["LFS", "EQS", "LIGHTPLANSCAN", "LPSCAN", "LIGHTPLANAPPLY", "LPAPPLY"],
     commands: {
       LFS:
         "Inserts the built-in lighting fixture schedule table template and applies local sync data when available.",
+      EQS:
+        "Opens the equipment schedule editor to place, load, and update an electrical equipment schedule table. Rows are saved to ACIESEquipmentSchedule.json beside the drawing.",
       LIGHTPLANSCAN:
         "Scans configured room-boundary polylines and light fixture blocks into ACIESLightingPlan.snapshot.json beside the active drawing.",
       LPSCAN: "Alias for LIGHTPLANSCAN.",
@@ -38048,14 +38050,14 @@ function initEventListeners() {
           : await window.pywebview.api.run_repair_xref_paths_script(null, activityId);
         if (result?.status === "error") {
           failActivity(activityId, {
-            message: result.message || "Failed to start Repair XREF Paths.",
+            message: result.message || "Failed to start XREF.",
           });
         } else if (result?.status === "cancelled") {
           acceptActivity(activityId);
         }
       } catch (error) {
         failActivity(activityId, {
-          message: error?.message || "Failed to start Repair XREF Paths.",
+          message: error?.message || "Failed to start XREF.",
         });
       }
     });
@@ -38068,35 +38070,45 @@ function initEventListeners() {
         await showAutocadSelectModal();
         return;
       }
-      // Ask for the drawings before queueing, so a run waiting behind another
-      // starts on its own. Reruns keep the original context and ask again.
+      // Settle the drawings before queueing, so a run waiting behind another
+      // starts on its own. From a project they are found by scanning its
+      // drawings, which takes a while, so the activity shows first. Reruns keep
+      // the original context and look again.
+      const activityId = beginActivity({
+        toolId: "toolCleanXrefs",
+        message: "Finding the drawings to prepare...",
+        progress: 5,
+        rerunLaunchContext: launchContext,
+        rerunDefaultPath: getLaunchContextProjectRoot(launchContext),
+      });
       let runContext = launchContext;
       try {
         const selection = await window.pywebview.api.select_clean_xrefs_sources(
-          launchContext || null
+          launchContext || null,
+          activityId
         );
-        if (selection?.status === "cancelled") return;
+        if (selection?.status === "cancelled") {
+          acceptActivity(activityId);
+          return;
+        }
         if (selection?.status === "error") {
-          toast(selection.message || "Could not select drawings for XREF.");
+          failActivity(activityId, {
+            message: selection.message || "Could not select drawings for New Backgrounds.",
+          });
           return;
         }
         if (selection?.status === "success") {
           runContext = { ...(launchContext || {}), dwgFileSources: selection.sources };
         }
       } catch (error) {
-        toast(error?.message || "Could not select drawings for XREF.");
+        failActivity(activityId, {
+          message: error?.message || "Could not select drawings for New Backgrounds.",
+        });
         return;
       }
       const sourcePaths = (runContext?.dwgFileSources || []).map(
         (source) => source.projectRoot || source.path || source.zipPath
       );
-      const activityId = beginActivity({
-        toolId: "toolCleanXrefs",
-        message: "Initializing...",
-        progress: 5,
-        rerunLaunchContext: launchContext,
-        rerunDefaultPath: getLaunchContextProjectRoot(launchContext),
-      });
       if (!(await waitForToolTurn(activityId, "toolCleanXrefs", runContext, sourcePaths))) return;
       try {
         const result = runContext
@@ -38104,12 +38116,12 @@ function initEventListeners() {
           : await window.pywebview.api.run_clean_xrefs_script(null, activityId);
         if (result?.status === "error") {
           failActivity(activityId, {
-            message: result.message || "Failed to start Clean Xrefs.",
+            message: result.message || "Failed to start New Backgrounds.",
           });
         }
       } catch (error) {
         failActivity(activityId, {
-          message: error?.message || "Failed to start Clean Xrefs.",
+          message: error?.message || "Failed to start New Backgrounds.",
         });
       }
     });

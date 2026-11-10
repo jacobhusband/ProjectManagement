@@ -158,7 +158,7 @@ class RepairXrefPathsToolTests(unittest.TestCase):
 
         for expected in (
             'id: "toolRepairXrefPaths"',
-            'label: "Repair XREF Paths"',
+            'label: "XREF"',
             'launchType: "user-selects-files"',
             '.getElementById("toolRepairXrefPaths")',
             "run_repair_xref_paths_script(",
@@ -167,7 +167,7 @@ class RepairXrefPathsToolTests(unittest.TestCase):
             self.assertIn(expected, script_text)
 
         self.assertIn('id="toolRepairXrefPaths"', index_text)
-        self.assertIn("Repair XREF Paths", index_text)
+        self.assertIn('<div class="tool-card-header">XREF</div>', index_text)
         self.assertIn(r"scripts\\ManageXrefPathsDWGs.ps1", spec_text)
 
     def test_script_lists_every_xref_per_drawing_and_follows_referenced_dwgs(self):

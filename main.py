@@ -717,7 +717,7 @@ WORKFLOW_TOOL_REGISTRY = {
         ],
     },
     'cleanXrefs': {
-        'displayName': 'XREF',
+        'displayName': 'New Backgrounds',
         'description': 'Strip XREF paths, set colors by layer, purge, and audit.',
         'invoke': (lambda api, ctx, aid, params:
                    api.run_clean_xrefs_script(ctx, aid, params)),
@@ -734,7 +734,7 @@ WORKFLOW_TOOL_REGISTRY = {
         ],
     },
     'repairXrefPaths': {
-        'displayName': 'Repair XREF Paths',
+        'displayName': 'XREF',
         'description': 'Scan XREFs in selected DWGs and point missing or orphaned references at the right files.',
         'invoke': (lambda api, ctx, aid, params:
                    api.run_repair_xref_paths_script(ctx, aid)),
@@ -17919,7 +17919,7 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
             return []
         return self._list_base_level_dwgs(electrical_folder)
 
-    def _read_workflow_xref_scan_results(self, settings, dwg_files):
+    def _read_workflow_xref_scan_results(self, settings, dwg_files, notify=None):
         dwg_paths = self._normalize_dwg_file_paths(dwg_files, require_exists=True)
         if not dwg_paths:
             return []
@@ -17937,20 +17937,27 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
                 files_list_path,
             )
             timeout = max(60, min(600, len(dwg_paths) * 45))
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                timeout=timeout,
-            )
-            output = (result.stdout or '') + '\n' + (result.stderr or '')
+            if notify is None:
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    timeout=timeout,
+                )
+                output = (result.stdout or '') + '\n' + (result.stderr or '')
+            else:
+                result, output = self._run_xref_scan_with_progress(
+                    command, timeout, notify)
             for line in reversed(output.splitlines()):
                 line = line.strip()
                 if line.startswith('XREF_JSON:'):
                     payload = line[len('XREF_JSON:'):].strip()
                     parsed = json.loads(payload)
+                    # PowerShell writes a single drawing as an object, not a list.
+                    if isinstance(parsed, dict):
+                        parsed = [parsed]
                     return parsed if isinstance(parsed, list) else []
             if result.returncode != 0:
                 logging.warning(
@@ -17966,6 +17973,38 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
             except Exception:
                 pass
         return []
+
+    def _run_xref_scan_with_progress(self, command, timeout, notify):
+        """Runs the XREF scan, passing each of its progress lines to notify."""
+        startupinfo = None
+        if sys.platform == "win32":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            startupinfo=startupinfo,
+        )
+        timer = threading.Timer(timeout, process.kill)
+        timer.daemon = True
+        timer.start()
+        lines = []
+        try:
+            for line in iter(process.stdout.readline, ''):
+                lines.append(line)
+                text = line.strip()
+                if text.startswith('PROGRESS:') and 'ERROR' not in text:
+                    notify(text[len('PROGRESS:'):].strip())
+            process.stdout.close()
+            process.wait()
+        finally:
+            timer.cancel()
+        return process, ''.join(lines)
 
     def _extract_xref_target_basenames(self, scan_results):
         seen = set()
@@ -18032,6 +18071,12 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
                 folder_mtime = os.path.getmtime(root)
             except Exception:
                 folder_mtime = 0
+            # A dated package folder ('2026-01-15 DD60') says when the set was
+            # received; folder times change whenever a file inside is touched.
+            package = self._arch_package_name(arch_folder, root)
+            package_date = self._arch_package_timestamp(package)
+            if package_date:
+                folder_mtime = package_date
             for filename in files:
                 full_path = os.path.join(root, filename)
                 lower_name = filename.lower()
@@ -18042,6 +18087,7 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
                         file_mtime = 0
                     candidates.append({
                         'matchKey': os.path.splitext(filename)[0].lower(),
+                        'package': package,
                         'folderMtime': folder_mtime,
                         'fileMtime': file_mtime,
                         'source': {
@@ -18068,6 +18114,7 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
                             entry_base = os.path.basename(entry_name)
                             candidates.append({
                                 'matchKey': os.path.splitext(entry_base)[0].lower(),
+                                'package': package or filename,
                                 'folderMtime': folder_mtime,
                                 'fileMtime': max(zip_mtime, self._zipinfo_timestamp(info)),
                                 'source': {
@@ -18089,41 +18136,114 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
         )
         return candidates
 
-    def _resolve_workflow_clean_xref_sources(self, settings, launch_context):
-        electrical_dwgs = self._resolve_workflow_electrical_dwg_files(
-            settings, launch_context)
-        if not electrical_dwgs:
-            return []
-        scan_results = self._read_workflow_xref_scan_results(settings, electrical_dwgs)
-        target_basenames = self._extract_xref_target_basenames(scan_results)
-        if not target_basenames:
-            return []
+    def _arch_package_name(self, arch_folder, folder):
+        """The first folder under Arch that holds `folder`, e.g. '2026-01-15 DD60'."""
+        try:
+            relative = os.path.relpath(folder, arch_folder)
+        except ValueError:
+            return ''
+        first = re.split(r'[\\/]+', relative)[0]
+        return '' if first in ('', '.', '..') else first
+
+    def _arch_package_timestamp(self, package_name):
+        """The date a package folder name starts with, as a timestamp, or 0."""
+        match = re.match(r'\s*(\d{4})[-_. ]?(\d{2})[-_. ]?(\d{2})(?!\d)', str(package_name or ''))
+        if not match:
+            return 0
+        try:
+            return datetime.datetime(
+                int(match.group(1)), int(match.group(2)), int(match.group(3))).timestamp()
+        except (ValueError, OverflowError, OSError):
+            return 0
+
+    def _clean_xrefs_discipline_short(self, discipline):
+        discipline = str(discipline or '').strip()
+        return {
+            'Electrical': 'E',
+            'Mechanical': 'M',
+            'Plumbing': 'P',
+            'General': 'G',
+        }.get(discipline, (discipline[:1] or 'E').upper())
+
+    def _clean_xrefs_target_basename(self, source_basename, discipline_short):
+        """The name removeXREFPaths.ps1 gives a prepared background in Xrefs.
+
+        Mirrors its Get-SheetIdFromName: 'Bldg A02-01 Floor Plan' -> 'A02-01 (E)'.
+        """
+        base = str(source_basename or '').strip()
+        match = (
+            re.search(r'(?i)\bA\d{1,3}-\d{1,3}[A-Z]?\b', base)
+            or re.search(r'(?i)\b[A-Z]-\d{1,3}-\d{2}-\d+\b', base)
+        )
+        target = match.group(0).upper() if match else base
+        return f'{target} ({discipline_short})'
+
+    def _resolve_clean_xref_sources(self, settings, launch_context, discipline='Electrical',
+                                    discipline_short='', notify=None):
+        """Finds the newest Arch drawing for each background the discipline's DWGs use.
+
+        Returns the sources to prepare plus what was looked at, so the caller can
+        say why nothing was found. A background matches an Arch drawing when the
+        drawing would be saved under the XREF's name ('A02-01 (E)') or has it already.
+        """
+        notify = notify or (lambda message: None)
+        result = {
+            'sources': [], 'matches': [], 'unmatched': [], 'disciplineFolder': '',
+            'archFolder': '', 'drawingCount': 0, 'xrefCount': 0,
+        }
         project_path = self._get_workflow_project_path(settings, launch_context)
         if not project_path:
-            return []
+            return result
+        folder_resolution = self._resolve_workroom_discipline_folder(
+            project_path, discipline)
+        discipline_folder = folder_resolution.get('resolved_folder') or ''
+        result['disciplineFolder'] = discipline_folder
+        discipline_dwgs = self._list_base_level_dwgs(discipline_folder)
+        result['drawingCount'] = len(discipline_dwgs)
+        if not discipline_dwgs:
+            return result
+        arch_resolution = self._resolve_workroom_discipline_folder(project_path, 'Arch')
+        arch_folder = arch_resolution.get('resolved_folder') or ''
+        result['archFolder'] = arch_folder
+        if not arch_folder:
+            return result
+
+        notify(f"Scanning {len(discipline_dwgs)} {discipline} drawing(s) for XREFs in use...")
+        scan_results = self._read_workflow_xref_scan_results(
+            settings, discipline_dwgs, notify=notify)
+        target_basenames = self._extract_xref_target_basenames(scan_results)
+        result['xrefCount'] = len(target_basenames)
+        if not target_basenames:
+            return result
+
         project_root = (
             self._find_workroom_project_root_by_id(project_path)
             or os.path.normpath(project_path)
         )
-        arch_resolution = self._resolve_workroom_discipline_folder(project_path, 'Arch')
-        arch_folder = arch_resolution.get('resolved_folder') or ''
         include_zips = _normalize_workflow_cad_defaults(
             (settings or {}).get('workflowCadDefaults')
         ).get('cleanXrefsSearchZipArchives', True)
+        notify("Searching the Arch folder for newer backgrounds...")
         candidates = self._iter_arch_dwg_source_candidates(
             arch_folder, project_root, include_zips=include_zips)
-        if not candidates:
-            return []
-        by_key = {}
+        short = discipline_short or self._clean_xrefs_discipline_short(discipline)
         for candidate in candidates:
-            by_key.setdefault(candidate.get('matchKey'), []).append(candidate)
+            candidate['targetKey'] = self._clean_xrefs_target_basename(
+                candidate.get('matchKey'), short).lower()
+
         selected = []
         seen_sources = set()
         for basename in target_basenames:
-            matches = by_key.get(str(basename or '').strip().lower()) or []
-            if not matches:
+            key = str(basename or '').strip().lower()
+            # Candidates are newest first, so the first match is the newest one.
+            match = next(
+                (item for item in candidates if key in (item['targetKey'], item.get('matchKey'))),
+                None,
+            )
+            if not match:
+                result['unmatched'].append(basename)
                 continue
-            source = matches[0].get('source') or {}
+            source = match.get('source') or {}
             if source.get('kind') == 'zipEntry':
                 source_key = (
                     'zipEntry',
@@ -18136,7 +18256,21 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
                 continue
             seen_sources.add(source_key)
             selected.append(source)
-        return self._normalize_dwg_file_sources(selected, require_exists=True)
+            result['matches'].append({
+                'xref': basename,
+                'package': match.get('package') or '',
+                'displayPath': self._source_display_path(source),
+            })
+        result['sources'] = self._normalize_dwg_file_sources(selected, require_exists=True)
+        return result
+
+    def _resolve_workflow_clean_xref_sources(self, settings, launch_context):
+        context = self._resolve_workroom_context(settings, launch_context)
+        discipline = context.get('discipline') or self._primary_discipline_from_settings(settings)
+        return self._resolve_clean_xref_sources(
+            settings, launch_context, 'Electrical',
+            discipline_short=self._clean_xrefs_discipline_short(discipline),
+        )['sources']
 
     def _trace_cad_auto_select(self, event, **fields):
         try:
@@ -19798,7 +19932,7 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
                 if script_status in ('error', 'cancelled'):
                     return {
                         'status': script_status,
-                        'message': script_result.get('message') or 'Repair XREF Paths did not finish.',
+                        'message': script_result.get('message') or 'XREF did not finish.',
                         'activityId': activity_key,
                     }
             return {'status': 'success', 'activityId': activity_key}
@@ -19807,12 +19941,58 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
             self._notify_tool_status(tool_id, f"ERROR: {e}", activity_id=activity_id)
             return {'status': 'error', 'message': str(e), 'activityId': activity_key}
 
-    def select_clean_xrefs_sources(self, launch_context=None):
-        """Asks for the drawings XREF will prepare before the run waits for its turn.
+    def _find_new_background_sources(self, settings, launch_context, context, activity_id=None):
+        """Finds the project's newer backgrounds for New Backgrounds, without asking.
 
-        Opens the same DWG/ZIP pickers as the run itself, so a run queued behind
-        another one starts without input. Returns 'skipped' when the run picks its
-        drawings without asking (test mode, workflow or launch-context drawings).
+        Scans the active discipline's DWGs for the XREFs they use and picks the
+        newest Arch drawing (loose or zipped) for each. Returns no sources when
+        there is no project or nothing matched; the caller then asks instead.
+        """
+        def notify(message):
+            self._notify_tool_status('toolCleanXrefs', message, activity_id=activity_id)
+
+        if not str(context.get('project_path') or '').strip():
+            return []
+        discipline = context.get('discipline') or self._primary_discipline_from_settings(settings)
+        found = self._resolve_clean_xref_sources(
+            settings, launch_context, discipline, notify=notify)
+        sources = found['sources']
+        if sources:
+            packages = []
+            for match in found['matches']:
+                if match['package'] and match['package'] not in packages:
+                    packages.append(match['package'])
+            notify(
+                f"Found {len(sources)} new background(s) for the {found['xrefCount']} "
+                f"XREF(s) in use" + (f" in {', '.join(packages)}." if packages else "."))
+            logging.info(
+                "New Backgrounds auto-selected %s source(s): %s; no Arch drawing for: %s",
+                len(sources),
+                '; '.join(f"{m['xref']} <- {m['displayPath']}" for m in found['matches']),
+                ', '.join(found['unmatched']) or '<none>')
+            return sources
+
+        if not found['disciplineFolder'] or not found['drawingCount']:
+            reason = f"No {discipline} drawings were found in the project."
+        elif not found['archFolder']:
+            reason = "The project has no Arch folder."
+        elif not found['xrefCount']:
+            reason = f"The {discipline} drawings use no XREFs."
+        else:
+            reason = "No Arch drawing matches the XREFs in use."
+        logging.info("New Backgrounds auto-select found nothing: %s", reason)
+        notify(f"{reason} Choose the drawings to prepare...")
+        return []
+
+    def select_clean_xrefs_sources(self, launch_context=None, activity_id=None):
+        """Settles which drawings New Backgrounds prepares before the run waits for its turn.
+
+        Launched from a project, it finds them itself: the XREFs the active
+        discipline's DWGs use, matched to the newest drawings in Arch. Otherwise,
+        or when that finds nothing, it opens the same DWG/ZIP pickers as the run,
+        so a run queued behind another one starts without input. Returns 'skipped'
+        when the run picks its drawings without asking (test mode, workflow or
+        launch-context drawings).
         """
         try:
             if self.test_mode or self._get_launch_context_dwg_file_sources(launch_context):
@@ -19829,6 +20009,10 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
             # Mirror the run's choice between asking and auto-selecting.
             context = self._resolve_workroom_context(settings, launch_context)
             if self._should_force_workroom_clean_xrefs_manual_selection(context):
+                found_sources = self._find_new_background_sources(
+                    settings, launch_context, context, activity_id=activity_id)
+                if found_sources:
+                    return {'status': 'success', 'sources': found_sources, 'automatic': True}
                 default_directory = self._resolve_workroom_arch_folder(
                     settings, launch_context)
             else:
@@ -20074,9 +20258,9 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
                     return {
                         'status': script_status,
                         'message': script_result.get('message') or (
-                            'Prepare CAD for XREF was cancelled.'
+                            'New Backgrounds was cancelled.'
                             if script_status == 'cancelled'
-                            else 'Prepare CAD for XREF failed.'
+                            else 'New Backgrounds failed.'
                         ),
                         'activityId': str(activity_id or '').strip(),
                         'scriptResult': script_result,

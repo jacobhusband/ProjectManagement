@@ -899,6 +899,92 @@ class CleanXrefsSelectBeforeQueueTests(unittest.TestCase):
         self.assertEqual({"status": "skipped"}, result)
         script_mock.assert_not_called()
 
+    def _project_with_backgrounds(self, temp_dir):
+        """A project whose newest Arch package is a ZIP and whose older one is a folder."""
+        project = Path(temp_dir) / "260012 Example"
+        mechanical = project / "Mechanical"
+        older = project / "Arch" / "2026-01-05 DD60" / "CAD"
+        newer = project / "Arch" / "2026-03-01 CD90"
+        for folder in (mechanical, older, newer, project / "Xrefs"):
+            folder.mkdir(parents=True)
+        sheet = mechanical / "M-1.dwg"
+        sheet.write_text("sheet", encoding="utf-8")
+        older_plan = older / "Bldg A02-01 Floor Plan.dwg"
+        older_plan.write_text("old", encoding="utf-8")
+        older_rcp = older / "Bldg A04-01 RCP.dwg"
+        older_rcp.write_text("old", encoding="utf-8")
+        zip_path = newer / "CAD.zip"
+        with zipfile.ZipFile(zip_path, "w") as archive:
+            archive.writestr("Set/Bldg A02-01 Floor Plan.dwg", "new")
+            archive.writestr("Set/Bldg A09-01 Details.dwg", "unused")
+        # The folder name dates the package, whatever the file system says.
+        os.utime(older, (9_000_000_000, 9_000_000_000))
+        return project, sheet, older_rcp, zip_path
+
+    def _select_from_project(self, project, references, script_answer=None):
+        commands = []
+
+        def fake_script(command):
+            commands.append(command)
+            Path(command[command.index("-SelectionOutputPath") + 1]).write_text(
+                json.dumps(script_answer or []), encoding="utf-8")
+            return 0, ""
+
+        launch_context = {
+            "source": "workroom", "projectPath": str(project), "discipline": "Mechanical"}
+        scan = [{"sourceDwg": "M-1.dwg", "references": references}]
+        with patch.object(self.api, "get_user_settings", return_value=self.settings), \
+                patch.object(self.api, "_read_workflow_xref_scan_results",
+                             return_value=scan) as scan_mock, \
+                patch.object(self.api, "_run_selection_script", side_effect=fake_script):
+            result = self.api.select_clean_xrefs_sources(launch_context, "activity-1")
+        return result, commands, scan_mock
+
+    def test_project_launch_finds_the_newest_arch_drawing_for_each_xref_in_use(self):
+        with tempfile.TemporaryDirectory(prefix="acies-xref-find-") as temp_dir:
+            project, sheet, older_rcp, zip_path = self._project_with_backgrounds(temp_dir)
+
+            result, commands, scan_mock = self._select_from_project(project, [
+                {"name": "A02-01 (M)", "path": r"..\Xrefs\A02-01 (M).dwg"},
+                {"name": "A04-01 (M)", "path": r"..\Xrefs\A04-01 (M).dwg"},
+                {"name": "x-TB", "path": r"..\Xrefs\x-TB.dwg"},
+            ])
+
+            self.assertEqual("success", result["status"])
+            self.assertEqual([], commands)  # nothing was asked
+            self.assertEqual([str(sheet)], scan_mock.call_args.args[1])
+            plan, rcp = result["sources"]
+            # A02-01 is in both packages: the newer one, a ZIP, wins.
+            self.assertEqual("zipEntry", plan["kind"])
+            self.assertEqual(str(zip_path), plan["zipPath"])
+            self.assertEqual("Set/Bldg A02-01 Floor Plan.dwg", plan["entryName"])
+            self.assertEqual(str(project), plan["projectRoot"])
+            # A04-01 is only in the older package. A09-01 is not in use and is left out.
+            self.assertEqual(str(older_rcp), rcp["path"])
+
+    def test_project_launch_asks_in_arch_when_no_background_matches(self):
+        with tempfile.TemporaryDirectory(prefix="acies-xref-find-") as temp_dir:
+            project, _, _, _ = self._project_with_backgrounds(temp_dir)
+
+            result, commands, _ = self._select_from_project(project, [
+                # Another discipline's backgrounds are not this discipline's to replace.
+                {"name": "A02-01 (E)", "path": r"..\Xrefs\A02-01 (E).dwg"},
+                {"name": "x-TB", "path": r"..\Xrefs\x-TB.dwg"},
+            ])
+
+            self.assertEqual("cancelled", result["status"])
+            command = commands[0]
+            self.assertEqual(str(project / "Arch"), command[command.index("-DefaultDirectory") + 1])
+
+    def test_xref_scan_reads_copies_and_discards_on_quit(self):
+        text = (Path(__file__).resolve().parents[1] / "scripts" / "ListDwgXrefs.ps1").read_text(
+            encoding="utf-8")
+
+        self.assertIn("Copy-Item -LiteralPath $dwg -Destination $scanCopy", text)
+        self.assertIn('& $AcadCore /i "$scanCopy"', text)
+        self.assertNotIn('/i "$dwg"', text)
+        self.assertRegex(text, r'"_\.QUIT",\s+"_Y"')
+
     @unittest.skipUnless(sys.platform == "win32", "runs removeXREFPaths.ps1")
     def test_real_script_selection_mode_reports_a_cancelled_pick(self):
         # ACIES_NONINTERACTIVE makes the script skip its picker, as if cancelled.

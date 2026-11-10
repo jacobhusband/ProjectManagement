@@ -60,20 +60,36 @@ try {
   Set-Content -Path $lispPath -Value $lisp -Encoding ASCII
 
   # Scripts already use command-line file prompts. Leave registry-backed FILEDIA alone.
+  # Core Console treats an opened drawing as changed and resaves it unless QUIT
+  # is answered on its own line, so "_Y" discards.
   $scriptLines = @(
     "CMDECHO 0",
     "(load `"$lispPathForAcad`")",
     "LISTXREFS",
-    "QUIT"
+    "_.QUIT",
+    "_Y"
   )
   Set-Content -Path $scrPath -Value ($scriptLines -join "`r`n") -Encoding ASCII
 
   $results = @()
+  $index = 0
   foreach ($dwg in $dwgFiles) {
+    $index++
     $outPath = Join-Path $tempRoot (([guid]::NewGuid().ToString("N")) + ".txt")
     $env:ACIES_XREF_OUT = $outPath
-    Write-Host "PROGRESS: Reading XREFs from $([IO.Path]::GetFileName($dwg))"
-    & $AcadCore /i "$dwg" /s "$scrPath" 2>&1 | Out-Null
+    Write-Host "PROGRESS: Reading XREFs from $([IO.Path]::GetFileName($dwg)) ($index of $($dwgFiles.Count))"
+    # Read a copy: the saved XREF paths are in the file itself, and the working
+    # drawing is then never opened, locked or resaved by the scan.
+    $scanCopy = Join-Path $tempRoot (([guid]::NewGuid().ToString("N")) + ".dwg")
+    try {
+      Copy-Item -LiteralPath $dwg -Destination $scanCopy -Force
+    }
+    catch {
+      Write-Host "PROGRESS: Could not read $([IO.Path]::GetFileName($dwg)): $_"
+      continue
+    }
+    & $AcadCore /i "$scanCopy" /s "$scrPath" 2>&1 | Out-Null
+    Remove-Item -LiteralPath $scanCopy -Force -ErrorAction SilentlyContinue
 
     $refs = @()
     if (Test-Path -LiteralPath $outPath) {
