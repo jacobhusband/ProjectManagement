@@ -13,7 +13,7 @@ function extract(source, name) {
 }
 
 function setup(settings = {}) {
-  const dock = { input: { value: '#project', focus() {} }, items: [] };
+  const dock = { input: { value: '#project', focus() {} }, items: [], multi: [] };
   const context = vm.createContext({
     userSettings: settings,
     ensureCommandDock: () => dock,

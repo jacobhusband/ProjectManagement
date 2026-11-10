@@ -63,6 +63,7 @@ function makeDock(overrides = {}) {
   return {
     project: null,
     deliverable: null,
+    multi: [],
     pendingKey: null,
     items: [],
     root: { classList: classList() },
@@ -208,6 +209,7 @@ function loadDockContext(dock, extra = {}) {
     INDUSTRY_STATUS_OPTIONS: [],
     hasStatus: () => false,
     isDeliverablePinned: () => false,
+    industryPlural: (count, word) => `${count} ${word}s`,
     getDeliverableToolMenuEntries: () => [],
     getCommandHotkeyEntries: () => [],
     DELIVERABLE_QUICK_ACCESS_ACTIONS: [],

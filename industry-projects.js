@@ -402,10 +402,29 @@ function renderDeliverableRegisterCellGroup(cell, deliverables, project, note = 
   cell.appendChild(stack);
 }
 
-// Clicking (or pressing Enter on) a row makes it the target of the command line.
+// Selectable rows/cards and the record each one stands for, so a Shift-click
+// can walk the rows on screen between the anchor and the clicked row.
+const industrySelectableTargets = new WeakMap();
+
+// Clicking (or pressing Enter on) a row makes it the target of the command
+// line. Ctrl-click adds or removes a row; Shift-click selects a range.
 function attachDeliverableSelection(element, deliverable, project) {
+  industrySelectableTargets.set(element, { deliverable, project });
+  element.classList.add("cmd-selectable");
+  // Shift-click would otherwise extend the browser's text selection.
+  element.addEventListener("mousedown", (event) => {
+    if (event.shiftKey && !isInteractiveTarget(event.target)) event.preventDefault();
+  });
   element.addEventListener("click", (event) => {
     if (isInteractiveTarget(event.target)) return;
+    if (event.shiftKey) {
+      extendDeliverableSelectionTo(element, deliverable, project);
+      return;
+    }
+    if (event.ctrlKey || event.metaKey) {
+      toggleDeliverableInSelection(deliverable, project);
+      return;
+    }
     if (window.getSelection?.()?.toString()) return;
     selectDeliverableForCommands(deliverable, project);
   });
@@ -754,6 +773,10 @@ function ensureCommandDock() {
     expand,
     deliverable: null,
     project: null,
+    // Ctrl/Shift-click selection: holds every selected row when there is more
+    // than one (deliverable/project above stay the last one clicked).
+    multi: [],
+    anchor: null,
     pendingKey: null,
     pendingLabel: "",
     items: [],
@@ -844,7 +867,14 @@ function updateCommandDockContext() {
   const dock = ensureCommandDock();
   const { deliverable, project } = dock;
   dock.context.classList.remove("has-selection", "has-project");
-  if (deliverable) {
+  const multiCount = dock.multi.length > 1 ? dock.multi.length : 0;
+  if (multiCount) {
+    dock.context.textContent = `${multiCount} deliverables selected`;
+    dock.context.classList.add("has-selection");
+    dock.context.title = "Selected deliverables — click to clear";
+    dock.scope.textContent = `Acts on ${multiCount} deliverables · pin, unpin or set a status`;
+    dock.input.placeholder = "Type pin, unpin or a status…";
+  } else if (deliverable) {
     const parts = [
       String(project?.id || "").trim(),
       String(deliverable?.name || "Deliverable").trim(),
@@ -872,13 +902,15 @@ function updateCommandDockContext() {
       ? "Now select a row or type # to search a project…"
       : "Type a command · # to search projects…";
   }
-  const workLocally = !!project && isProjectWorkLocally(project);
+  // Work locally is per project, so it is off limits while several are selected.
+  const workLocallyProject = multiCount ? null : project;
+  const workLocally = !!workLocallyProject && isProjectWorkLocally(workLocallyProject);
   if (workLocally) dock.scope.textContent += " · working on the local copy";
   dock.workLocallyInput.checked = workLocally;
-  dock.workLocallyInput.disabled = !project;
+  dock.workLocallyInput.disabled = !workLocallyProject;
   dock.workLocally.classList.toggle("is-checked", workLocally);
-  dock.workLocally.classList.toggle("is-disabled", !project);
-  dock.workLocally.title = project
+  dock.workLocally.classList.toggle("is-disabled", !workLocallyProject);
+  dock.workLocally.title = workLocallyProject
     ? "Work on the local copy: the folder, quick access and tools use this project's Local Projects folder instead of the server"
     : "Select a project to work on its local copy";
   if (dock.pendingKey) {
@@ -972,17 +1004,33 @@ function buildCommandDockTargetGroup(deliverable, project) {
 }
 
 // Every command, keyed so a pending action survives selection and re-renders.
-function buildCommandDockGroups(deliverable, project) {
+function buildCommandDockGroups(
+  deliverable,
+  project,
+  selected = deliverable ? [{ deliverable, project }] : []
+) {
   const hasTarget = !!deliverable;
   const rerender = () => renderProjectsPreservingExpandedDeliverables();
+  // With several rows selected only the commands marked `bulk` are offered;
+  // they act on every selected deliverable (target.targets).
+  const multi = selected.length > 1;
+  const pinnedCount = selected.filter((entry) => isDeliverablePinned(entry.deliverable)).length;
+  const setPinnedForTargets = async (targets, nextPinned) => {
+    targets.forEach((entry) => setDeliverablePinnedState(entry.deliverable, nextPinned));
+    await save();
+    rerender();
+  };
 
   const statusItems = INDUSTRY_STATUS_OPTIONS.map((status) => ({
     key: `status:${status}`,
     label: status,
     kind: "status",
-    checked: hasTarget && hasStatus(deliverable, status),
+    bulk: true,
+    checked: multi
+      ? selected.every((entry) => hasStatus(entry.deliverable, status))
+      : hasTarget && hasStatus(deliverable, status),
     run: async (target) => {
-      setSingleStatus(target.deliverable, status);
+      target.targets.forEach((entry) => setSingleStatus(entry.deliverable, status));
       await save();
       rerender();
     },
@@ -1009,14 +1057,39 @@ function buildCommandDockGroups(deliverable, project) {
         startAddDeliverablePrompt(target.project, initialDesc);
       },
     },
+    multi
+      ? {
+          key: "pin",
+          bulk: true,
+          label: `Pin ${industryPlural(selected.length - pinnedCount, "deliverable")}`,
+          search: "pin selected deliverables",
+          hidden: pinnedCount === selected.length,
+          run: (target) =>
+            setPinnedForTargets(
+              target.targets.filter((entry) => !isDeliverablePinned(entry.deliverable)),
+              true
+            ),
+        }
+      : {
+          key: "pin",
+          label: hasTarget && isDeliverablePinned(deliverable) ? "Unpin deliverable" : "Pin deliverable",
+          run: (target) =>
+            setPinnedForTargets(
+              [{ deliverable: target.deliverable, project: target.project }],
+              !isDeliverablePinned(target.deliverable)
+            ),
+        },
     {
-      key: "pin",
-      label: hasTarget && isDeliverablePinned(deliverable) ? "Unpin deliverable" : "Pin deliverable",
-      run: async (target) => {
-        setDeliverablePinnedState(target.deliverable, !isDeliverablePinned(target.deliverable));
-        await save();
-        rerender();
-      },
+      key: "unpin",
+      bulk: true,
+      label: `Unpin ${industryPlural(pinnedCount, "deliverable")}`,
+      search: "unpin selected deliverables",
+      hidden: !multi || pinnedCount === 0,
+      run: (target) =>
+        setPinnedForTargets(
+          target.targets.filter((entry) => isDeliverablePinned(entry.deliverable)),
+          false
+        ),
     },
     {
       key: "notes",
@@ -1104,6 +1177,17 @@ function buildCommandDockGroups(deliverable, project) {
     projectSearchGroup.key = "project-search";
     projectSearchGroup.items = projectSearchGroup.items.map(item => ({ ...item, searchOnly: true }));
   }
+  if (multi) {
+    return [
+      { key: "status", column: "left", label: `Status · ${selected.length} selected`, items: statusItems },
+      {
+        key: "deliverable",
+        column: "left",
+        label: `Deliverables · ${selected.length} selected`,
+        items: deliverableItems.filter((item) => item.bulk),
+      },
+    ];
+  }
   return [
     ...(targetGroup ? [targetGroup] : []),
     ...(projectSearchGroup ? [projectSearchGroup] : []),
@@ -1128,7 +1212,7 @@ function findDeliverableElement(deliverable) {
 
 function renderCommandDockItems() {
   const dock = industryCommandDock;
-  const groups = buildCommandDockGroups(dock.deliverable, dock.project);
+  const groups = buildCommandDockGroups(dock.deliverable, dock.project, getCommandDockTargets());
   dock.left.innerHTML = "";
   dock.right.innerHTML = "";
   dock.items = [];
@@ -1219,7 +1303,11 @@ function runCommandDockItem(item) {
     toast(`${item.label} — now select a ${needsProject ? "project" : "deliverable"}.`);
     return;
   }
-  const target = { deliverable: dock.deliverable, project: dock.project };
+  const target = {
+    deliverable: dock.deliverable,
+    project: dock.project,
+    targets: getCommandDockTargets(),
+  };
   // A "#" query is a target search, never argument text for the command.
   const parsed = parseCommandDockQuery(dock.input.value);
   const query = parsed.targetMode ? "" : dock.input.value.trim();
@@ -2196,9 +2284,11 @@ function renderPromptView() {
 
 function selectDeliverableForCommands(deliverable, project, { expand = false, focus = "" } = {}) {
   const dock = ensureCommandDock();
-  const same = dock.deliverable === deliverable;
+  const same = dock.deliverable === deliverable && dock.multi.length < 2;
   dock.deliverable = deliverable || null;
   dock.project = project || null;
+  dock.multi = [];
+  dock.anchor = deliverable ? { deliverable, project: project || null } : null;
   renderCommandDockItems();
   updateCommandDockContext();
   syncCommandDockSelection();
@@ -2220,11 +2310,86 @@ function selectDeliverableForCommands(deliverable, project, { expand = false, fo
   else if (!same) dock.input.focus({ preventScroll: true });
 }
 
+// Everything the next command acts on: the Ctrl/Shift-click selection when
+// there is one, otherwise the single selected deliverable.
+function getCommandDockTargets() {
+  const dock = industryCommandDock;
+  if (!dock) return [];
+  if (dock.multi.length > 1) return dock.multi.slice();
+  return dock.deliverable ? [{ deliverable: dock.deliverable, project: dock.project }] : [];
+}
+
+// Replaces the selection. `primary` (the row just clicked) stays the dock's
+// deliverable/project so single-target code keeps working.
+function setCommandDockTargets(entries, primary = null, { focus = true } = {}) {
+  const dock = ensureCommandDock();
+  const unique = [];
+  entries.forEach((entry) => {
+    if (!entry?.deliverable) return;
+    if (unique.some((existing) => existing.deliverable === entry.deliverable)) return;
+    unique.push({ deliverable: entry.deliverable, project: entry.project || null });
+  });
+  const lead =
+    unique.find((entry) => entry.deliverable === primary?.deliverable) ||
+    unique[unique.length - 1] ||
+    null;
+  dock.multi = unique.length > 1 ? unique : [];
+  dock.deliverable = lead?.deliverable || null;
+  dock.project = lead?.project || null;
+  if (!lead) dock.anchor = null;
+  // A command chosen before the rows waits for one row, not a group.
+  if (dock.multi.length) {
+    dock.pendingKey = null;
+    dock.pendingLabel = "";
+  }
+  renderCommandDockItems();
+  updateCommandDockContext();
+  syncCommandDockSelection();
+  if (focus) dock.input.focus({ preventScroll: true });
+}
+
+// Ctrl-click: add the row to the selection, or take it out.
+function toggleDeliverableInSelection(deliverable, project) {
+  const dock = ensureCommandDock();
+  const current = getCommandDockTargets();
+  const entry = { deliverable, project: project || null };
+  if (current.some((existing) => existing.deliverable === deliverable)) {
+    setCommandDockTargets(current.filter((existing) => existing.deliverable !== deliverable));
+    return;
+  }
+  dock.anchor = entry;
+  setCommandDockTargets([...current, entry], entry);
+}
+
+// Shift-click: select every row on screen from the anchor (the last row
+// clicked without Shift) to this one.
+function extendDeliverableSelectionTo(element, deliverable, project) {
+  const dock = ensureCommandDock();
+  const anchor = dock.anchor || (dock.deliverable ? { deliverable: dock.deliverable, project: dock.project } : null);
+  const rows = [...document.querySelectorAll("#tbody .cmd-selectable, #projectsCardView .cmd-selectable")]
+    .filter((node) => industrySelectableTargets.has(node) && node.getClientRects().length);
+  const end = rows.indexOf(element);
+  const start = anchor
+    ? rows.findIndex((node) => industrySelectableTargets.get(node).deliverable === anchor.deliverable)
+    : -1;
+  if (start < 0 || end < 0) {
+    selectDeliverableForCommands(deliverable, project);
+    return;
+  }
+  const range = rows
+    .slice(Math.min(start, end), Math.max(start, end) + 1)
+    .map((node) => industrySelectableTargets.get(node));
+  dock.anchor = anchor;
+  setCommandDockTargets(range, { deliverable, project });
+}
+
 // Picking a project selects its latest visible deliverable for commands.
 function selectProjectForCommands(project, { expand = true } = {}) {
   const dock = ensureCommandDock();
   dock.project = project || null;
   dock.deliverable = null;
+  dock.multi = [];
+  dock.anchor = null;
   dock.input.value = "";
   const latest = getCommandDockProjectDeliverables(project)[0];
   if (latest) {
@@ -2252,6 +2417,8 @@ function clearCommandDockSelection() {
     return;
   }
   const dock = ensureCommandDock();
+  dock.multi = [];
+  dock.anchor = null;
   if (dock.deliverable) {
     dock.deliverable = null;
   } else {
@@ -2271,6 +2438,17 @@ function syncCommandDockSelection() {
   document
     .querySelectorAll(".reg-row.is-selected, .reg-line.is-selected, .plate-card.is-selected")
     .forEach((node) => node.classList.remove("is-selected"));
+  if (dock.multi.length) {
+    const kept = dock.multi.filter((entry) =>
+      Array.isArray(db) && db.includes(entry.project) &&
+      getCommandDockProjectDeliverables(entry.project, { includeAll: true }).includes(entry.deliverable)
+    );
+    if (kept.length !== dock.multi.length) {
+      // Re-enters this function with only the surviving rows.
+      setCommandDockTargets(kept, { deliverable: dock.deliverable }, { focus: false });
+      return;
+    }
+  }
   if (dock.project && !(Array.isArray(db) && db.includes(dock.project))) {
     dock.project = null;
     dock.deliverable = null;
@@ -2286,13 +2464,15 @@ function syncCommandDockSelection() {
     updateCommandDockContext();
     return;
   }
-  const id = String(dock.deliverable.id || "").trim();
-  if (!id) return;
-  document
-    .querySelectorAll(`[data-deliverable-id="${CSS.escape(id)}"]`)
-    .forEach((node) => {
-      if (node.matches(".reg-row, .reg-line, .plate-card")) node.classList.add("is-selected");
-    });
+  getCommandDockTargets().forEach((entry) => {
+    const id = String(entry.deliverable.id || "").trim();
+    if (!id) return;
+    document
+      .querySelectorAll(`[data-deliverable-id="${CSS.escape(id)}"]`)
+      .forEach((node) => {
+        if (node.matches(".reg-row, .reg-line, .plate-card")) node.classList.add("is-selected");
+      });
+  });
 }
 
 // Ctrl+K focuses the command line from anywhere on the Projects tab.
