@@ -138,7 +138,7 @@ class RepairXrefPathsToolTests(unittest.TestCase):
         text = POWERSHELL_PATH.read_text(encoding="utf-8")
         self.assertIn("function Find-ProjectXrefsFolder", text)
         self.assertIn(
-            "$candidateDirectory = Find-ProjectXrefsFolder -HostDwg ([string]$group.Occurrences[0].SourceDwg)",
+            "$candidateDirectory = Find-ProjectXrefsFolder -HostDwg ([string]$occurrence.SourceDwg)",
             text,
         )
 
@@ -170,19 +170,44 @@ class RepairXrefPathsToolTests(unittest.TestCase):
         self.assertIn("Repair XREF Paths", index_text)
         self.assertIn(r"scripts\\ManageXrefPathsDWGs.ps1", spec_text)
 
-    def test_script_scans_deduplicates_disables_dependencies_and_verifies_saves(self):
+    def test_script_lists_every_xref_per_drawing_and_follows_referenced_dwgs(self):
+        text = POWERSHELL_PATH.read_text(encoding="utf-8")
+
+        for expected in (
+            # Nested XREFs are told apart by the host holding no reference to them.
+            "_acies-has-host-reference",
+            "(strcat name tab savedPath tab dependent tab resolved tab overlay tab databaseAvailable tab hostReference)",
+            # Referenced DWGs are scanned too, so a nested XREF is edited in its parent.
+            "function Resolve-XrefFilePath",
+            "$scanQueue.Enqueue($drawings[$targetKey])",
+            "if ($listedUnderParent) { continue }",
+            # One row per XREF per drawing, with a path of its own.
+            "foreach ($occurrence in $sortedRows) {",
+            '@{ Name = "Drawing"; Header = "In Drawing"; Weight = 19 }',
+            "$sameXrefCheck.Checked",
+            "$grid.add_CellEndEdit({",
+            "$chooseSelectedButton.add_Click({",
+            "$notFoundCheck.add_CheckedChanged({ & $applyFilter })",
+            "$changedOccurrences = @($sortedRows | Where-Object { $_.Editable -and -not [string]::IsNullOrWhiteSpace($_.NewPath) })",
+        ):
+            self.assertIn(expected, text)
+
+        # The dialog no longer collapses XREFs with the same file name into one row.
+        self.assertNotIn("$groupMap", text)
+        self.assertNotIn("different saved paths>", text)
+
+    def test_script_scans_disables_dependencies_and_verifies_saves(self):
         text = POWERSHELL_PATH.read_text(encoding="utf-8")
 
         for expected in (
             "ACIESXREFSCAN",
             "_acies-parent-xref-available",
             "Get-XrefIdentityKey",
-            "$groupMap",
             '"Not Found"',
             '"Found"',
             '"Orphaned"',
             "Editable = (-not $dependent)",
-            '"Nested/orphaned - edit parent DWG"',
+            '"Nested - repair it in its parent DWG"',
             "ACIESXREFUPDATE",
             '(command "_.-XREF" "_Path" (_acies-escape-wildcards name) newPath)',
             '(while (= 1 (logand 1 (getvar "CMDACTIVE"))) (command ""))',
@@ -201,11 +226,9 @@ class RepairXrefPathsToolTests(unittest.TestCase):
         # entmod returns nil for XREF block definitions, so it never changed a path.
         self.assertNotIn("(entmod changedRecord)", text)
         self.assertIn('"_.QUIT", "_N"', text)
-        self.assertNotIn("$items = @($_.Occurrences)", text)
-        self.assertIn(
-            "$items = @($_.Occurrences | ForEach-Object { $_ })",
-            text,
-        )
+        # Windows PowerShell 5.1 throws "Argument types do not match" when a
+        # generic List[object] is wrapped directly in @(...).
+        self.assertNotRegex(text, r"@\(\$(occurrences|xrefRows|targets|scanFailures)\)")
 
     def test_script_avoids_ambiguous_split_path_parameter_set(self):
         text = POWERSHELL_PATH.read_text(encoding="utf-8")

@@ -291,6 +291,33 @@ function Test-XrefSavedPathFound {
   }
 }
 
+# The DWG an XREF's saved path points at, or "" when it is not on disk. AutoCAD
+# also finds a moved XREF sitting beside the host drawing, so that is checked too.
+function Resolve-XrefFilePath {
+  param(
+    [string]$SourceDwg,
+    [string]$SavedPath
+  )
+
+  if ([string]::IsNullOrWhiteSpace($SavedPath)) { return "" }
+  try {
+    $expandedPath = [Environment]::ExpandEnvironmentVariables($SavedPath.Trim())
+    $hostFolder = Get-ParentDirectory -Path $SourceDwg
+    $candidates = @()
+    if ([IO.Path]::IsPathRooted($expandedPath)) { $candidates += $expandedPath }
+    elseif ($hostFolder) { $candidates += (Join-Path $hostFolder $expandedPath) }
+    $leafName = [IO.Path]::GetFileName($expandedPath)
+    if ($leafName -and $hostFolder) { $candidates += (Join-Path $hostFolder $leafName) }
+    foreach ($candidate in $candidates) {
+      if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+        return [IO.Path]::GetFullPath($candidate)
+      }
+    }
+  }
+  catch {}
+  return ""
+}
+
 function Get-XrefIdentityKey {
   param([object]$Occurrence)
 
@@ -306,33 +333,6 @@ function Get-XrefIdentityKey {
   return $leafName.Trim().ToLowerInvariant()
 }
 
-function Get-StatusSummary {
-  param([object[]]$Occurrences)
-
-  $statusOrder = @("Not Found", "Found", "Orphaned")
-  $parts = @()
-  foreach ($status in $statusOrder) {
-    $count = @($Occurrences | Where-Object { $_.Status -eq $status }).Count
-    if ($count -gt 0) {
-      $parts += if ($Occurrences.Count -eq $count) { $status } else { "$status ($count)" }
-    }
-  }
-  return ($parts -join ", ")
-}
-
-function Get-PathSummary {
-  param([object[]]$Occurrences)
-
-  $paths = @(
-    $Occurrences |
-      ForEach-Object { ([string]$_.SavedPath).Trim() } |
-      Where-Object { $_ } |
-      Sort-Object -Unique
-  )
-  if ($paths.Count -eq 0) { return "<empty>" }
-  if ($paths.Count -eq 1) { return $paths[0] }
-  return "<$($paths.Count) different saved paths>"
-}
 
 $toolBase = Join-Path $env:LOCALAPPDATA "AcadHeadlessTools"
 if (-not (Test-Path -LiteralPath $toolBase -PathType Container)) {
@@ -367,7 +367,26 @@ try {
   )
 )
 
-(defun c:ACIESXREFSCAN (/ outputPath output block flags name savedPath dependent resolved overlay databaseAvailable tab)
+; AutoCAD does not flag a nested XREF: its definition looks like a directly
+; attached one. The difference is that the host drawing holds no block
+; reference to it; the only references sit inside the parent XREF.
+(defun _acies-has-host-reference (name / blockEntity recordEntity record item found)
+  (setq blockEntity (tblobjname "BLOCK" name))
+  (if blockEntity
+    (progn
+      (setq recordEntity (cdr (assoc 330 (entget blockEntity))))
+      (setq record (if recordEntity (entget recordEntity)))
+      (foreach item record
+        (if (and (not found) (= 331 (car item)) (entget (cdr item)))
+          (setq found T)
+        )
+      )
+    )
+  )
+  (if found "1" "0")
+)
+
+(defun c:ACIESXREFSCAN (/ outputPath output block flags name rawName savedPath dependent resolved overlay databaseAvailable hostReference tab)
   (setq outputPath (getenv "ACIES_XREF_SCAN_OUT"))
   (if outputPath
     (progn
@@ -381,14 +400,16 @@ try {
             (if (null flags) (setq flags 0))
             (if (/= 0 (logand flags 12))
               (progn
-                (setq name (_acies-safe-field (cdr (assoc 2 block))))
+                (setq rawName (cdr (assoc 2 block)))
+                (setq name (_acies-safe-field rawName))
+                (setq hostReference (_acies-has-host-reference rawName))
                 (setq savedPath (_acies-safe-field (cdr (assoc 1 block))))
                 (setq dependent (if (/= 0 (logand flags 16)) "1" "0"))
                 (setq resolved (if (/= 0 (logand flags 32)) "1" "0"))
                 (setq overlay (if (/= 0 (logand flags 8)) "1" "0"))
                 (setq databaseAvailable (_acies-parent-xref-available name))
                 (write-line
-                  (strcat name tab savedPath tab dependent tab resolved tab overlay tab databaseAvailable)
+                  (strcat name tab savedPath tab dependent tab resolved tab overlay tab databaseAvailable tab hostReference)
                   output
                 )
               )
@@ -419,9 +440,32 @@ try {
   $occurrences = New-Object 'System.Collections.Generic.List[object]'
   $scanFailures = New-Object 'System.Collections.Generic.List[string]'
 
-  for ($index = 0; $index -lt $files.Count; $index++) {
-    $dwgPath = [string]$files[$index]
-    Write-Host "PROGRESS: Scanning $($index + 1) of $($files.Count): $([IO.Path]::GetFileName($dwgPath))"
+  # The selected drawings are scanned first, then every DWG they reference. A
+  # nested XREF's saved path lives in its parent DWG, so the parent has to be
+  # scanned (and later saved) for that path to be listed and changed.
+  $drawings = @{}
+  $scanQueue = New-Object 'System.Collections.Generic.Queue[object]'
+  foreach ($file in $files) {
+    $drawingKey = ([string]$file).ToLowerInvariant()
+    if ($drawings.ContainsKey($drawingKey)) { continue }
+    $drawings[$drawingKey] = [pscustomobject]@{
+      Key = $drawingKey
+      Path = [string]$file
+      IsSelected = $true
+      ReferencedBy = ""
+      Children = New-Object 'System.Collections.Generic.List[string]'
+    }
+    $scanQueue.Enqueue($drawings[$drawingKey])
+  }
+
+  $scanIndex = 0
+  while ($scanQueue.Count -gt 0) {
+    $drawing = $scanQueue.Dequeue()
+    $scanIndex++
+    $dwgPath = [string]$drawing.Path
+    $scanLabel = [IO.Path]::GetFileName($dwgPath)
+    if (-not $drawing.IsSelected) { $scanLabel += " (referenced by $($drawing.ReferencedBy))" }
+    Write-Host "PROGRESS: Scanning $scanIndex of $($scanIndex + $scanQueue.Count): $scanLabel"
     $scanOutput = Join-Path $tempRoot ("scan-" + [guid]::NewGuid().ToString("N") + ".tsv")
     $outLog = Join-Path $tempRoot "scan.out.txt"
     $errLog = Join-Path $tempRoot "scan.err.txt"
@@ -436,11 +480,12 @@ try {
 
     foreach ($line in @(Get-Content -LiteralPath $scanOutput -Encoding ASCII)) {
       if ([string]::IsNullOrWhiteSpace($line)) { continue }
-      $parts = @($line -split "`t", 6)
-      while ($parts.Count -lt 6) { $parts += "" }
+      $parts = @($line -split "`t", 7)
+      while ($parts.Count -lt 7) { $parts += "" }
       $dependent = $parts[2] -eq "1"
       $resolved = $parts[3] -eq "1"
       $databaseAvailable = $parts[5] -eq "1"
+      $hasHostReference = $parts[6] -eq "1"
       $found = Test-XrefSavedPathFound -SourceDwg $dwgPath -SavedPath $parts[1] -AutoCadResolved ($resolved -or $databaseAvailable)
       $status = if ($dependent) {
         if ($databaseAvailable) { "Found" } else { "Orphaned" }
@@ -451,17 +496,42 @@ try {
       else {
         "Not Found"
       }
-      $occurrences.Add([pscustomobject]@{
-          SourceDwg = $dwgPath
-          Name = $parts[0]
-          SavedPath = $parts[1]
-          Status = $status
-          IsDependent = $dependent
-          IsResolved = $resolved
-          DatabaseAvailable = $databaseAvailable
-          IsOverlay = ($parts[4] -eq "1")
-          Editable = (-not $dependent)
-        })
+      $occurrence = [pscustomobject]@{
+        SourceDwg = $dwgPath
+        DrawingKey = [string]$drawing.Key
+        Name = $parts[0]
+        SavedPath = $parts[1]
+        Status = $status
+        IsDependent = $dependent
+        IsResolved = $resolved
+        DatabaseAvailable = $databaseAvailable
+        IsOverlay = ($parts[4] -eq "1")
+        HasHostReference = $hasHostReference
+        Editable = (-not $dependent)
+        ReadOnlyReason = ""
+        IdentityKey = ""
+        NewPath = ""
+      }
+      $occurrence.IdentityKey = Get-XrefIdentityKey -Occurrence $occurrence
+      $occurrences.Add($occurrence)
+
+      # Follow only XREFs this drawing places itself. A nested XREF's path is
+      # relative to its parent DWG, which is followed in its own right.
+      if ($dependent -or -not $hasHostReference) { continue }
+      $targetPath = Resolve-XrefFilePath -SourceDwg $dwgPath -SavedPath $parts[1]
+      if (-not $targetPath -or [IO.Path]::GetExtension($targetPath) -ine ".dwg") { continue }
+      $targetKey = $targetPath.ToLowerInvariant()
+      if (-not $drawing.Children.Contains($targetKey)) { $drawing.Children.Add($targetKey) }
+      if (-not $drawings.ContainsKey($targetKey)) {
+        $drawings[$targetKey] = [pscustomobject]@{
+          Key = $targetKey
+          Path = $targetPath
+          IsSelected = $false
+          ReferencedBy = [IO.Path]::GetFileName($dwgPath)
+          Children = New-Object 'System.Collections.Generic.List[string]'
+        }
+        $scanQueue.Enqueue($drawings[$targetKey])
+      }
     }
   }
 
@@ -486,46 +556,70 @@ try {
     exit 0
   }
 
-  $groupMap = @{}
+  # XREF names each drawing places itself, and the drawings reachable from it.
+  $placedNamesByDrawing = @{}
   foreach ($occurrence in $occurrences) {
-    $key = Get-XrefIdentityKey -Occurrence $occurrence
-    if (-not $groupMap.ContainsKey($key)) {
-      $displayName = ""
-      try { $displayName = [IO.Path]::GetFileName([string]$occurrence.SavedPath) } catch {}
-      if ([string]::IsNullOrWhiteSpace($displayName)) { $displayName = [string]$occurrence.Name }
-      $groupMap[$key] = [pscustomobject]@{
-        Key = $key
-        DisplayName = $displayName
-        Occurrences = New-Object 'System.Collections.Generic.List[object]'
-        NewPath = ""
+    if (-not $occurrence.HasHostReference) { continue }
+    if (-not $placedNamesByDrawing.ContainsKey($occurrence.DrawingKey)) {
+      $placedNamesByDrawing[$occurrence.DrawingKey] = @{}
+    }
+    $placedNamesByDrawing[$occurrence.DrawingKey][([string]$occurrence.Name).ToLowerInvariant()] = $true
+  }
+  $referencedKeysByDrawing = @{}
+  foreach ($drawingKey in @($drawings.Keys)) {
+    $reached = @{}
+    $pending = New-Object 'System.Collections.Generic.Queue[string]'
+    foreach ($childKey in $drawings[$drawingKey].Children) { $pending.Enqueue($childKey) }
+    while ($pending.Count -gt 0) {
+      $nextKey = $pending.Dequeue()
+      if ($nextKey -eq $drawingKey -or $reached.ContainsKey($nextKey)) { continue }
+      $reached[$nextKey] = $true
+      if ($drawings.ContainsKey($nextKey)) {
+        foreach ($childKey in $drawings[$nextKey].Children) { $pending.Enqueue($childKey) }
       }
     }
-    $groupMap[$key].Occurrences.Add($occurrence)
+    $referencedKeysByDrawing[$drawingKey] = $reached
   }
 
-  $groups = @(
-    $groupMap.Values |
-      ForEach-Object {
-        # Windows PowerShell 5.1 throws "Argument types do not match" when a
-        # generic List[object] is wrapped directly in @(...). Enumerating it
-        # through the pipeline produces a normal object array safely.
-        $items = @($_.Occurrences | ForEach-Object { $_ })
-        $editableCount = @($items | Where-Object { $_.Editable }).Count
-        $drawingNames = @($items | ForEach-Object { [IO.Path]::GetFileName($_.SourceDwg) } | Sort-Object -Unique)
-        Add-Member -InputObject $_ -NotePropertyName StatusSummary -NotePropertyValue (Get-StatusSummary -Occurrences $items) -Force
-        Add-Member -InputObject $_ -NotePropertyName SavedPathSummary -NotePropertyValue (Get-PathSummary -Occurrences $items) -Force
-        Add-Member -InputObject $_ -NotePropertyName EditableCount -NotePropertyValue $editableCount -Force
-        Add-Member -InputObject $_ -NotePropertyName DrawingCount -NotePropertyValue $drawingNames.Count -Force
-        Add-Member -InputObject $_ -NotePropertyName DrawingNames -NotePropertyValue ($drawingNames -join ", ") -Force
-        $_
-      } |
-      Sort-Object @{ Expression = {
-        if ($_.StatusSummary -like "Not Found*") { 0 }
-        elseif ($_.StatusSummary -like "*Not Found*") { 1 }
-        elseif ($_.EditableCount -gt 0) { 2 }
-        else { 3 }
-      } }, DisplayName
+  # One row for every XREF in every drawing. A nested XREF is left out of the
+  # host's rows when its parent DWG was scanned: it is listed there instead,
+  # where a new path is actually saved. A path set on it in the host is
+  # discarded the next time the host loads the parent.
+  $xrefRows = New-Object 'System.Collections.Generic.List[object]'
+  foreach ($occurrence in $occurrences) {
+    if ($occurrence.IsDependent) {
+      $occurrence.ReadOnlyReason = "Nested - repair it in its parent DWG"
+    }
+    elseif (-not $occurrence.HasHostReference) {
+      $nameKey = ([string]$occurrence.Name).ToLowerInvariant()
+      $listedUnderParent = $false
+      foreach ($referencedKey in $referencedKeysByDrawing[$occurrence.DrawingKey].Keys) {
+        if ($placedNamesByDrawing.ContainsKey($referencedKey) -and $placedNamesByDrawing[$referencedKey].ContainsKey($nameKey)) {
+          $listedUnderParent = $true
+          break
+        }
+      }
+      if ($listedUnderParent) { continue }
+      $occurrence.Editable = $false
+      $occurrence.ReadOnlyReason = "Not placed in this DWG - repair its parent XREF first"
+    }
+    $xrefRows.Add($occurrence)
+  }
+
+  $notFoundKeys = @{}
+  foreach ($occurrence in $xrefRows) {
+    if ($occurrence.Status -ne "Found") { $notFoundKeys[$occurrence.IdentityKey] = $true }
+  }
+  $sortedRows = @(
+    $xrefRows |
+      Sort-Object @{ Expression = { if ($notFoundKeys.ContainsKey($_.IdentityKey)) { 0 } else { 1 } } },
+        IdentityKey,
+        @{ Expression = { if ($drawings[$_.DrawingKey].IsSelected) { 0 } else { 1 } } },
+        SourceDwg
   )
+  $listedDrawingCount = @($sortedRows | ForEach-Object { $_.DrawingKey } | Sort-Object -Unique).Count
+  $referencedDrawingCount = @($drawings.Values | Where-Object { -not $_.IsSelected }).Count
+  $notFoundRowCount = @($sortedRows | Where-Object { $_.Status -ne "Found" }).Count
 
   $form = New-Object System.Windows.Forms.Form
   $form.Text = "Repair XREF Saved Paths"
@@ -538,28 +632,64 @@ try {
   $form.MinimizeBox = $false
   Move-FormToPrimaryScreen $form
 
+  $anchorTopWide = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+  $anchorTopLeft = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left
+  $anchorBottomLeft = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+  $anchorBottomRight = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
+
   $intro = New-Object System.Windows.Forms.Label
   $intro.Location = New-Object System.Drawing.Point(14, 12)
   $intro.Size = New-Object System.Drawing.Size(1214, 42)
-  $intro.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
-  $intro.Text = "Each referenced DWG appears once. Choose a replacement to update that saved path in every editable host drawing. Found paths may also be changed. Nested and orphaned references are shown for context but must be repaired in their parent DWG."
+  $intro.Anchor = $anchorTopWide
+  $intro.Text = "Every XREF is listed for each drawing that saves its path, including the DWGs your drawings reference (nested XREFs are listed under their parent DWG). Click Choose... or type a path in New Saved Path. To set several rows at once, select them and click Choose Path for Selected Rows."
   $form.Controls.Add($intro)
 
   $summary = New-Object System.Windows.Forms.Label
   $summary.Location = New-Object System.Drawing.Point(14, 56)
   $summary.Size = New-Object System.Drawing.Size(1214, 24)
-  $summary.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+  $summary.Anchor = $anchorTopWide
   $summary.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-  $summary.Text = "$($groups.Count) unique XREF(s) across $($files.Count) drawing(s)."
+  $summary.Text = "$($sortedRows.Count) XREF(s) in $listedDrawingCount drawing(s), $notFoundRowCount not found."
+  if ($referencedDrawingCount -gt 0) {
+    $summary.Text += " Scanned $($files.Count) selected and $referencedDrawingCount referenced drawing(s)."
+  }
   if ($scanFailures.Count -gt 0) {
     $summary.Text += " $($scanFailures.Count) drawing(s) could not be scanned."
     $summary.ForeColor = [System.Drawing.Color]::DarkRed
   }
   $form.Controls.Add($summary)
 
+  $filterLabel = New-Object System.Windows.Forms.Label
+  $filterLabel.Text = "Filter:"
+  $filterLabel.Location = New-Object System.Drawing.Point(14, 90)
+  $filterLabel.Size = New-Object System.Drawing.Size(44, 22)
+  $filterLabel.Anchor = $anchorTopLeft
+  $form.Controls.Add($filterLabel)
+
+  $filterBox = New-Object System.Windows.Forms.TextBox
+  $filterBox.Location = New-Object System.Drawing.Point(60, 87)
+  $filterBox.Size = New-Object System.Drawing.Size(250, 24)
+  $filterBox.Anchor = $anchorTopLeft
+  $form.Controls.Add($filterBox)
+
+  $notFoundCheck = New-Object System.Windows.Forms.CheckBox
+  $notFoundCheck.Text = "Show only XREFs that are not found"
+  $notFoundCheck.Location = New-Object System.Drawing.Point(326, 87)
+  $notFoundCheck.Size = New-Object System.Drawing.Size(260, 24)
+  $notFoundCheck.Anchor = $anchorTopLeft
+  $form.Controls.Add($notFoundCheck)
+
+  $sameXrefCheck = New-Object System.Windows.Forms.CheckBox
+  $sameXrefCheck.Text = "Give a new path to the same XREF in every drawing"
+  $sameXrefCheck.Checked = $true
+  $sameXrefCheck.Location = New-Object System.Drawing.Point(596, 87)
+  $sameXrefCheck.Size = New-Object System.Drawing.Size(400, 24)
+  $sameXrefCheck.Anchor = $anchorTopLeft
+  $form.Controls.Add($sameXrefCheck)
+
   $grid = New-Object System.Windows.Forms.DataGridView
-  $grid.Location = New-Object System.Drawing.Point(14, 84)
-  $grid.Size = New-Object System.Drawing.Size(1214, 520)
+  $grid.Location = New-Object System.Drawing.Point(14, 118)
+  $grid.Size = New-Object System.Drawing.Size(1214, 486)
   $grid.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
   $grid.AllowUserToAddRows = $false
   $grid.AllowUserToDeleteRows = $false
@@ -576,18 +706,18 @@ try {
   $grid.ShowCellToolTips = $true
 
   $columnSpecs = @(
-    @{ Name = "Status"; Header = "Status"; Weight = 13 },
-    @{ Name = "Xref"; Header = "XREF"; Weight = 17 },
-    @{ Name = "SavedPath"; Header = "Current Saved Path"; Weight = 29 },
-    @{ Name = "Drawings"; Header = "Occurrences"; Weight = 13 },
-    @{ Name = "NewPath"; Header = "New Saved Path"; Weight = 23 }
+    @{ Name = "Status"; Header = "Status"; Weight = 8 },
+    @{ Name = "Xref"; Header = "XREF"; Weight = 15 },
+    @{ Name = "Drawing"; Header = "In Drawing"; Weight = 19 },
+    @{ Name = "SavedPath"; Header = "Current Saved Path"; Weight = 26 },
+    @{ Name = "NewPath"; Header = "New Saved Path"; Weight = 25 }
   )
   foreach ($spec in $columnSpecs) {
     $column = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
     $column.Name = $spec.Name
     $column.HeaderText = $spec.Header
     $column.FillWeight = $spec.Weight
-    $column.ReadOnly = $true
+    $column.ReadOnly = ($spec.Name -ne "NewPath")
     $column.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::Automatic
     [void]$grid.Columns.Add($column)
   }
@@ -596,55 +726,63 @@ try {
   $chooseColumn.HeaderText = ""
   $chooseColumn.Text = "Choose..."
   $chooseColumn.UseColumnTextForButtonValue = $true
-  $chooseColumn.FillWeight = 8
+  $chooseColumn.FillWeight = 7
   $chooseColumn.ReadOnly = $false
   [void]$grid.Columns.Add($chooseColumn)
 
-  foreach ($group in $groups) {
-    $occurrenceLabel = if ($group.EditableCount -eq $group.Occurrences.Count) {
-      "$($group.Occurrences.Count) in $($group.DrawingCount) DWG(s)"
-    }
-    else {
-      "$($group.EditableCount) editable / $($group.Occurrences.Count) total"
-    }
+  foreach ($occurrence in $sortedRows) {
+    $drawingName = [IO.Path]::GetFileName([string]$occurrence.SourceDwg)
+    $drawingInfo = $drawings[$occurrence.DrawingKey]
+    $drawingLabel = if ($drawingInfo.IsSelected) { $drawingName } else { "$drawingName (referenced by $($drawingInfo.ReferencedBy))" }
+    $xrefLabel = [string]$occurrence.Name
+    if ($occurrence.IsOverlay) { $xrefLabel += " (overlay)" }
+    $savedPathLabel = if ([string]::IsNullOrWhiteSpace($occurrence.SavedPath)) { "<empty>" } else { [string]$occurrence.SavedPath }
     $rowIndex = $grid.Rows.Add(
-      $group.StatusSummary,
-      $group.DisplayName,
-      $group.SavedPathSummary,
-      $occurrenceLabel,
+      $occurrence.Status,
+      $xrefLabel,
+      $drawingLabel,
+      $savedPathLabel,
       "",
       "Choose..."
     )
     $row = $grid.Rows[$rowIndex]
-    $row.Tag = $group
-    $row.Cells["SavedPath"].ToolTipText = $group.SavedPathSummary
-    $row.Cells["Drawings"].ToolTipText = $group.DrawingNames
-    if ($group.StatusSummary -like "*Not Found*" -or $group.StatusSummary -like "*Orphaned*") {
+    $row.Tag = $occurrence
+    $row.Cells["SavedPath"].ToolTipText = $savedPathLabel
+    $row.Cells["Drawing"].ToolTipText = [string]$occurrence.SourceDwg
+    if ($occurrence.Status -ne "Found") {
       $row.Cells["Status"].Style.ForeColor = [System.Drawing.Color]::DarkRed
       $row.Cells["Status"].Style.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
     }
-    if ($group.EditableCount -eq 0) {
+    if (-not $occurrence.Editable) {
       $row.DefaultCellStyle.ForeColor = [System.Drawing.SystemColors]::GrayText
       $row.Cells["Choose"] = New-Object System.Windows.Forms.DataGridViewTextBoxCell
       $row.Cells["Choose"].Value = "Read only"
       $row.Cells["Choose"].ReadOnly = $true
-      $row.Cells["NewPath"].Value = "Nested/orphaned - edit parent DWG"
+      $row.Cells["NewPath"].Value = $occurrence.ReadOnlyReason
+      $row.Cells["NewPath"].ReadOnly = $true
     }
   }
   $form.Controls.Add($grid)
 
   $clearButton = New-Object System.Windows.Forms.Button
-  $clearButton.Text = "Clear Selected Replacement"
-  $clearButton.Size = New-Object System.Drawing.Size(205, 38)
+  $clearButton.Text = "Clear Selected Rows"
+  $clearButton.Size = New-Object System.Drawing.Size(170, 38)
   $clearButton.Location = New-Object System.Drawing.Point(14, 618)
-  $clearButton.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+  $clearButton.Anchor = $anchorBottomLeft
   $form.Controls.Add($clearButton)
 
+  $chooseSelectedButton = New-Object System.Windows.Forms.Button
+  $chooseSelectedButton.Text = "Choose Path for Selected Rows..."
+  $chooseSelectedButton.Size = New-Object System.Drawing.Size(250, 38)
+  $chooseSelectedButton.Location = New-Object System.Drawing.Point(194, 618)
+  $chooseSelectedButton.Anchor = $anchorBottomLeft
+  $form.Controls.Add($chooseSelectedButton)
+
   $applyButton = New-Object System.Windows.Forms.Button
-  $applyButton.Text = "Apply Selected Paths"
+  $applyButton.Text = "Apply New Paths"
   $applyButton.Size = New-Object System.Drawing.Size(190, 42)
   $applyButton.Location = New-Object System.Drawing.Point(838, 614)
-  $applyButton.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
+  $applyButton.Anchor = $anchorBottomRight
   $applyButton.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
   $applyButton.Enabled = $false
   $form.Controls.Add($applyButton)
@@ -654,14 +792,81 @@ try {
   $cancelButton.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
   $cancelButton.Size = New-Object System.Drawing.Size(190, 42)
   $cancelButton.Location = New-Object System.Drawing.Point(1038, 614)
-  $cancelButton.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
+  $cancelButton.Anchor = $anchorBottomRight
   $form.Controls.Add($cancelButton)
   $form.CancelButton = $cancelButton
 
   $refreshApplyButton = {
-    $selectedCount = @($groups | Where-Object { -not [string]::IsNullOrWhiteSpace($_.NewPath) }).Count
-    $applyButton.Enabled = $selectedCount -gt 0
-    $applyButton.Text = if ($selectedCount -gt 0) { "Apply Selected Paths ($selectedCount)" } else { "Apply Selected Paths" }
+    $changedRows = @($sortedRows | Where-Object { $_.Editable -and -not [string]::IsNullOrWhiteSpace($_.NewPath) })
+    $changedDrawings = @($changedRows | ForEach-Object { $_.DrawingKey } | Sort-Object -Unique).Count
+    $applyButton.Enabled = $changedRows.Count -gt 0
+    $applyButton.Text = if ($changedRows.Count -gt 0) { "Apply New Paths ($($changedRows.Count))" } else { "Apply New Paths" }
+    $form.Text = if ($changedRows.Count -gt 0) {
+      "Repair XREF Saved Paths - $($changedRows.Count) change(s) in $changedDrawings drawing(s)"
+    }
+    else {
+      "Repair XREF Saved Paths"
+    }
+  }
+
+  # Stores a new path on one row. A path that cannot be found from the row's
+  # drawing is still accepted, but shown in red.
+  $setRowNewPath = {
+    param($row, [string]$newPath)
+    $occurrence = $row.Tag
+    if ($null -eq $occurrence -or -not $occurrence.Editable) { return }
+    $occurrence.NewPath = $newPath
+    $cell = $row.Cells["NewPath"]
+    $cell.Value = $newPath
+    $cell.ToolTipText = $newPath
+    $cell.Style.ForeColor = [System.Drawing.Color]::Empty
+    if ($newPath -and -not (Test-XrefSavedPathFound -SourceDwg $occurrence.SourceDwg -SavedPath $newPath -AutoCadResolved $false)) {
+      $cell.Style.ForeColor = [System.Drawing.Color]::DarkRed
+      $cell.ToolTipText = "$newPath - no file is at this path from this drawing's folder"
+    }
+  }
+
+  # The rows a new path on $row goes to: the row itself and, while the box is
+  # ticked, the same XREF in every other drawing.
+  $getRowsSharingPath = {
+    param($row)
+    $targets = New-Object 'System.Collections.Generic.List[object]'
+    $targets.Add($row)
+    if ($sameXrefCheck.Checked -and $null -ne $row.Tag) {
+      foreach ($otherRow in $grid.Rows) {
+        if ($otherRow.Index -eq $row.Index -or $null -eq $otherRow.Tag) { continue }
+        if ($otherRow.Tag.Editable -and $otherRow.Tag.IdentityKey -eq $row.Tag.IdentityKey) {
+          $targets.Add($otherRow)
+        }
+      }
+    }
+    return , @($targets | ForEach-Object { $_ })
+  }
+
+  $pickReplacementPath = {
+    param($occurrence, [string]$title)
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.Title = $title
+    $dialog.Filter = "DWG files (*.dwg)|*.dwg"
+    $dialog.Multiselect = $false
+    $dialog.CheckFileExists = $true
+    $dialog.CheckPathExists = $true
+    $dialog.RestoreDirectory = $true
+    $candidateDirectory = ""
+    if (-not [string]::IsNullOrWhiteSpace($occurrence.NewPath) -and [IO.Path]::IsPathRooted($occurrence.NewPath)) {
+      $candidateDirectory = Get-ParentDirectory -Path $occurrence.NewPath
+    }
+    if (-not $candidateDirectory) {
+      $candidateDirectory = Find-ProjectXrefsFolder -HostDwg ([string]$occurrence.SourceDwg)
+    }
+    if (-not $candidateDirectory) {
+      $candidateDirectory = Get-ParentDirectory -Path ([string]$occurrence.SourceDwg)
+    }
+    $dialog.InitialDirectory = Resolve-DialogInitialDirectory -CandidatePath $candidateDirectory -FallbackPath $inputFolder
+    if ($dialog.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) {
+      return [IO.Path]::GetFullPath($dialog.FileName)
+    }
+    return ""
   }
 
   $grid.add_CellContentClick({
@@ -669,45 +874,87 @@ try {
       if ($eventArgs.RowIndex -lt 0 -or $eventArgs.ColumnIndex -lt 0) { return }
       if ($grid.Columns[$eventArgs.ColumnIndex].Name -ne "Choose") { return }
       $row = $grid.Rows[$eventArgs.RowIndex]
-      $group = $row.Tag
-      if ($null -eq $group -or $group.EditableCount -eq 0) { return }
+      $occurrence = $row.Tag
+      if ($null -eq $occurrence -or -not $occurrence.Editable) { return }
 
-      $dialog = New-Object System.Windows.Forms.OpenFileDialog
-      $dialog.Title = "Choose replacement DWG for $($group.DisplayName)"
-      $dialog.Filter = "DWG files (*.dwg)|*.dwg"
-      $dialog.Multiselect = $false
-      $dialog.CheckFileExists = $true
-      $dialog.CheckPathExists = $true
-      $dialog.RestoreDirectory = $true
-      $candidateDirectory = ""
-      if (-not [string]::IsNullOrWhiteSpace($group.NewPath)) {
-        $candidateDirectory = Get-ParentDirectory -Path $group.NewPath
+      $chosenPath = & $pickReplacementPath $occurrence "Choose replacement DWG for $($occurrence.Name)"
+      if ($chosenPath) {
+        foreach ($targetRow in (& $getRowsSharingPath $row)) { & $setRowNewPath $targetRow $chosenPath }
+        & $refreshApplyButton
       }
-      if (-not $candidateDirectory) {
-        $candidateDirectory = Find-ProjectXrefsFolder -HostDwg ([string]$group.Occurrences[0].SourceDwg)
+    })
+
+  # Typing in New Saved Path works like Choose..., and also takes a relative
+  # path such as ..\Xrefs\A01-00.dwg. Clearing the cell drops the change.
+  $grid.add_CellEndEdit({
+      param($sender, $eventArgs)
+      if ($eventArgs.RowIndex -lt 0 -or $eventArgs.ColumnIndex -lt 0) { return }
+      if ($grid.Columns[$eventArgs.ColumnIndex].Name -ne "NewPath") { return }
+      $row = $grid.Rows[$eventArgs.RowIndex]
+      $occurrence = $row.Tag
+      if ($null -eq $occurrence -or -not $occurrence.Editable) { return }
+
+      $typedPath = ([string]$row.Cells["NewPath"].Value).Trim().Trim('"').Replace('/', '\')
+      if ($typedPath -eq [string]$occurrence.NewPath) {
+        & $setRowNewPath $row $typedPath
+        return
       }
-      if (-not $candidateDirectory) {
-        $candidateDirectory = Get-ParentDirectory -Path ([string]$group.Occurrences[0].SourceDwg)
+      if ($typedPath -and $typedPath -notmatch '\.dwg$') {
+        & $setRowNewPath $row ([string]$occurrence.NewPath)
+        [System.Windows.Forms.MessageBox]::Show(
+          $form,
+          "An XREF path has to end in .dwg.",
+          "Repair XREF Paths",
+          [System.Windows.Forms.MessageBoxButtons]::OK,
+          [System.Windows.Forms.MessageBoxIcon]::Warning
+        ) | Out-Null
+        return
       }
-      $dialog.InitialDirectory = Resolve-DialogInitialDirectory -CandidatePath $candidateDirectory -FallbackPath $inputFolder
-      if ($dialog.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) {
-        $group.NewPath = [IO.Path]::GetFullPath($dialog.FileName)
-        $row.Cells["NewPath"].Value = $group.NewPath
-        $row.Cells["NewPath"].ToolTipText = $group.NewPath
+      foreach ($targetRow in (& $getRowsSharingPath $row)) { & $setRowNewPath $targetRow $typedPath }
+      & $refreshApplyButton
+    })
+
+  $chooseSelectedButton.add_Click({
+      $targetRows = @($grid.SelectedRows | Where-Object { $_.Visible -and $null -ne $_.Tag -and $_.Tag.Editable })
+      if ($targetRows.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show(
+          $form,
+          "Select one or more rows first. Hold Ctrl or Shift to select several.",
+          "Repair XREF Paths",
+          [System.Windows.Forms.MessageBoxButtons]::OK,
+          [System.Windows.Forms.MessageBoxIcon]::Information
+        ) | Out-Null
+        return
+      }
+      $chosenPath = & $pickReplacementPath $targetRows[0].Tag "Choose replacement DWG for $($targetRows.Count) selected row(s)"
+      if ($chosenPath) {
+        foreach ($targetRow in $targetRows) { & $setRowNewPath $targetRow $chosenPath }
         & $refreshApplyButton
       }
     })
 
   $clearButton.add_Click({
-      foreach ($row in @($grid.SelectedRows)) {
-        $group = $row.Tag
-        if ($null -eq $group -or $group.EditableCount -eq 0) { continue }
-        $group.NewPath = ""
-        $row.Cells["NewPath"].Value = ""
-        $row.Cells["NewPath"].ToolTipText = ""
-      }
+      foreach ($row in @($grid.SelectedRows)) { & $setRowNewPath $row "" }
       & $refreshApplyButton
     })
+
+  $applyFilter = {
+    $needle = $filterBox.Text.Trim().ToLowerInvariant()
+    [void]$grid.EndEdit()
+    $grid.CurrentCell = $null
+    foreach ($row in $grid.Rows) {
+      $occurrence = $row.Tag
+      if ($null -eq $occurrence) { continue }
+      $visible = -not ($notFoundCheck.Checked -and $occurrence.Status -eq "Found")
+      if ($visible -and $needle) {
+        $haystack = "$($occurrence.Name) $($occurrence.SavedPath) $($occurrence.SourceDwg) $($occurrence.NewPath)".ToLowerInvariant()
+        $visible = $haystack.Contains($needle)
+      }
+      $row.Visible = $visible
+    }
+  }
+  $filterBox.add_TextChanged({ & $applyFilter })
+  $notFoundCheck.add_CheckedChanged({ & $applyFilter })
 
   $applyButton.add_Click({
       $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
@@ -728,30 +975,25 @@ try {
     exit 0
   }
 
-  $selectedGroups = @($groups | Where-Object { -not [string]::IsNullOrWhiteSpace($_.NewPath) })
-  if ($selectedGroups.Count -eq 0) {
+  $changedOccurrences = @($sortedRows | Where-Object { $_.Editable -and -not [string]::IsNullOrWhiteSpace($_.NewPath) })
+  if ($changedOccurrences.Count -eq 0) {
     Write-Host "PROGRESS: No replacement paths were selected."
     exit 0
   }
 
   $plansByDwg = @{}
-  foreach ($group in $selectedGroups) {
-    foreach ($occurrence in @($group.Occurrences | Where-Object { $_.Editable })) {
-      $dwgKey = ([string]$occurrence.SourceDwg).ToLowerInvariant()
-      if (-not $plansByDwg.ContainsKey($dwgKey)) {
-        $plansByDwg[$dwgKey] = [pscustomobject]@{
-          SourceDwg = [string]$occurrence.SourceDwg
-          Updates = New-Object 'System.Collections.Generic.List[object]'
-        }
-      }
-      $existing = @($plansByDwg[$dwgKey].Updates | Where-Object { $_.Name -ieq $occurrence.Name })
-      if ($existing.Count -eq 0) {
-        $plansByDwg[$dwgKey].Updates.Add([pscustomobject]@{
-            Name = [string]$occurrence.Name
-            NewPath = [string]$group.NewPath
-          })
+  foreach ($occurrence in $changedOccurrences) {
+    $dwgKey = [string]$occurrence.DrawingKey
+    if (-not $plansByDwg.ContainsKey($dwgKey)) {
+      $plansByDwg[$dwgKey] = [pscustomobject]@{
+        SourceDwg = [string]$occurrence.SourceDwg
+        Updates = New-Object 'System.Collections.Generic.List[object]'
       }
     }
+    $plansByDwg[$dwgKey].Updates.Add([pscustomobject]@{
+        Name = [string]$occurrence.Name
+        NewPath = [string]$occurrence.NewPath
+      })
   }
 
   $updateLspPath = Join-Path $tempRoot "update_xrefs.lsp"
