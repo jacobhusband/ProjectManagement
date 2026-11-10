@@ -189,6 +189,25 @@ class CleanDrawingTests(unittest.TestCase):
         report = json.loads((Path(result['output']) / 'cleanup-report.json').read_text())
         self.assertEqual('architect-logo.jpg', report['missingMediaRemoved'][0]['path'])
 
+    def test_underlay_of_a_page_the_pdf_no_longer_has_is_removed_not_converted(self):
+        source = self.root / 'form.pdf'
+        with fitz.open() as document:
+            document.new_page()
+            document.save(source)
+        self.pdfs = [{'Owner': str(self.sheet), 'Resolved': str(source), 'Path': str(source), 'Handle': str(page), 'Page': str(page)}
+                     for page in (1, 2)]
+        jobs = []
+        def worker(*args):
+            jobs.append(args[3])
+            return self.worker(*args)
+        result = self.run_job(worker)
+        prepare = next(job for job in jobs if job['Operation'] == 'prepare')
+        self.assertEqual(['1'], [r['Page'] for r in prepare['Pdfs']])
+        embed = next(job for job in jobs if job['Operation'] == 'embed-media')
+        # Path stays verbatim: the worker matches it against the unredirected definition.
+        self.assertEqual([('2', str(source))], [(r['Handle'], r['Path']) for r in embed['MissingMedia']])
+        self.assertIn('E01.dwg: form.pdf page 2', result['mediaWarning'])
+
     def test_mapped_drive_aliases_normalize_the_entire_graph(self):
         stamp = self.root / 'stamp.dwg'
         stamp.write_bytes(b'stamp')

@@ -259,6 +259,21 @@ def run(project, selection, acad, notify=lambda message: None, worker=run_worker
             raise RuntimeError('Headless embedding is not supported for these attachment types. No drawings were cleaned.\n' + '\n'.join(scan['media'][:12]))
         scan = _canonicalize_scan(scan)
         missing_media = scan['missingMedia']
+        # An underlay of a page its PDF no longer has (the PDF was replaced by a shorter
+        # one) also displays nothing and PDFIMPORT cannot bind it: remove it the same way.
+        page_counts = {}
+        attached = []
+        for record in scan.get('pdfs', []):
+            source = record['Resolved']
+            if source not in page_counts:
+                with fitz.open(source) as document:
+                    page_counts[source] = None if document.needs_pass else document.page_count
+            page = str(record.get('Page') or '')
+            if page_counts[source] is not None and page.isdecimal() and int(page) > page_counts[source]:
+                missing_media.append(dict(record, Kind=f'PDF page {page}'))
+            else:
+                attached.append(record)
+        scan['pdfs'] = attached
         for record in missing_media:
             notify(f'Missing {record["Kind"]} will be removed: {record["Path"]} ({Path(record["Owner"]).name})')
         copies = {}
@@ -427,8 +442,9 @@ def run(project, selection, acad, notify=lambda message: None, worker=run_worker
         cleanup_warning = ''
         media_warning = ''
         if missing_media:
-            names = sorted({f'{Path(r["Owner"]).name}: {Path(r["Path"]).name}' for r in missing_media})
-            media_warning = (f'Removed {len(missing_media)} broken PDF/image attachment(s) whose files are missing '
+            names = sorted({f'{Path(r["Owner"]).name}: {Path(r["Path"]).name}'
+                            + (r['Kind'][3:] if r['Kind'].startswith('PDF page') else '') for r in missing_media})
+            media_warning = (f'Removed {len(missing_media)} broken PDF/image attachment(s) whose files or PDF pages are missing '
                              '(AutoCAD shows nothing for them in the originals): ' + '; '.join(names[:6])
                              + (f'; and {len(names) - 6} more' if len(names) > 6 else '') + '.')
         try:
