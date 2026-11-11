@@ -274,6 +274,15 @@ def run(project, selection, acad, notify=lambda message: None, worker=run_worker
             else:
                 attached.append(record)
         scan['pdfs'] = attached
+        # A 0-byte image file likewise displays nothing, and AutoCAD rejects redirecting
+        # its definition to the staged copy (eInvalidInput): remove it the same way.
+        readable = []
+        for record in scan.get('images', []):
+            if os.path.getsize(record['Resolved']) == 0:
+                missing_media.append(dict(record, Kind='image (empty 0-byte file)'))
+            else:
+                readable.append(record)
+        scan['images'] = readable
         for record in missing_media:
             notify(f'Missing {record["Kind"]} will be removed: {record["Path"]} ({Path(record["Owner"]).name})')
         copies = {}
@@ -444,7 +453,7 @@ def run(project, selection, acad, notify=lambda message: None, worker=run_worker
         if missing_media:
             names = sorted({f'{Path(r["Owner"]).name}: {Path(r["Path"]).name}'
                             + (r['Kind'][3:] if r['Kind'].startswith('PDF page') else '') for r in missing_media})
-            media_warning = (f'Removed {len(missing_media)} broken PDF/image attachment(s) whose files or PDF pages are missing '
+            media_warning = (f'Removed {len(missing_media)} broken PDF/image attachment(s) whose files or PDF pages are missing or empty '
                              '(AutoCAD shows nothing for them in the originals): ' + '; '.join(names[:6])
                              + (f'; and {len(names) - 6} more' if len(names) > 6 else '') + '.')
         try:

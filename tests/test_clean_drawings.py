@@ -189,6 +189,25 @@ class CleanDrawingTests(unittest.TestCase):
         report = json.loads((Path(result['output']) / 'cleanup-report.json').read_text())
         self.assertEqual('architect-logo.jpg', report['missingMediaRemoved'][0]['path'])
 
+    def test_empty_image_file_is_removed_by_worker_not_staged(self):
+        present = self.root / 'logo.png'
+        present.write_bytes(b'fixture')
+        empty = self.root / 'Xrefs' / 'architect-logo.jpg'
+        empty.write_bytes(b'')
+        self.images = [{'Owner': str(self.sheet), 'Resolved': str(present), 'Path': str(present), 'Handle': '1'},
+                       {'Owner': str(self.tb), 'Resolved': str(empty), 'Path': 'architect-logo.jpg', 'Handle': '2'}]
+        jobs = []
+        def worker(*args):
+            jobs.append(args[3])
+            return self.worker(*args)
+        result = self.run_job(worker)
+        prepare = next(job for job in jobs if job['Operation'] == 'prepare')
+        self.assertEqual([str(present)], list(prepare['ImageCopies']))
+        self.assertEqual(['1'], [r['Handle'] for r in prepare['Images']])
+        embeds = [[r['Path'] for r in job['MissingMedia']] for job in jobs if job['Operation'] == 'embed-media']
+        self.assertEqual([[], ['architect-logo.jpg']], sorted(embeds))
+        self.assertIn('x-TB.dwg: architect-logo.jpg', result['mediaWarning'])
+
     def test_underlay_of_a_page_the_pdf_no_longer_has_is_removed_not_converted(self):
         source = self.root / 'form.pdf'
         with fitz.open() as document:
