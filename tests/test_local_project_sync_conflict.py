@@ -423,6 +423,54 @@ class LocalProjectManagerComparisonScopeTests(unittest.TestCase):
         self.assertEqual("newer", newer[rel_path]["changeType"])
         self.assertEqual("managed", newer[rel_path]["scopeType"])
 
+    def test_plot_logs_backups_caches_and_lock_files_are_never_compared(self):
+        by_products = [
+            os.path.join("Electrical", "plot.log"),
+            os.path.join("Electrical", "E01.00.bak"),
+            os.path.join("Electrical", "E01.00_1_1_1234.sv$"),
+            os.path.join("Xrefs", "Thumbs.db"),
+            os.path.join("Photos", "Report", "~$Survey Report.doc"),
+            ".pdf_size_cache.json",
+        ]
+        for rel_path in by_products:
+            server_file = self._write(self.server_dir, rel_path, "server")
+            self._write(
+                self.local_dir, rel_path, "newer local copy",
+                mtime=os.path.getmtime(server_file) + 600.0,
+            )
+        # Present on one side only: must not be offered as an addition either.
+        self._write(self.local_dir, os.path.join("Mechanical", "plot.log"), "local only")
+        self._write(self.server_dir, os.path.join("Plumbing", "P-1.bak"), "server only")
+        real_change = os.path.join("Electrical", "E01.00.dwg")
+        server_file = self._write(self.server_dir, real_change, "server version")
+        self._write(
+            self.local_dir, real_change, "local version",
+            mtime=os.path.getmtime(server_file) + 600.0,
+        )
+
+        comparison = self._compare_candidates()
+
+        self.assertEqual(
+            [real_change],
+            [os.path.normpath(c["relativePath"]) for c in comparison["localToServerCandidates"]],
+        )
+        self.assertEqual([], comparison["serverToLocalCandidates"])
+        self.assertEqual([], comparison["conflictCandidates"])
+
+    def test_a_fresh_plot_log_alone_does_not_report_newer_local_files(self):
+        rel_path = os.path.join("Electrical", "plot.log")
+        server_file = self._write(self.server_dir, rel_path, "old log")
+        self._write(
+            self.local_dir, rel_path, "new, longer log",
+            mtime=os.path.getmtime(server_file) + 600.0,
+        )
+
+        result = self.api.compare_project_timestamps(self.local_dir, self.server_dir)
+
+        self.assertEqual("success", result["status"])
+        self.assertEqual("equal", result["summary"])
+        self.assertEqual(0, result["managedLocalToServerNewerCount"])
+
     def test_apply_never_overwrites_a_file_that_appeared_outside_managed_folders(self):
         rel_path = os.path.join("Documents", "RFI log.xlsx")
         self._write(self.server_dir, rel_path, "server log")

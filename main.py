@@ -12853,7 +12853,14 @@ Return ONLY the JSON object.
 
         return normalized_paths
 
-    def _scan_copy_project_files(self, root_path, excluded_root_names=None, excluded_file_extensions=None):
+    def _scan_copy_project_files(
+        self,
+        root_path,
+        excluded_root_names=None,
+        excluded_file_extensions=None,
+        excluded_file_names=None,
+        excluded_file_name_prefixes=None,
+    ):
         normalized_root_path = os.path.normpath(str(root_path or '').strip())
         results = []
         directory_relative_paths = []
@@ -12868,6 +12875,16 @@ Return ONLY the JSON object.
             for ext in (excluded_file_extensions or [])
             if str(ext or '').strip()
         }
+        excluded_file_name_keys = {
+            str(name or '').strip().lower()
+            for name in (excluded_file_names or [])
+            if str(name or '').strip()
+        }
+        excluded_file_name_prefix_keys = tuple(
+            str(prefix or '').lower()
+            for prefix in (excluded_file_name_prefixes or [])
+            if str(prefix or '')
+        )
 
         if not normalized_root_path:
             return {
@@ -12928,6 +12945,13 @@ Return ONLY the JSON object.
                             if entry.is_file(follow_symlinks=False):
                                 file_ext = os.path.splitext(entry_name)[1].lower()
                                 if file_ext in excluded_ext_keys:
+                                    continue
+                                entry_name_key = entry_name.lower()
+                                if entry_name_key in excluded_file_name_keys:
+                                    continue
+                                if excluded_file_name_prefix_keys and entry_name_key.startswith(
+                                    excluded_file_name_prefix_keys
+                                ):
                                     continue
                                 file_size = max(0, int(getattr(entry_stat, 'st_size', 0) or 0))
                                 file_mtime = float(
@@ -13031,7 +13055,18 @@ Return ONLY the JSON object.
         return {'archive', '0 archive'}
 
     def _get_local_project_manager_excluded_file_extensions(self):
-        return {'.dwl', '.dwl2'}
+        # AutoCAD lock files, drawing backups and autosave/temp files. They change
+        # whenever a drawing is opened or saved and are not project work.
+        return {'.dwl', '.dwl2', '.bak', '.ac$', '.sv$'}
+
+    def _get_local_project_manager_excluded_file_names(self):
+        # By-products of plotting, this app's PDF size cache and Windows folder
+        # metadata. Left in, a fresh plot.log alone reads as a newer local file.
+        return {'plot.log', '.pdf_size_cache.json', 'thumbs.db', 'desktop.ini'}
+
+    def _get_local_project_manager_excluded_file_name_prefixes(self):
+        # Office owner/lock files that exist only while a document is open.
+        return ('~$',)
 
     def _get_local_project_manager_managed_root_names(self, settings):
         return self._normalize_copy_project_folder_names(
@@ -13323,17 +13358,14 @@ Return ONLY the JSON object.
             settings = {}
         managed_root_names = self._get_local_project_manager_managed_root_names(settings)
         excluded_root_names = self._get_local_project_manager_excluded_root_names()
-        excluded_file_exts = self._get_local_project_manager_excluded_file_extensions()
-        local_scan = self._scan_copy_project_files(
-            normalized_local_project_path,
-            excluded_root_names=excluded_root_names,
-            excluded_file_extensions=excluded_file_exts,
-        )
-        server_scan = self._scan_copy_project_files(
-            normalized_server_project_path,
-            excluded_root_names=excluded_root_names,
-            excluded_file_extensions=excluded_file_exts,
-        )
+        scan_exclusions = {
+            'excluded_root_names': excluded_root_names,
+            'excluded_file_extensions': self._get_local_project_manager_excluded_file_extensions(),
+            'excluded_file_names': self._get_local_project_manager_excluded_file_names(),
+            'excluded_file_name_prefixes': self._get_local_project_manager_excluded_file_name_prefixes(),
+        }
+        local_scan = self._scan_copy_project_files(normalized_local_project_path, **scan_exclusions)
+        server_scan = self._scan_copy_project_files(normalized_server_project_path, **scan_exclusions)
 
         local_files_by_relative_path = {
             str(entry.get('relativePath') or '').strip().lower(): entry
@@ -15694,6 +15726,17 @@ Return ONLY the JSON object.
                         failed_files.extend(copy_result.get('failedFiles', []))
                 else:
                     missing_server_folders.append(folder_name)
+
+            # Record what was just copied as the sync baseline. Without it, a file edited
+            # straight after the copy has no baseline, and a later change to the server
+            # copy would read as "one side is newer" instead of a conflict.
+            try:
+                self._compare_local_project_manager_files(
+                    local_project_path,
+                    normalized_server_path,
+                )
+            except Exception as e:
+                logging.warning(f"Could not record sync baselines after copying locally: {e}")
 
             failed_file_count = len(failed_files)
             copy_warnings = []

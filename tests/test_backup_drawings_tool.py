@@ -385,6 +385,48 @@ class BackupDrawingsBackendTests(unittest.TestCase):
 class CopyProjectLocallyBackendTests(unittest.TestCase):
     def setUp(self):
         self.api = Api.__new__(Api)
+        # Copying locally records sync baselines; keep them out of the real app data.
+        metadata_dir = tempfile.TemporaryDirectory(prefix="acies-sync-metadata-")
+        self.addCleanup(metadata_dir.cleanup)
+        metadata_patch = patch.object(
+            main_module, "SYNC_METADATA_FILE", os.path.join(metadata_dir.name, "sync_metadata.json")
+        )
+        metadata_patch.start()
+        self.addCleanup(metadata_patch.stop)
+
+    def test_copy_project_locally_records_baselines_so_later_edits_on_both_sides_conflict(self):
+        with tempfile.TemporaryDirectory(prefix="acies-copy-project-baseline-") as temp_dir:
+            project_root = Path(temp_dir) / "260243 BofA - Eastport Plaza"
+            server_file = project_root / "Electrical" / "power.dwg"
+            self._write_file(server_file, "power")
+            docs_root = Path(temp_dir) / "DocumentsRoot"
+
+            with patch.object(self.api, "get_user_settings", return_value=self._settings()), patch.object(
+                main_module,
+                "_get_windows_documents_dir",
+                return_value=str(docs_root),
+            ):
+                result = self.api.copy_project_locally(str(project_root))
+                self.assertEqual("success", result["status"])
+
+                # Edited locally straight after the copy, then changed on the server too.
+                local_file = Path(result["localProjectPath"]) / "Electrical" / "power.dwg"
+                copied_mtime = os.path.getmtime(local_file)
+                local_file.write_text("power, edited locally", encoding="utf-8")
+                os.utime(local_file, (copied_mtime + 600.0, copied_mtime + 600.0))
+                server_file.write_text("power, edited on the server as well", encoding="utf-8")
+                os.utime(server_file, (copied_mtime + 1200.0, copied_mtime + 1200.0))
+
+                comparison = self.api._compare_local_project_manager_files(
+                    result["localProjectPath"], str(project_root)
+                )
+
+            self.assertEqual(
+                [os.path.join("Electrical", "power.dwg")],
+                [os.path.normpath(c["relativePath"]) for c in comparison["conflictCandidates"]],
+            )
+            self.assertEqual([], comparison["serverToLocalCandidates"])
+            self.assertEqual([], comparison["localToServerCandidates"])
 
     def _settings(self, disciplines=None):
         return {"discipline": disciplines or ["Electrical"]}
