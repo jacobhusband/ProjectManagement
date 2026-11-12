@@ -318,6 +318,69 @@ function Resolve-XrefFilePath {
   return ""
 }
 
+# The full path a saved XREF path names, read from the host drawing's folder
+# when it is relative. "" when it cannot be worked out (for example %VAR%).
+function Resolve-XrefFullPath {
+  param(
+    [string]$SourceDwg,
+    [string]$SavedPath
+  )
+
+  if ([string]::IsNullOrWhiteSpace($SavedPath)) { return "" }
+  try {
+    $path = $SavedPath.Trim()
+    if ([IO.Path]::IsPathRooted($path)) { return [IO.Path]::GetFullPath($path) }
+    if ($path.Contains('%')) { return "" }
+    $hostFolder = Get-ParentDirectory -Path $SourceDwg
+    if (-not $hostFolder) { return "" }
+    return [IO.Path]::GetFullPath((Join-Path $hostFolder $path))
+  }
+  catch {
+    return ""
+  }
+}
+
+# The saved path to store for $TargetPath: relative to the host drawing's
+# folder (.\A01-00.dwg, ..\Xrefs\A01-00.dwg), so the XREF still loads when the
+# project folder is copied or moved. A path on another drive or share, or one
+# that is already relative, is returned unchanged.
+function ConvertTo-XrefRelativePath {
+  param(
+    [string]$SourceDwg,
+    [string]$TargetPath
+  )
+
+  if ([string]::IsNullOrWhiteSpace($TargetPath)) { return "" }
+  try {
+    if (-not [IO.Path]::IsPathRooted($TargetPath)) { return $TargetPath }
+    $hostFolder = Get-ParentDirectory -Path ([IO.Path]::GetFullPath($SourceDwg))
+    if (-not $hostFolder) { return $TargetPath }
+    $fullTarget = [IO.Path]::GetFullPath($TargetPath)
+    $hostRoot = [IO.Path]::GetPathRoot($hostFolder).TrimEnd('\')
+    $targetRoot = [IO.Path]::GetPathRoot($fullTarget).TrimEnd('\')
+    if (-not $hostRoot -or $hostRoot -ine $targetRoot) { return $TargetPath }
+
+    $splitOptions = [StringSplitOptions]::RemoveEmptyEntries
+    $hostParts = @($hostFolder.Substring($hostRoot.Length).Split([char[]]@('\'), $splitOptions))
+    $targetParts = @($fullTarget.Substring($targetRoot.Length).Split([char[]]@('\'), $splitOptions))
+    if ($targetParts.Count -eq 0) { return $TargetPath }
+
+    $common = 0
+    while ($common -lt $hostParts.Count -and $common -lt ($targetParts.Count - 1) -and
+      $hostParts[$common] -ieq $targetParts[$common]) {
+      $common++
+    }
+    $segments = New-Object 'System.Collections.Generic.List[string]'
+    if ($common -eq $hostParts.Count) { $segments.Add('.') }
+    for ($index = $common; $index -lt $hostParts.Count; $index++) { $segments.Add('..') }
+    for ($index = $common; $index -lt $targetParts.Count; $index++) { $segments.Add($targetParts[$index]) }
+    return ($segments -join '\')
+  }
+  catch {
+    return $TargetPath
+  }
+}
+
 function Get-XrefIdentityKey {
   param([object]$Occurrence)
 
@@ -809,16 +872,20 @@ try {
     }
   }
 
-  # Stores a new path on one row. A path that cannot be found from the row's
-  # drawing is still accepted, but shown in red.
+  # Stores a new path on one row, made relative to the row's own drawing when
+  # it is on the same drive or share. A path that cannot be found from the
+  # row's drawing is still accepted, but shown in red.
   $setRowNewPath = {
     param($row, [string]$newPath)
     $occurrence = $row.Tag
     if ($null -eq $occurrence -or -not $occurrence.Editable) { return }
+    $newPath = ConvertTo-XrefRelativePath -SourceDwg ([string]$occurrence.SourceDwg) -TargetPath $newPath
     $occurrence.NewPath = $newPath
     $cell = $row.Cells["NewPath"]
     $cell.Value = $newPath
     $cell.ToolTipText = $newPath
+    $fullPath = Resolve-XrefFullPath -SourceDwg ([string]$occurrence.SourceDwg) -SavedPath $newPath
+    if ($fullPath -and $fullPath -ine $newPath) { $cell.ToolTipText = "$newPath`r`n$fullPath" }
     $cell.Style.ForeColor = [System.Drawing.Color]::Empty
     if ($newPath -and -not (Test-XrefSavedPathFound -SourceDwg $occurrence.SourceDwg -SavedPath $newPath -AutoCadResolved $false)) {
       $cell.Style.ForeColor = [System.Drawing.Color]::DarkRed
@@ -853,8 +920,9 @@ try {
     $dialog.CheckPathExists = $true
     $dialog.RestoreDirectory = $true
     $candidateDirectory = ""
-    if (-not [string]::IsNullOrWhiteSpace($occurrence.NewPath) -and [IO.Path]::IsPathRooted($occurrence.NewPath)) {
-      $candidateDirectory = Get-ParentDirectory -Path $occurrence.NewPath
+    $currentFullPath = Resolve-XrefFullPath -SourceDwg ([string]$occurrence.SourceDwg) -SavedPath ([string]$occurrence.NewPath)
+    if ($currentFullPath) {
+      $candidateDirectory = Get-ParentDirectory -Path $currentFullPath
     }
     if (-not $candidateDirectory) {
       $candidateDirectory = Find-ProjectXrefsFolder -HostDwg ([string]$occurrence.SourceDwg)
@@ -910,7 +978,12 @@ try {
         ) | Out-Null
         return
       }
-      foreach ($targetRow in (& $getRowsSharingPath $row)) { & $setRowNewPath $targetRow $typedPath }
+      # A relative path is read from this row's drawing, then each drawing it
+      # is shared with stores it relative to its own folder.
+      $sharedPath = $typedPath
+      $typedFullPath = Resolve-XrefFullPath -SourceDwg ([string]$occurrence.SourceDwg) -SavedPath $typedPath
+      if ($typedFullPath) { $sharedPath = $typedFullPath }
+      foreach ($targetRow in (& $getRowsSharingPath $row)) { & $setRowNewPath $targetRow $sharedPath }
       & $refreshApplyButton
     })
 

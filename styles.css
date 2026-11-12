@@ -385,10 +385,6 @@ h4 {
   min-width: 10.5rem;
 }
 
-.projects-filter-dropdown[data-filter-dropdown="deliverables"] {
-  min-width: 16rem;
-}
-
 .projects-filter-dropdown.open {
   z-index: 120;
 }

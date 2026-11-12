@@ -890,11 +890,15 @@
   function bindEvents() {
     const card = byId("toolSymbolCounter");
     if (card) {
-      card.addEventListener("click", openSymbolCounter);
+      const openHandler = (event) => {
+        if (!guardUnderConstructionToolAccess(card, "Symbol Counter", event)) return;
+        openSymbolCounter();
+      };
+      card.addEventListener("click", openHandler);
       card.addEventListener("keydown", (event) => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
-          openSymbolCounter();
+          openHandler(event);
         }
       });
     }

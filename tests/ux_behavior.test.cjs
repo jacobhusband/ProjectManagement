@@ -21,11 +21,12 @@ function extract(name) {
 function context(extra = {}) {
   const scope = vm.createContext({
     Date,
+    val: () => "",
     isFinished: (d) => (d.statuses || []).some(s => ['Complete', 'Delivered'].includes(s)),
     ...extra,
   });
   for (const name of ['parseDueStr', 'getWeekStartDate', 'isEarlierDay', 'getActiveDueField', 'getEffectiveDueStr', 'getHardDueStr',
-    'deliverableNeedsAttention', 'filterPanelScheduleProjects', 'toggleProjectAttentionView']) {
+    'deliverableNeedsAttention', 'filterPanelScheduleProjects', 'toggleProjectAttentionView', 'areProjectFiltersPausedForSearch']) {
     vm.runInContext(extract(name), scope);
   }
   return scope;
@@ -119,7 +120,7 @@ test('attention follows the local week across a year boundary', () => {
 test('leaving attention restores filters, sort and board week', () => {
   let renders = 0;
   const week = new Date('2026-08-02T00:00:00');
-  const c = context({ dueFilter: 'future', statusFilter: 'Waiting', deliverablesFilter: 'incomplete',
+  const c = context({ dueFilter: 'future', statusFilter: 'Waiting',
     currentSort: { key: 'name', dir: 'desc' }, projectCardWeek: week,
     projectAttentionPreviousFilters: null, resetProjectsListPagination() {}, render() { renders++; } });
   c.toggleProjectAttentionView();
@@ -128,7 +129,6 @@ test('leaving attention restores filters, sort and board week', () => {
   c.toggleProjectAttentionView();
   assert.equal(c.dueFilter, 'future');
   assert.equal(c.statusFilter, 'Waiting');
-  assert.equal(c.deliverablesFilter, 'incomplete');
   assert.equal(c.currentSort.key, 'name');
   assert.equal(c.currentSort.dir, 'desc');
   assert.equal(c.projectCardWeek.getTime(), week.getTime());
@@ -170,4 +170,73 @@ test('searching project options never changes the current project binding', () =
   c.renderPanelScheduleManagerProjects();
   assert.equal(elements.psmProjectSelect.value, '260487');
   assert.equal(elements.psmProjectSelect.disabled, false);
+});
+const filterFunctions = ['getProjectListRenderContext', 'matchesProjectStatusFilter',
+  'getProjectsFilterValue', 'setProjectsFilterValue', 'clearProjectsFilters'];
+function filterContext(extra = {}) {
+  const c = context({
+    dueFilter: 'all', statusFilter: 'all', projectsViewMode: 'list',
+    currentSort: { key: 'due', dir: 'desc' }, projectAttentionPreviousFilters: null,
+    openProjectsFilterDropdown: null, resetProjectsListPagination() {}, render() {},
+    document: { getElementById: () => null },
+    getProjectListPriorityMeta: (p) => ({ priorityDeliverable: p.deliverables[0], hasIncompleteWork: true }),
+    getOverviewDeliverables: (p) => p.deliverables,
+    hasStatus: (d, status) => d.statuses.includes(status),
+    matchesDueFilter: (d, filter) => filter === 'all' || d.timeframe === filter,
+    compareDeliverablesByDueDesc: () => 0,
+    getLatestDeliverableDueDate: () => null,
+    getTimeframeFilterLabel: () => '',
+    buildProjectTimeframeNote: () => '',
+    ...extra,
+  });
+  for (const name of filterFunctions) vm.runInContext(extract(name), c);
+  return c;
+}
+
+test('timeframe and status intersect; search temporarily pauses both without losing selections', () => {
+  let query = '';
+  const c = filterContext({ dueFilter: 'soon', statusFilter: 'Waiting', val: () => query });
+  const project = { deliverables: [
+    { id: 'a', timeframe: 'soon', statuses: ['Waiting'] },
+    { id: 'b', timeframe: 'future', statuses: ['Waiting'] },
+    { id: 'c', timeframe: 'soon', statuses: ['Complete'] },
+  ] };
+  const visible = () => Array.from(c.getProjectListRenderContext(project).visibleDeliverables, d => d.id);
+  assert.deepEqual(visible(), ['a']);
+  query = 'office';
+  assert.deepEqual(visible(), ['a', 'b', 'c']);
+  c.setProjectsFilterValue('status', 'Complete');
+  c.toggleProjectAttentionView();
+  assert.equal(c.statusFilter, 'Waiting');
+  assert.equal(c.dueFilter, 'soon');
+  query = '';
+  assert.deepEqual(visible(), ['a']);
+});
+
+test('Status Incomplete excludes every finished status without a second deliverables filter', () => {
+  const c = filterContext({ isFinished: d => d.statuses.some(s =>
+    ['Complete', 'Completed (by others)', 'Delivered'].includes(s)) });
+  for (const status of ['Complete', 'Completed (by others)', 'Delivered']) {
+    assert.equal(c.matchesProjectStatusFilter({ statuses: [status] }, 'incomplete'), false);
+  }
+  for (const status of ['In progress', 'Waiting', 'On hold', 'Pending Review']) {
+    assert.equal(c.matchesProjectStatusFilter({ statuses: [status] }, 'incomplete'), true);
+  }
+});
+
+test('clearing filters exits attention, discards its snapshot and resets pagination', () => {
+  let resets = 0;
+  let renders = 0;
+  const c = filterContext({
+    dueFilter: 'attention', statusFilter: 'Waiting',
+    projectAttentionPreviousFilters: { dueFilter: 'future', statusFilter: 'Complete' },
+    resetProjectsListPagination: () => resets++, render: () => renders++,
+  });
+  c.clearProjectsFilters();
+  assert.equal(c.dueFilter, 'all');
+  assert.equal(c.statusFilter, 'all');
+  assert.equal(c.projectAttentionPreviousFilters, null);
+  assert.equal(c.currentSort.dir, 'asc');
+  assert.equal(resets, 1);
+  assert.equal(renders, 1);
 });

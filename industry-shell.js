@@ -564,7 +564,19 @@ function installShellIndustryLayer() {
 // Native disclosures preserve Tab/Enter/Space behavior without pretending
 // the existing column editor is an ARIA menu of simple menuitems.
 function installModernWorkspaceMenus() {
-  if (document.getElementById("projectOptionsMenu")) return;
+  if (document.getElementById("boardOptionsMenu")) return;
+  const heading = document.querySelector("#projects-panel .projects-board-heading");
+  if (heading && !heading.querySelector(".projects-header-actions")) {
+    const actions = el("div", { className: "toolbar-actions projects-header-actions", role: "group", "aria-label": "Project actions" });
+    for (const [id, label] of [["quickNew", "New project"], ["statsBtn", "Statistics"], ["projectsWidthToggle", "Wide layout"]]) {
+      const button = document.getElementById(id);
+      if (!button) continue;
+      button.classList.add("projects-header-action");
+      button.appendChild(el("span", { textContent: label }));
+      actions.appendChild(button);
+    }
+    heading.appendChild(actions);
+  }
   const menus = [];
   function group(id, label, anchor, controls) {
     if (!anchor) return;
@@ -617,22 +629,11 @@ function installModernWorkspaceMenus() {
     menus.push(details);
     return panel;
   }
-  const panel = group("projectOptionsMenu", "Project and board settings", document.getElementById("quickNew"), [
-    ["quickNew", "New project"], ["statsBtn", "Statistics"], ["projectsWidthToggle", "Wide layout"],
+  const panel = group("boardOptionsMenu", "Board settings", document.getElementById("projectsEmptyColumnsToggle"), [
     ["projectsEmptyColumnsToggle", "Minimize empty columns"],
     ["projectsHideEmptyColumnsToggle", "Hide empty columns"],
     ["columnConfigBtn", "Configure columns"],
   ]);
-  if (panel) {
-    const boardHeading = el("div", { className: "modern-menu-heading", textContent: "Layout" });
-    panel.querySelector("#projectsWidthToggle")?.before(boardHeading);
-    panel.querySelector("#columnConfigBtn")?.before(el("div", {
-      className: "modern-menu-heading modern-board-option", textContent: "Customize",
-    }));
-    ["projectsEmptyColumnsToggle", "projectsHideEmptyColumnsToggle", "columnConfigBtn"].forEach(id => {
-      document.getElementById(id)?.classList.add("modern-board-option");
-    });
-  }
   const columns = document.getElementById("columnConfigMenu");
   if (panel && columns) {
     columns.classList.add("modern-board-option");
@@ -656,7 +657,7 @@ function installModernWorkspaceMenus() {
 }
 
 // Reparent the existing fields so their handlers, values and autosave survive
-// navigation. Every original section remains reachable, including CAD defaults.
+// navigation. Related sections share a page, with their original headings intact.
 function installModernWorkspaceDialogs() {
   const dialog = document.getElementById("settingsDlg");
   const body = dialog?.querySelector(".modal-body");
@@ -664,35 +665,57 @@ function installModernWorkspaceDialogs() {
   const nav = el("nav", { className: "settings-navigation", "aria-label": "Settings sections" });
   const content = el("div", { className: "settings-content" });
   const sections = [];
-  let section;
+  const pageTitles = new Map([
+    ["general", "General"],
+    ["tools", "Tools"],
+    ["account", "Account & Sync"],
+    ["timesheets", "Timesheets"],
+    ["maintenance", "Maintenance"],
+  ]);
+  const pages = new Map();
+  function createPage(key, title) {
+    const section = el("section", { className: "settings-page", id: `settings-page-${key}`, hidden: true });
+    const heading = el("h2", { className: "settings-page-title", id: `${section.id}-title`, textContent: title });
+    section.setAttribute("aria-labelledby", heading.id);
+    section.appendChild(heading);
+    const button = el("button", {
+      type: "button", textContent: title, "aria-controls": section.id, "aria-pressed": "false",
+    });
+    button.addEventListener("click", () => {
+      sections.forEach(entry => {
+        entry.section.hidden = entry.section !== section;
+        entry.button.setAttribute("aria-pressed", String(entry.button === button));
+      });
+      content.scrollTop = 0;
+    });
+    sections.push({ section, button });
+    pages.set(key, section);
+    nav.appendChild(button);
+    content.appendChild(section);
+    return section;
+  }
+  pageTitles.forEach((title, key) => createPage(key, title));
+  let subsection;
+  let subsectionCount = 0;
   for (const node of Array.from(body.children)) {
     if (node.matches(".section-title, .danger-zone")) {
       const title = node.matches(".danger-zone") ? "Danger Zone" : node.textContent.trim();
-      section = el("section", { className: "settings-page", id: `settings-page-${sections.length}` });
-      const button = el("button", {
-        type: "button", textContent: title, "aria-controls": section.id, "aria-pressed": "false",
-      });
+      // Unassigned future sections still get a page instead of disappearing.
+      const key = node.dataset.settingsPage || `extra-${subsectionCount}`;
+      const section = pages.get(key) || createPage(key, title);
+      subsection = el("section", { className: "settings-subsection" });
       const heading = node.matches(".danger-zone") ? node.querySelector("h3") : node;
       if (heading) {
-        heading.id = `${section.id}-title`;
-        section.setAttribute("aria-labelledby", heading.id);
+        heading.id = `settings-subsection-${subsectionCount}-title`;
+        subsection.setAttribute("aria-labelledby", heading.id);
       }
-      const sectionForButton = section;
-      button.addEventListener("click", () => {
-        sections.forEach(entry => {
-          entry.section.hidden = entry.section !== sectionForButton;
-          entry.button.setAttribute("aria-pressed", String(entry.button === button));
-        });
-        content.scrollTop = 0;
-      });
-      sections.push({ section, button });
-      nav.appendChild(button);
-      content.appendChild(section);
+      subsectionCount++;
+      section.appendChild(subsection);
     }
     // The autosave notice moves to the persistent footer below.
     if (node.matches("p.tiny.muted") && node.textContent.includes("Settings are saved automatically")) {
       node.remove();
-    } else if (section) section.appendChild(node);
+    } else if (subsection) subsection.appendChild(node);
   }
   body.classList.remove("stack");
   body.classList.add("settings-layout");

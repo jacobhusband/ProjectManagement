@@ -30,13 +30,16 @@ class ProjectFiltersUiTests(unittest.TestCase):
         self.assertIn('id="statusFilterTrigger"', html)
         self.assertIn('id="statusFilterMenu"', html)
         self.assertIn('data-filter-value="Pending Review"', html)
-        self.assertIn('data-filter-dropdown="deliverables"', html)
-        self.assertIn('id="deliverablesFilterTrigger"', html)
-        self.assertIn('id="deliverablesFilterMenu"', html)
+        self.assertNotIn('data-filter-dropdown="deliverables"', html)
+        self.assertNotIn('id="deliverablesFilterTrigger"', html)
+        self.assertNotIn('id="deliverablesFilterMenu"', html)
+        self.assertIn('id="projectsClearFilters"', html)
+        self.assertIn('id="projectsClearSearch"', html)
         self.assertNotIn('data-filter-value="active"', html)
         self.assertNotIn("Show only active deliverables", html)
-        self.assertIn("Show all deliverables", html)
-        self.assertIn("Show all incomplete deliverables", html)
+        self.assertIn("All dates", projects_filters_block)
+        self.assertIn("All statuses", projects_filters_block)
+        self.assertIn('data-filter-value="incomplete"', projects_filters_block)
         self.assertIn('role="menuitemradio"', html)
         self.assertNotIn('id="timeframeFilterSelect"', html)
         self.assertNotIn('id="statusFilterSelect"', html)
@@ -140,7 +143,7 @@ class ProjectFiltersUiTests(unittest.TestCase):
         self.assertIn("function setProjectsFilterDropdownState(", script)
         self.assertIn("function moveProjectsFilterOptionFocus(", script)
         self.assertIn("function matchesProjectStatusFilter(deliverable, filter) {", script)
-        self.assertIn("function matchesProjectDeliverablesFilter(", script)
+        self.assertNotIn("function matchesProjectDeliverablesFilter(", script)
         self.assertIn("function getProjectListRenderContext(project) {", script)
         self.assertIn("function getProjectListPriorityMeta(project) {", script)
         self.assertIn("function getProjectListPriorityDeliverable(project) {", script)
@@ -170,14 +173,12 @@ class ProjectFiltersUiTests(unittest.TestCase):
         self.assertIn('const filterKey = dropdown.dataset.filterDropdown;', script)
         self.assertIn('if (filterKey === "timeframe") return dueFilter || "all";', script)
         self.assertIn('if (filterKey === "status") return statusFilter || "all";', script)
-        self.assertIn(
-            'if (filterKey === "deliverables") return deliverablesFilter || "all";',
-            script,
-        )
+        self.assertNotIn("deliverablesFilter", script)
         self.assertIn('dueFilter = value;', script)
         self.assertIn('currentSort.dir = value === "all" ? "asc" : "desc";', script)
         self.assertIn('statusFilter = value;', script)
-        self.assertIn('deliverablesFilter = value;', script)
+        self.assertIn("function clearProjectsFilters() {", script)
+        self.assertIn("function syncProjectsFilterUi() {", script)
         self.assertIn("const projectListContextMap = new Map();", script)
         self.assertIn(
             'if (projectListContext && "anchorDueDate" in projectListContext) {',
@@ -275,7 +276,7 @@ class ProjectFiltersUiTests(unittest.TestCase):
         self.assertIn(": projectListPriority.fallbackDueDate,", script)
         self.assertIn("The highest-priority deliverable is outside this timeframe.", script)
         self.assertIn(
-            'activeStatusFilter !== "all" || activeDeliverablesFilter !== "all"', script
+            'activeStatusFilter !== "all"', script
         )
         # A search sets the timeframe, status and deliverable filters aside.
         self.assertIn("function areProjectFiltersPausedForSearch() {", script)
@@ -296,7 +297,7 @@ class ProjectFiltersUiTests(unittest.TestCase):
         self.assertIn(".projects-filter-row {", css)
         self.assertIn(".projects-filter-group {", css)
         self.assertIn(".projects-filter-dropdown {", css)
-        self.assertIn(
+        self.assertNotIn(
             '.projects-filter-dropdown[data-filter-dropdown="deliverables"] {',
             css,
         )

@@ -17,8 +17,8 @@ class ProjectDeliverableActiveFeatureRemovalTests(unittest.TestCase):
         self.assertNotIn('id="settings_autoPrimary"', html)
         self.assertNotIn('data-filter-value="active"', html)
         self.assertNotIn("Show only active deliverables", html)
-        self.assertIn("Show all deliverables", html)
-        self.assertIn("Show all incomplete deliverables", html)
+        self.assertIn("All statuses", html)
+        self.assertIn('data-filter-value="incomplete"', html)
 
     def test_active_state_wiring_is_removed_and_legacy_data_is_cleaned(self):
         script = SCRIPT_JS_PATH.read_text(encoding="utf-8")
@@ -42,8 +42,8 @@ class ProjectDeliverableActiveFeatureRemovalTests(unittest.TestCase):
         # were removed with cloud sync in 8fa93fa.
         self.assertIn("function projectHasLegacyActiveState(project) {", script)
         self.assertIn("delete out.overviewDeliverableId;", script)
-        self.assertIn('let deliverablesFilter = "all";', script)
-        self.assertIn('return deliverablesFilter || "all";', script)
+        self.assertNotIn("deliverablesFilter", script)
+        self.assertIn('let statusFilter = "all";', script)
 
     def test_project_priority_uses_incomplete_work_without_selection_state(self):
         script = SCRIPT_JS_PATH.read_text(encoding="utf-8")

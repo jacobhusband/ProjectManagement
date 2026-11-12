@@ -853,6 +853,7 @@ def build_default_user_settings():
         'apiKey': '',
         'autocadPath': '',
         'showSetupHelp': True,
+        'onboardingComplete': False,
         # Offers to install the ACIES AutoCAD plugins when AutoCAD is present and none are.
         'showPluginSetupPrompt': True,
         'cleanDwgOptions': {
@@ -7612,6 +7613,31 @@ CURRENT_DELIVERABLES_IN_PERIOD:
                                      'update your settings, then try again.')}
             logging.error(f"Error getting chat response from AI: {e}")
             return {'status': 'error', 'response': f"An AI error occurred: {msg}"}
+
+    def validate_google_ai_api_key(self, api_key):
+        """Check Gemini access without generating content or saving the supplied key."""
+        api_key = str(api_key or '').strip()
+        if not api_key:
+            return {'status': 'error', 'message': 'Enter a Google Gemini API key to test.'}
+        try:
+            response = requests.get(
+                'https://generativelanguage.googleapis.com/v1beta/models',
+                headers={'x-goog-api-key': api_key},
+                params={'pageSize': 1},
+                timeout=(5, 15),
+                allow_redirects=False,
+            )
+            if response.status_code in (400, 401, 403):
+                return {'status': 'error', 'message': 'Google rejected this key. Check that it is valid and allows access to the Gemini API.'}
+            if response.status_code != 200:
+                return {'status': 'error', 'message': 'Google could not test this key right now. Try again or leave it blank to set up AI later.'}
+            payload = response.json()
+            if not isinstance(payload, dict) or not isinstance(payload.get('models'), list) or not payload['models']:
+                return {'status': 'error', 'message': 'No Gemini models are available for this key. Check its Google AI Studio project.'}
+            return {'status': 'success'}
+        except Exception:
+            # Request errors can contain credentials; do not log or return them.
+            return {'status': 'error', 'message': 'Could not reach Google to test this key. Check your connection or set up AI later.'}
 
     def _resolve_google_ai_api_key(self, api_key):
         final_api_key = (api_key or "").strip()

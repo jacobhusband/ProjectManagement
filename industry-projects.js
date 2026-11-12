@@ -2528,29 +2528,7 @@ function bindCommandDockShortcut() {
 // Chrome: footer and wiring
 // ---------------------------------------------------------------------------
 
-function syncDeliverableTypeOptions() {
-  const menu = document.getElementById("deliverablesFilterMenu");
-  if (!menu) return;
-  const names = [...new Set(getAllProjectDeliverableRows()
-    .map(({ deliverable }) => String(deliverable.name || "").trim()).filter(Boolean))]
-    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-  const signature = JSON.stringify(names);
-  if (menu.dataset.typeOptions === signature) return;
-  menu.dataset.typeOptions = signature;
-  menu.querySelectorAll('[data-deliverable-type]').forEach((node) => node.remove());
-  names.forEach((name) => menu.appendChild(el("button", {
-    type: "button", className: "projects-filter-option", textContent: name,
-    "data-filter-value": `type:${name}`, "data-deliverable-type": "true",
-    role: "menuitemradio", "aria-checked": "false", tabIndex: -1,
-  })));
-  if (deliverablesFilter.startsWith("type:") && !names.includes(deliverablesFilter.slice(5))) {
-    deliverablesFilter = "all";
-  }
-  syncProjectsFilterDropdowns();
-}
-
 function updateProjectsIndustryChrome() {
-  syncDeliverableTypeOptions();
   const footer = document.getElementById("registerFooter");
   if (footer) footer.hidden = projectsViewMode !== "list";
   // Projects and deliverables change with every render, so the dock's target

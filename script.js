@@ -3982,7 +3982,7 @@ const SHARED_TOOL_LAUNCH_REGISTRY = Object.freeze([
     category: "electrical",
     iconSvg:
       '<rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M3 9h18M3 15h18M9 3v18M15 3v18"></path>',
-    isReady: true,
+    isReady: false,
   },
   {
     id: "toolCircuitBreaker",
@@ -3992,7 +3992,7 @@ const SHARED_TOOL_LAUNCH_REGISTRY = Object.freeze([
     category: "electrical",
     iconSvg:
       '<rect width="18" height="18" x="3" y="3" rx="2"></rect><path d="M11 9h4a2 2 0 0 0 2-2V3"></path><circle cx="9" cy="9" r="2"></circle><path d="M7 21v-4a2 2 0 0 1 2-2h4"></path><circle cx="15" cy="15" r="2"></circle>',
-    isReady: true,
+    isReady: false,
   },
   {
     id: "toolBackupDrawings",
@@ -7468,6 +7468,7 @@ function getDeclarativeClickAction(name) {
     showApiKeyHelp: () => showApiKeyHelp(),
     skipOnboarding: () => skipOnboarding(),
     startSetupHelp: () => startSetupHelp(),
+    testOnboardingApiKey: () => testOnboardingApiKey(),
   };
   return Object.hasOwn(actions, String(name)) ? actions[name] : null;
 }
@@ -12042,6 +12043,7 @@ let userSettings = {
   apiKey: "",
   autocadPath: "",
   showSetupHelp: true,
+  onboardingComplete: false,
   showPluginSetupPrompt: true,
   theme: "dark",
   lightingTemplates: [],
@@ -12246,7 +12248,6 @@ let googleAuthState = { ...DEFAULT_GOOGLE_AUTH_STATE };
 let googleAuthBusy = false;
 let outlookScanCapabilityState = { ...DEFAULT_OUTLOOK_SCAN_CAPABILITY };
 let outlookScanState = { ...DEFAULT_OUTLOOK_SCAN_STATE };
-let deliverablesFilter = "all";
 let separateDeliverableCompletionGroups = true;
 let groupDeliverablesByProject = false;
 let projectsViewMode = "list";
@@ -13789,9 +13790,9 @@ function initThemeFromPreferences() {
   applyTheme(nextTheme);
 }
 
-async function persistUserSettingsLocally({ silent = false } = {}) {
+async function persistUserSettingsLocally({ silent = false, settings = userSettings } = {}) {
   try {
-    const response = await window.pywebview.api.save_user_settings(userSettings);
+    const response = await window.pywebview.api.save_user_settings(settings);
     if (response?.status && response.status !== "success") {
       throw new Error(response.message || "Failed to save settings.");
     }
@@ -19051,13 +19052,6 @@ function matchesProjectStatusFilter(deliverable, filter) {
   return hasStatus(deliverable, filter);
 }
 
-function matchesProjectDeliverablesFilter(deliverable, filter) {
-  if (filter === "all") return true;
-  if (filter === "incomplete") return !isFinished(deliverable);
-  if (filter.startsWith("type:")) return String(deliverable.name || "").trim() === filter.slice(5);
-  return true;
-}
-
 function matchesDueFilter(deliverable, filter) {
   if (filter === "all") return true;
   if (filter === "attention") return deliverableNeedsAttention(deliverable);
@@ -19097,11 +19091,11 @@ function deliverableNeedsAttention(deliverable, now = new Date()) {
 }
 
 function toggleProjectAttentionView() {
+  if (areProjectFiltersPausedForSearch()) return;
   if (dueFilter === "attention") {
     const previous = projectAttentionPreviousFilters;
     dueFilter = previous?.dueFilter || "all";
     statusFilter = previous?.statusFilter || "all";
-    deliverablesFilter = previous?.deliverablesFilter || "all";
     if (previous) {
       currentSort = previous.currentSort;
       projectCardWeek = previous.projectCardWeek;
@@ -19109,12 +19103,11 @@ function toggleProjectAttentionView() {
     projectAttentionPreviousFilters = null;
   } else {
     projectAttentionPreviousFilters = {
-      dueFilter, statusFilter, deliverablesFilter,
+      dueFilter, statusFilter,
       currentSort: { ...currentSort }, projectCardWeek: new Date(projectCardWeek),
     };
     dueFilter = "attention";
     statusFilter = "all";
-    deliverablesFilter = "all";
     currentSort = { key: "due", dir: "asc" };
     projectCardWeek = getWeekStartDate(new Date());
   }
@@ -19186,7 +19179,7 @@ function compareProjectListSortBuckets(a, b, projectListContextMap = null) {
   return dbb - da;
 }
 
-// A search looks through every project, so the timeframe, status and deliverable
+// A search looks through every project, so the timeframe and status
 // filters (including Needs attention) are set aside until the search is cleared.
 function areProjectFiltersPausedForSearch() {
   return !!val("search");
@@ -19203,7 +19196,6 @@ function getProjectListRenderContext(project) {
   const filtersPaused = areProjectFiltersPausedForSearch();
   const activeDueFilter = filtersPaused ? "all" : dueFilter;
   const activeStatusFilter = filtersPaused ? "all" : statusFilter;
-  const activeDeliverablesFilter = filtersPaused ? "all" : deliverablesFilter;
 
   // The board pages by week instead of using timeframe filters, except Needs
   // attention, which replaces week paging while it is on.
@@ -19218,13 +19210,9 @@ function getProjectListRenderContext(project) {
     (deliverable) =>
       isBoard || matchesProjectStatusFilter(deliverable, activeStatusFilter)
   );
-  const filteredDeliverables = statusMatchingDeliverables.filter((deliverable) =>
-    isBoard ||
-    matchesProjectDeliverablesFilter(deliverable, activeDeliverablesFilter)
-  );
   const visibleDeliverables = isTimeframeView
-    ? filteredDeliverables.slice().sort(compareDeliverablesByDueDesc)
-    : filteredDeliverables;
+    ? statusMatchingDeliverables.slice().sort(compareDeliverablesByDueDesc)
+    : statusMatchingDeliverables;
   const matchesFilters = visibleDeliverables.length > 0;
   const priorityMatchesTimeframe = isTimeframeView
     ? timeframeDeliverables.some(
@@ -19232,7 +19220,7 @@ function getProjectListRenderContext(project) {
       )
     : true;
   const hasAdditionalFilters =
-    activeStatusFilter !== "all" || activeDeliverablesFilter !== "all";
+    activeStatusFilter !== "all";
   const priorityVisible = visibleDeliverables.some(
     (deliverable) => deliverable.id === priorityDeliverable.id
   );
@@ -19269,11 +19257,11 @@ function getProjectListRenderContext(project) {
 function getProjectsFilterValue(filterKey) {
   if (filterKey === "timeframe") return dueFilter || "all";
   if (filterKey === "status") return statusFilter || "all";
-  if (filterKey === "deliverables") return deliverablesFilter || "all";
   return "all";
 }
 
 function setProjectsFilterValue(filterKey, value) {
+  if (areProjectFiltersPausedForSearch()) return;
   resetProjectsListPagination();
   if (filterKey === "timeframe") {
     if (value === "attention" && dueFilter !== "attention") {
@@ -19288,9 +19276,20 @@ function setProjectsFilterValue(filterKey, value) {
     }
   } else if (filterKey === "status") {
     statusFilter = value;
-  } else if (filterKey === "deliverables") {
-    deliverablesFilter = value;
   }
+}
+
+function clearProjectsFilters() {
+  dueFilter = "all";
+  statusFilter = "all";
+  projectAttentionPreviousFilters = null;
+  if (currentSort.key === "due") currentSort.dir = "asc";
+  if (openProjectsFilterDropdown) {
+    setProjectsFilterDropdownState(openProjectsFilterDropdown, false);
+  }
+  resetProjectsListPagination();
+  render();
+  document.getElementById("timeframeFilterTrigger")?.focus();
 }
 
 function getProjectsFilterOptions(dropdown) {
@@ -19300,6 +19299,7 @@ function getProjectsFilterOptions(dropdown) {
 }
 
 function syncProjectsFilterDropdowns() {
+  const filtersPaused = areProjectFiltersPausedForSearch();
   document.querySelectorAll(".projects-filter-dropdown").forEach((dropdown) => {
     const filterKey = dropdown.dataset.filterDropdown;
     const currentValue = getProjectsFilterValue(filterKey);
@@ -19310,25 +19310,71 @@ function syncProjectsFilterDropdowns() {
     const selectedOption =
       options.find((option) => option.dataset.filterValue === currentValue) ||
       options[0];
-    const isOpen = dropdown.classList.contains("open");
+    const isOpen = !filtersPaused && dropdown.classList.contains("open");
+    dropdown.classList.toggle("open", isOpen);
+    dropdown.classList.toggle("is-filtered", !filtersPaused && currentValue !== "all");
+    if (filtersPaused && openProjectsFilterDropdown === dropdown) {
+      openProjectsFilterDropdown = null;
+    }
 
     if (label && selectedOption) {
       label.textContent = selectedOption.textContent.trim();
     }
     if (trigger) {
+      trigger.disabled = filtersPaused;
+      trigger.title = filtersPaused ? "Clear search to use filters" : "";
       trigger.setAttribute("aria-expanded", String(isOpen));
     }
     if (menu) {
       menu.hidden = !isOpen;
+      menu.classList.toggle("open", isOpen);
     }
 
     options.forEach((option) => {
       const isSelected = option === selectedOption;
       option.classList.toggle("is-selected", isSelected);
       option.setAttribute("aria-checked", String(isSelected));
-      option.tabIndex = isOpen ? 0 : -1;
+      option.tabIndex = isOpen && isSelected ? 0 : -1;
     });
   });
+}
+
+function syncProjectsFilterUi() {
+  const filtersPaused = areProjectFiltersPausedForSearch();
+  const attentionActive = dueFilter === "attention";
+  const attentionButton = document.getElementById("projectsAttentionBtn");
+  if (attentionButton) {
+    attentionButton.disabled = filtersPaused;
+    attentionButton.setAttribute("aria-pressed", String(attentionActive && !filtersPaused));
+    attentionButton.classList.toggle("is-active", attentionActive && !filtersPaused);
+    attentionButton.title = filtersPaused
+      ? "Clear search to use Needs attention"
+      : attentionActive
+        ? "Restore your previous view"
+        : "Show unfinished deliverables due this week or overdue";
+  }
+  const hint = document.getElementById("projectsAttentionHint");
+  const hintText = document.getElementById("projectsFilterHintText");
+  if (hint) hint.hidden = !filtersPaused && !attentionActive;
+  if (hintText) {
+    hintText.textContent = filtersPaused
+      ? "Searching all projects and deliverables. Filters are paused until you clear the search."
+      : attentionActive
+        ? "Unfinished deliverables due this week or overdue. Click Needs attention again to restore your previous view."
+        : "";
+  }
+  const clearSearch = document.getElementById("projectsClearSearch");
+  if (clearSearch) clearSearch.hidden = !filtersPaused;
+  const clearFilters = document.getElementById("projectsClearFilters");
+  if (clearFilters) {
+    clearFilters.hidden = dueFilter === "all" && statusFilter === "all";
+    clearFilters.disabled = filtersPaused;
+  }
+  for (const id of ["weekNavPrev", "weekNavNext"]) {
+    const button = document.getElementById(id);
+    if (button) button.disabled = attentionActive && !filtersPaused;
+  }
+  syncProjectsFilterDropdowns();
 }
 
 function focusProjectsFilterSelectedOption(dropdown) {
@@ -26012,24 +26058,9 @@ function attachKanbanDragHandlers(host) {
 }
 
 function render() {
-  const attentionButton = document.getElementById("projectsAttentionBtn");
-  const attentionActive = dueFilter === "attention";
-  attentionButton?.setAttribute("aria-pressed", String(attentionActive));
-  attentionButton?.classList.toggle("is-active", attentionActive);
-  const attentionHint = document.getElementById("projectsAttentionHint");
-  if (attentionHint) {
-    attentionHint.hidden = !attentionActive;
-    attentionHint.textContent = areProjectFiltersPausedForSearch()
-      ? "Searching all projects. Clear the search to return to Needs attention."
-      : "Unfinished deliverables due this week or overdue. Click Needs attention again to restore your previous view.";
-  }
-  for (const id of ["weekNavPrev", "weekNavNext"]) {
-    const button = document.getElementById(id);
-    if (button) button.disabled = attentionActive;
-  }
+  syncProjectsFilterUi();
   const tbody = document.getElementById("tbody");
   const emptyState = document.getElementById("emptyState");
-  syncProjectsFilterDropdowns();
   updateProjectsViewModeUi();
   updateWeekNavLabel();
   tbody.innerHTML = "";
@@ -26067,8 +26098,7 @@ function render() {
   const hasActiveProjectFilters =
     !!q ||
     dueFilter !== "all" ||
-    statusFilter !== "all" ||
-    deliverablesFilter === "incomplete";
+    statusFilter !== "all";
   const emptyStateEntityLabel = groupDeliverablesByProject
     ? "projects"
     : "deliverables";
@@ -34612,8 +34642,11 @@ function closeTitle24Compliance() {
 
 let currentOnboardingStep = 1;
 const totalOnboardingSteps = 4;
+let onboardingBusy = false;
+let validatedOnboardingApiKey = "";
 
 function isNewUser() {
+  if (userSettings.onboardingComplete === true) return false;
   if (String(userSettings.userName || "").trim()) return false;
   return !hasExistingUserData();
 }
@@ -34647,15 +34680,32 @@ function hasExistingUserData() {
 }
 
 function showOnboardingModal() {
+  if (onboardingBusy) return;
   currentOnboardingStep = 1;
+  validatedOnboardingApiKey = "";
+  document.getElementById("onboarding_userName").value = userSettings.userName || "";
+  document.getElementById("onboarding_apiKey").value = userSettings.apiKey || "";
+  const configured = normalizeConfiguredDisciplineList(userSettings.discipline);
+  document.querySelectorAll('input[name="onboarding_discipline_checkbox"]').forEach((input) => {
+    input.checked = configured.includes(input.value);
+  });
+  document.getElementById("onboardingApiKeyStatus").textContent = "";
+  const dialog = document.getElementById("onboardingDlg");
+  dialog.oncancel = (event) => {
+    // Native Escape must follow the same save/exit path as Skip Setup.
+    event.preventDefault();
+    void skipOnboarding();
+  };
+  document.getElementById("onboarding_apiKey").oninput = () => {
+    validatedOnboardingApiKey = "";
+    document.getElementById("onboardingApiKeyStatus").textContent = "";
+  };
   updateOnboardingUI();
-  document.getElementById("onboardingDlg").showModal();
+  if (!dialog.open) dialog.showModal();
 }
 
 function skipOnboarding() {
-  closeDlg("onboardingDlg");
-  showMainApp();
-  void maybeShowPluginSetupBanner();
+  return completeOnboarding({ skipped: true });
 }
 
 function updateOnboardingUI() {
@@ -34683,7 +34733,7 @@ function updateOnboardingUI() {
   const prevBtn = document.getElementById("onboardingPrevBtn");
   const nextBtn = document.getElementById("onboardingNextBtn");
 
-  prevBtn.disabled = currentOnboardingStep === 1;
+  prevBtn.disabled = onboardingBusy || currentOnboardingStep === 1;
 
   if (currentOnboardingStep === totalOnboardingSteps) {
     nextBtn.textContent = "Get Started";
@@ -34693,6 +34743,14 @@ function updateOnboardingUI() {
 
   // Add Enter key navigation for quick advancement
   setupOnboardingEnterKeyListeners();
+  const focusTarget = currentOnboardingStep === 2
+    ? document.getElementById("onboarding_userName")
+    : currentOnboardingStep === 4
+      ? document.getElementById("onboarding_apiKey")
+      : currentOnboardingStep === 3
+        ? document.querySelector('input[name="onboarding_discipline_checkbox"]')
+        : nextBtn;
+  focusTarget?.focus();
 }
 
 function setupOnboardingEnterKeyListeners() {
@@ -34727,31 +34785,34 @@ function setupOnboardingEnterKeyListeners() {
 }
 
 function handleOnboardingModalKeydown(e) {
-  if (e.key === "Enter") {
+  if (e.key === "Enter" && !e.defaultPrevented && !e.isComposing && !e.repeat &&
+      !e.target?.closest("button, a, select, textarea")) {
     e.preventDefault();
     nextOnboardingStep();
   }
 }
 
 function handleOnboardingInputKeydown(e) {
-  if (e.key === "Enter") {
+  if (e.key === "Enter" && !e.isComposing && !e.repeat) {
     e.preventDefault();
     nextOnboardingStep();
   }
 }
 
 function nextOnboardingStep() {
+  if (onboardingBusy) return;
   if (!validateCurrentStep()) return;
 
   if (currentOnboardingStep < totalOnboardingSteps) {
     currentOnboardingStep++;
     updateOnboardingUI();
   } else {
-    completeOnboarding();
+    return completeOnboarding();
   }
 }
 
 function prevOnboardingStep() {
+  if (onboardingBusy) return;
   if (currentOnboardingStep > 1) {
     currentOnboardingStep--;
     updateOnboardingUI();
@@ -34766,7 +34827,6 @@ function validateCurrentStep() {
         toast("Please enter your full name.");
         return false;
       }
-      userSettings.userName = name;
       break;
     case 3: // Discipline step
       const selectedDisciplines = document.querySelectorAll(
@@ -34776,41 +34836,102 @@ function validateCurrentStep() {
         toast("Please select at least one engineering discipline.");
         return false;
       }
-      userSettings.discipline = normalizeConfiguredDisciplineList(
-        Array.from(selectedDisciplines).map((cb) => cb.value)
-      );
-      syncActiveDisciplineWithConfigured();
-      break;
-    case 4: // API Key step
-      const apiKey = val("onboarding_apiKey").trim();
-      if (!apiKey) {
-        toast("Please enter your Google Gemini API key.");
-        return false;
-      }
-      userSettings.apiKey = apiKey;
       break;
   }
   return true;
 }
 
-async function completeOnboarding() {
+function setOnboardingBusy(busy) {
+  onboardingBusy = busy;
+  document.querySelectorAll("#onboardingDlg button, #onboardingDlg input").forEach((control) => {
+    control.disabled = busy;
+  });
+  document.getElementById("onboardingPrevBtn").disabled = busy || currentOnboardingStep === 1;
+  document.getElementById("onboardingDlg").setAttribute("aria-busy", String(busy));
+}
+
+async function validateOnboardingApiKey(apiKey) {
+  const status = document.getElementById("onboardingApiKeyStatus");
+  status.textContent = "Testing key with Google…";
   try {
-    const saved = await persistUserSettingsLocally();
+    const response = await window.pywebview.api.validate_google_ai_api_key(apiKey);
+    if (response?.status !== "success") {
+      status.textContent = response?.message || "Could not test this key. Try again or leave it blank to set up AI later.";
+      return false;
+    }
+    validatedOnboardingApiKey = apiKey;
+    status.textContent = "Key accepted by Google.";
+    return true;
+  } catch (e) {
+    status.textContent = "Could not reach Google. Try again or leave the key blank to set up AI later.";
+    return false;
+  }
+}
+
+async function testOnboardingApiKey() {
+  if (onboardingBusy) return;
+  const apiKey = val("onboarding_apiKey").trim();
+  if (!apiKey) {
+    document.getElementById("onboardingApiKeyStatus").textContent = "Enter a key to test, or leave it blank to set up AI later.";
+    return;
+  }
+  setOnboardingBusy(true);
+  try {
+    await validateOnboardingApiKey(apiKey);
+  } finally {
+    setOnboardingBusy(false);
+  }
+}
+
+async function completeOnboarding({ skipped = false } = {}) {
+  if (onboardingBusy) return;
+  setOnboardingBusy(true);
+  try {
+    const apiKey = val("onboarding_apiKey").trim();
+    if (!skipped && apiKey && apiKey !== validatedOnboardingApiKey &&
+        !(await validateOnboardingApiKey(apiKey))) return;
+    const updates = { onboardingComplete: true, showSetupHelp: false };
+    const name = val("onboarding_userName").trim();
+    if (name || !skipped) updates.userName = name;
+    const selected = Array.from(document.querySelectorAll(
+      'input[name="onboarding_discipline_checkbox"]:checked'
+    )).map((input) => input.value);
+    if (selected.length) {
+      updates.discipline = normalizeConfiguredDisciplineList(selected);
+      updates.activeDiscipline = selected.includes(userSettings.activeDiscipline)
+        ? userSettings.activeDiscipline : selected[0];
+    }
+    // Skip keeps the previous key unless the new value was tested successfully.
+    if (!skipped || (apiKey && apiKey === validatedOnboardingApiKey)) updates.apiKey = apiKey;
+    const saved = await persistUserSettingsLocally({ silent: true, settings: { ...userSettings, ...updates } });
     if (!saved) {
       throw new Error("Failed to save settings.");
     }
+    Object.assign(userSettings, updates);
     closeDlg("onboardingDlg");
+    hideSetupHelpBanner();
     showMainApp();
-    toast("Welcome to ACIES! Your settings have been saved.");
+    toast(skipped ? "Your setup progress has been saved. You can continue in Settings." : "Welcome to ACIES! Your settings have been saved.");
     void maybeShowPluginSetupBanner();
   } catch (e) {
     toast("⚠️ Could not save settings. Please try again.");
+  } finally {
+    setOnboardingBusy(false);
   }
 }
 
 function showMainApp() {
   document.querySelector("main").style.display = "block";
   document.querySelector(".app-header").style.display = "flex";
+  refreshActiveDisciplineDependentUi();
+  renderGoogleAuthUi();
+  renderGlobalPagesView();
+  renderChecklistTabs();
+  renderChecklistsView();
+  renderTemplates();
+  renderTimesheets();
+  render();
+  updateTimesheetsDuplicateIndicator(getWeekEntries(formatWeekKey(currentTimesheetWeek)));
 }
 
 function hideMainApp() {
@@ -35913,10 +36034,7 @@ function hideSetupHelpBanner() {
 
 function startSetupHelp() {
   hideSetupHelpBanner();
-  // Show the full onboarding experience
-  currentOnboardingStep = 1;
-  updateOnboardingUI();
-  document.getElementById("onboardingDlg").showModal();
+  showOnboardingModal();
 }
 
 async function dismissSetupHelp(type) {
@@ -37648,6 +37766,13 @@ function initEventListeners() {
   });
   document.getElementById("statsBtn").onclick = () => showStatsModal();
   document.getElementById("projectsAttentionBtn")?.addEventListener("click", toggleProjectAttentionView);
+  document.getElementById("projectsClearFilters")?.addEventListener("click", clearProjectsFilters);
+  document.getElementById("projectsClearSearch")?.addEventListener("click", () => {
+    clearProjectSearchInput();
+    resetProjectsListPagination();
+    render();
+    document.getElementById("search")?.focus();
+  });
   const scratchpadBtn = document.getElementById("scratchpadBtn");
   if (scratchpadBtn) scratchpadBtn.onclick = () => toggleScratchpad();
   initActivityHistory();
@@ -37817,6 +37942,12 @@ function initEventListeners() {
     const filterKey = dropdown.dataset.filterDropdown;
     const trigger = dropdown.querySelector(".projects-filter-trigger");
     const menu = dropdown.querySelector(".projects-filter-menu");
+
+    dropdown.addEventListener("focusout", (e) => {
+      if (!dropdown.contains(e.relatedTarget)) {
+        setProjectsFilterDropdownState(dropdown, false);
+      }
+    });
 
     trigger?.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -38435,13 +38566,15 @@ function initEventListeners() {
   // Project Panel Schedule Manager event listeners
   const panelScheduleManagerBtn = document.getElementById("toolPanelScheduleManager");
   if (panelScheduleManagerBtn) {
-    panelScheduleManagerBtn.addEventListener("click", () => {
+    const openPanelScheduleManagerHandler = (e) => {
+      if (!guardUnderConstructionToolAccess(panelScheduleManagerBtn, "Panel Schedules", e)) return;
       void openPanelScheduleManager();
-    });
+    };
+    panelScheduleManagerBtn.addEventListener("click", openPanelScheduleManagerHandler);
     panelScheduleManagerBtn.addEventListener("keydown", (e) => {
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
-        void openPanelScheduleManager();
+        openPanelScheduleManagerHandler(e);
       }
     });
   }
@@ -38544,11 +38677,15 @@ function initEventListeners() {
   // Circuit Breaker AI event listeners
   const circuitBreakerBtn = document.getElementById("toolCircuitBreaker");
   if (circuitBreakerBtn) {
-    circuitBreakerBtn.addEventListener("click", openCircuitBreaker);
+    const openCircuitBreakerHandler = (e) => {
+      if (!guardUnderConstructionToolAccess(circuitBreakerBtn, "Panel Schedule AI", e)) return;
+      openCircuitBreaker();
+    };
+    circuitBreakerBtn.addEventListener("click", openCircuitBreakerHandler);
     circuitBreakerBtn.addEventListener("keydown", (e) => {
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
-        openCircuitBreaker();
+        openCircuitBreakerHandler(e);
       }
     });
   }
@@ -39669,15 +39806,6 @@ async function init() {
       showOnboardingModal();
     } else {
       showMainApp();
-      renderGlobalPagesView();
-      renderChecklistTabs();
-      renderChecklistsView();
-      renderTemplates();
-      renderTimesheets();
-      render();
-      updateTimesheetsDuplicateIndicator(
-        getWeekEntries(formatWeekKey(currentTimesheetWeek))
-      );
 
       if (userSettings.showSetupHelp !== false) {
         setTimeout(() => showSetupHelpBanner(), 1000);

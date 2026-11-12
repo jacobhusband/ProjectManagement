@@ -242,6 +242,80 @@ class RepairXrefPathsToolTests(unittest.TestCase):
         self.assertNotIn("param([int]$Pid)", text)
         self.assertIn("Stop-ProcessTree -ProcessId $process.Id", text)
 
+    def _run_script_functions(self, function_names, body):
+        # Load only the named functions from the script (running the whole
+        # script would open its dialogs), then run the body against them.
+        names = ",".join(f"'{name}'" for name in function_names)
+        command = (
+            "$tokens=$null; $errors=$null; "
+            "$ast=[System.Management.Automation.Language.Parser]::ParseFile("
+            f"'{POWERSHELL_PATH}', [ref]$tokens, [ref]$errors); "
+            f"$names=@({names}); "
+            "$ast.FindAll({ param($node) $node -is "
+            "[System.Management.Automation.Language.FunctionDefinitionAst] -and "
+            "$names -contains $node.Name }, $false) | "
+            "ForEach-Object { . ([scriptblock]::Create($_.Extent.Text)) }; "
+            + body
+        )
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", command],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        return result.stdout.splitlines()
+
+    def test_new_paths_are_saved_relative_to_each_host_drawing(self):
+        host = r"C:\Projects\260001 Example\Electrical\E02.00 Lighting.dwg"
+        cases = [
+            # (picked or typed path, expected saved path)
+            (r"C:\Projects\260001 Example\Xrefs\A01-00.dwg", r"..\Xrefs\A01-00.dwg"),
+            (r"C:\Projects\260001 Example\Electrical\x-TB.dwg", r".\x-TB.dwg"),
+            (r"C:\Projects\260001 Example\Electrical\Bases\A02.dwg", r".\Bases\A02.dwg"),
+            (r"c:\projects\260001 example\xrefs\A03.dwg", r"..\xrefs\A03.dwg"),
+            (r"C:\Other\Job\A04.dwg", r"..\..\..\Other\Job\A04.dwg"),
+            # Another drive or share cannot be relative, so it stays absolute.
+            (r"M:\Server\Xrefs\A05.dwg", r"M:\Server\Xrefs\A05.dwg"),
+            (r"\\server\share\Xrefs\A06.dwg", r"\\server\share\Xrefs\A06.dwg"),
+            # Already relative paths are kept as typed.
+            (r"..\Xrefs\A07.dwg", r"..\Xrefs\A07.dwg"),
+            ("", ""),
+        ]
+        body = "".join(
+            f"Write-Output ('<' + (ConvertTo-XrefRelativePath -SourceDwg '{host}' "
+            f"-TargetPath '{target}') + '>'); "
+            for target, _ in cases
+        )
+        output = self._run_script_functions(
+            ["Get-ParentDirectory", "ConvertTo-XrefRelativePath"], body
+        )
+        self.assertEqual([f"<{expected}>" for _, expected in cases], output)
+
+        unc_host = r"\\server\share\Job\Electrical\E01.dwg"
+        output = self._run_script_functions(
+            ["Get-ParentDirectory", "ConvertTo-XrefRelativePath"],
+            f"Write-Output (ConvertTo-XrefRelativePath -SourceDwg '{unc_host}' "
+            r"-TargetPath '\\server\share\Job\Xrefs\A01.dwg')",
+        )
+        self.assertEqual([r"..\Xrefs\A01.dwg"], output)
+
+    def test_typed_relative_path_is_resolved_from_its_own_drawing(self):
+        host = r"C:\Projects\260001 Example\Electrical\E02.00 Lighting.dwg"
+        output = self._run_script_functions(
+            ["Get-ParentDirectory", "Resolve-XrefFullPath"],
+            f"Write-Output (Resolve-XrefFullPath -SourceDwg '{host}' -SavedPath '..\\Xrefs\\A01.dwg'); "
+            f"Write-Output ('<' + (Resolve-XrefFullPath -SourceDwg '{host}' -SavedPath '%XREFS%\\A01.dwg') + '>')",
+        )
+        self.assertEqual(
+            [r"C:\Projects\260001 Example\Xrefs\A01.dwg", "<>"], output
+        )
+        text = POWERSHELL_PATH.read_text(encoding="utf-8")
+        self.assertIn(
+            "$newPath = ConvertTo-XrefRelativePath -SourceDwg ([string]$occurrence.SourceDwg) -TargetPath $newPath",
+            text,
+        )
+
     def test_powershell_script_parses(self):
         command = (
             "$tokens=$null; $errors=$null; "

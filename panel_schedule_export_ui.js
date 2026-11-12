@@ -388,11 +388,15 @@
   function bindEvents() {
     const card = byId("toolPanelScheduleExport");
     if (card) {
-      card.addEventListener("click", openPanelScheduleExport);
+      const openHandler = (event) => {
+        if (!guardUnderConstructionToolAccess(card, "Panel Schedule Export", event)) return;
+        openPanelScheduleExport();
+      };
+      card.addEventListener("click", openHandler);
       card.addEventListener("keydown", (event) => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
-          openPanelScheduleExport();
+          openHandler(event);
         }
       });
     }

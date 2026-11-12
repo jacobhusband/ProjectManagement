@@ -292,8 +292,11 @@ class LogoAssetTests(unittest.TestCase):
         self.assertIn("void refreshGoogleAuthStateInBackground();", init)
         self.assertNotIn("await refreshGoogleAuthStateInBackground", init)
         self.assertLess(
-            init.index("render();"), init.index("void refreshGoogleAuthStateInBackground();")
+            init.index("showMainApp();"), init.index("void refreshGoogleAuthStateInBackground();")
         )
+        show_main = SCRIPT_JS.split("function showMainApp() {", 1)[1].split("function hideMainApp()", 1)[0]
+        self.assertIn("render();", show_main)
+        self.assertNotIn("await ", show_main)
         self.assertIn("api.get_google_auth_state(refresh)", SCRIPT_JS)
 
     def test_background_renewal_keeps_the_settings_copy_in_step(self):
