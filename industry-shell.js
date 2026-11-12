@@ -329,7 +329,11 @@ function buildPluginTable(bundles) {
       textContent: availText,
     });
 
+    // The combined plugin also has a Commands button; find it before the action
+    // button leaves the card footer.
+    const commandsButton = card.querySelector(".plugin-commands-btn");
     const action = el("div", { className: "tl-plugin-action" });
+    if (commandsButton) action.appendChild(commandsButton);
     if (button) action.appendChild(button);
     if (help) action.appendChild(help);
 

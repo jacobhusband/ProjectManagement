@@ -36,7 +36,7 @@ const KEY_TO_LABEL = {
   "completed-by-others": "Completed (by others)",
   delivered: "Delivered",
 };
-const HELP_TOPICS = ["projects", "notes", "tools", "timesheets", "misc"];
+const HELP_TOPICS = ["projects", "deliverables", "notes", "tools", "timesheets", "misc"];
 const THEME_STORAGE_KEY = "acies-theme";
 const LIGHTING_SCHEDULE_FIELDS = [
   "mark",
@@ -28796,10 +28796,19 @@ const HIDDEN_PLUGIN_BUNDLES = new Set([
   "ElectricalCommands.GetAttributesCommands.bundle",
 ]);
 
+// Plugin releases after v0.3.0 ship every plugin in this one bundle.
+const COMBINED_PLUGIN_BUNDLE = "ElectricalCommands.bundle";
+const COMBINED_PLUGIN_LABEL = "ACIES Commands";
+
 function normalizeBundleCoreName(bundleName) {
-  return String(bundleName || "")
-    .replace("ElectricalCommands.", "")
-    .replace(".bundle", "");
+  const core = String(bundleName || "").replace(".bundle", "");
+  // The combined bundle has no plugin name of its own to show.
+  if (core === "ElectricalCommands") return "ACIES Commands";
+  return core.replace("ElectricalCommands.", "");
+}
+
+function isCombinedPluginBundle(bundle) {
+  return String(bundle?.bundle_name || "") === COMBINED_PLUGIN_BUNDLE;
 }
 
 function isVisiblePluginBundle(bundle) {
@@ -28845,16 +28854,12 @@ const PLUGIN_DOC_OVERRIDES = {
   },
   CleanCADCommands: {
     replace: true,
-    order: ["EMBEDIMAGES", "EMBEDPDFS", "CLEANTBLK", "CLEANCAD", "CLEANCAD2"],
+    order: ["EMBEDIMAGES", "EMBEDPDFS", "CLEANCAD2"],
     commands: {
       EMBEDIMAGES:
         "Embeds raster images from XREFs into the drawing by converting them to OLE objects using PowerPoint, preserving orientation.",
       EMBEDPDFS:
         "Embeds PDF underlays into the drawing by converting them to PNG and then OLE objects using PowerPoint.",
-      CLEANTBLK:
-        "Cleans the title block by exploding blocks, keeping only the title block, detaching XREFs, and embedding images.",
-      CLEANCAD:
-        "Cleans the entire sheet by embedding XREFs and performing cleanup operations.",
       CLEANCAD2:
         "Runs the initial non-interactive cleanup workflow, aborting safely when unresolved XREFs or media requiring desktop embedding are detected.",
     },
@@ -28867,23 +28872,14 @@ const PLUGIN_DOC_OVERRIDES = {
         "EMBEDPDFS",
         "2b03fdbb662c806b9716fcd761700898"
       ),
-      CLEANTBLK: buildPluginDocUrl(
-        "CLEANTBLK",
-        "2b03fdbb662c80eb89add09ae9cd99df"
-      ),
-      CLEANCAD: buildPluginDocUrl(
-        "CLEANCAD",
-        "2b03fdbb662c805b9df9c80b6ad26900"
-      ),
     },
   },
   GeneralCommands: {
     replace: true,
-    order: ["PROJECTCHECKLIST", "PCL", "OBJMASK", "VPFROMREG", "LAYRED", "LAYGREEN", "AREALABEL"],
+    order: ["PROJECTCHECKLIST", "OBJMASK", "VPFROMREG", "LAYRED", "LAYGREEN", "AREALABEL"],
     commands: {
       PROJECTCHECKLIST:
         "Opens a project-scoped checklist palette using checklist definitions from the desktop app and shared completion state for the current project.",
-      PCL: "Alias for PROJECTCHECKLIST.",
       OBJMASK:
         "Creates wipeout objects behind selected text, MText, tables, or polylines to mask the background.",
       VPFROMREG:
@@ -28944,7 +28940,6 @@ const PLUGIN_DOC_OVERRIDES = {
     order: [
       "TEXTCOUNT",
       "TEXTSELECT",
-      "SUMTEXT",
       "TEXTREPLACE",
       "TEXTINCREMENT",
       "TEXTADD",
@@ -28954,8 +28949,6 @@ const PLUGIN_DOC_OVERRIDES = {
         "Counts selected TEXT, MTEXT, and ATTRIB values, groups identical strings, reports totals, and exports a timestamped text report.",
       TEXTSELECT:
         "Filters a mixed selection so only TEXT and MTEXT objects remain selected.",
-      SUMTEXT:
-        "Totals selected room square-footage text, labels the total above the selection, and exports grouped totals to T24Output.json.",
       TEXTREPLACE:
         "Replaces the content of selected TEXT and MTEXT objects with a new user-specified value.",
       TEXTINCREMENT:
@@ -28971,10 +28964,6 @@ const PLUGIN_DOC_OVERRIDES = {
       TEXTSELECT: buildPluginDocUrl(
         "TEXTSELECT",
         "5ed6ba4a1b2f4c2090673c79785b77aa"
-      ),
-      SUMTEXT: buildPluginDocUrl(
-        "SUMTEXT",
-        "2b13fdbb662c807aa0d6e00948b128d6"
       ),
       TEXTREPLACE: buildPluginDocUrl(
         "TEXTREPLACE",
@@ -28992,7 +28981,7 @@ const PLUGIN_DOC_OVERRIDES = {
   },
   LFSCommands: {
     replace: true,
-    order: ["LFS", "EQS", "LIGHTPLANSCAN", "LPSCAN", "LIGHTPLANAPPLY", "LPAPPLY"],
+    order: ["LFS", "EQS", "LIGHTPLANSCAN", "LIGHTPLANAPPLY"],
     commands: {
       LFS:
         "Inserts the built-in lighting fixture schedule table template and applies local sync data when available.",
@@ -29000,10 +28989,8 @@ const PLUGIN_DOC_OVERRIDES = {
         "Opens the equipment schedule editor to place, load, and update an electrical equipment schedule table. Rows are saved to ACIESEquipmentSchedule.json beside the drawing.",
       LIGHTPLANSCAN:
         "Scans configured room-boundary polylines and light fixture blocks into ACIESLightingPlan.snapshot.json beside the active drawing.",
-      LPSCAN: "Alias for LIGHTPLANSCAN.",
       LIGHTPLANAPPLY:
         "Creates or updates reviewed fixture mark and circuit/control tags from ACIESLightingPlan.instructions.json without duplicating prior generated tags.",
-      LPAPPLY: "Alias for LIGHTPLANAPPLY.",
     },
     links: {
       LFS: buildPluginDocUrl(
@@ -29075,6 +29062,9 @@ function applyPluginDocOverrides(coreName, description) {
 async function fetchDescriptionForBundle(bundleName) {
   // Remove prefix/suffix to get core name. e.g., "ElectricalCommands.CleanCADCommands.bundle" -> "CleanCADCommands"
   const coreName = normalizeBundleCoreName(bundleName);
+
+  // The combined bundle's commands come from its own catalog (the Commands dialog).
+  if (coreName === COMBINED_PLUGIN_LABEL) return null;
 
   // Check Cache
   if (DESCRIPTION_CACHE[coreName]) return DESCRIPTION_CACHE[coreName];
@@ -29227,10 +29217,7 @@ async function renderBundles(bundles) {
     ]);
     helpBtn.append(helpIcon, tooltip);
 
-    helpBtn.addEventListener("click", (e) => e.stopPropagation());
-    helpBtn.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") e.stopPropagation();
-    });
+    bindToolHelp(helpBtn, tooltip, coreName);
 
     const header = el("div", { className: "release-card-header" }, [
       el("div", { className: "release-card-title" }, [
@@ -29267,6 +29254,24 @@ async function renderBundles(bundles) {
     card.append(header, footer);
     container.append(card);
 
+    if (isCombinedPluginBundle(bundle)) {
+      const hasPlugin =
+        bundle.state === "installed" || bundle.state === "update_available";
+      if (hasPlugin) {
+        const commandsBtn = el("button", {
+          className: "btn plugin-commands-btn",
+          textContent: "Commands",
+          title: "Choose which ACIES commands are on in AutoCAD",
+        });
+        commandsBtn.dataset.pluginCommands = "true";
+        footer.append(commandsBtn);
+      }
+      detailsState.textContent = hasPlugin
+        ? "Every ACIES AutoCAD command in one plugin. Use Commands to switch any of them off."
+        : "Every ACIES AutoCAD command in one plugin. After installing, you choose which commands are on.";
+      continue;
+    }
+
     const descriptionPromise = fetchDescriptionForBundle(bundle.name)
       .then((description) => {
         const commands = description?.commands
@@ -29289,7 +29294,11 @@ async function renderBundles(bundles) {
                 onclick: () => openExternalUrl(link),
               })
               : el("span", { className: "command-tag", textContent: cmd, title });
-            tags.append(tagEl);
+            const entry = el("div", { className: "command-help-entry" }, [tagEl]);
+            if (title) entry.appendChild(el("span", {
+              className: "command-help-description", textContent: title,
+            }));
+            tags.append(entry);
           });
         } else {
           detailsState.textContent = "No extra details available.";
@@ -29383,6 +29392,10 @@ async function checkBundlesForUpdates({ showIndicator = true } = {}) {
 }
 
 async function handleBundleAction(e) {
+  if (e.target.closest("[data-plugin-commands]")) {
+    await openPluginCommandsDialog();
+    return;
+  }
   const button = e.target.closest("[data-action-type]");
   if (!button) return;
 
@@ -29406,6 +29419,7 @@ async function handleBundleAction(e) {
   });
   button.disabled = true;
   button.textContent = "Processing...";
+  let chooseCommands = false;
 
   try {
     let response;
@@ -29419,8 +29433,16 @@ async function handleBundleAction(e) {
       );
     }
     if (response.status !== "success") throw new Error(response.message);
+    // A fresh install is the moment to pick commands; an update keeps the saved choices.
+    chooseCommands =
+      actionType === "Install" && bundleName === COMBINED_PLUGIN_BUNDLE;
+    const leftBehind = Array.isArray(response.legacyBundlesLeft)
+      ? response.legacyBundlesLeft
+      : [];
     completeActivity(activityId, {
-      message: `${actionType} successful.`,
+      message: leftBehind.length
+        ? `${actionType} successful, but ${leftBehind.length} older plugin folder(s) could not be removed. Delete them from the plugins folder, or AutoCAD will load their commands twice.`
+        : `${actionType} successful.`,
       openFolderPath: String(
         response.bundlePath || response.pluginsFolderPath || ""
       ).trim(),
@@ -29436,6 +29458,196 @@ async function handleBundleAction(e) {
   } finally {
     await ensureBundlesRendered({ force: true });
 
+  }
+  if (chooseCommands) await openPluginCommandsDialog();
+}
+
+// ---- Command switches: which ACIES commands are on in AutoCAD ----
+// The combined plugin ships a catalog of its commands. The names a user switches off
+// are saved to a small text file that the plugin reads when AutoCAD starts.
+
+let pluginCommandModules = [];
+let pluginCommandsOff = new Set();
+let pluginCommandsDialogReady = false;
+let pluginCommandsCollapsed = new Set();
+let pluginCommandsLastQuery = "";
+
+function initPluginCommandsDialog() {
+  if (pluginCommandsDialogReady) return;
+  pluginCommandsDialogReady = true;
+  const list = document.getElementById("pluginCommandsList");
+  list.addEventListener("change", (e) => {
+    const box = e.target;
+    if (!(box instanceof HTMLInputElement) || box.type !== "checkbox") return;
+    if (box.dataset.command) {
+      setPluginCommandOn(box.dataset.command, box.checked);
+    } else if (box.dataset.module) {
+      const module = pluginCommandModules.find((m) => m.id === box.dataset.module);
+      (module?.commands || []).forEach((c) => setPluginCommandOn(c.name, box.checked));
+    }
+    renderPluginCommandsList();
+  });
+  document.getElementById("pluginCommandsSearch").addEventListener("input", () => {
+    renderPluginCommandsList();
+  });
+  document.getElementById("pluginCommandsAllOn").addEventListener("click", () => {
+    pluginCommandsOff.clear();
+    renderPluginCommandsList();
+  });
+  document.getElementById("pluginCommandsAllOff").addEventListener("click", () => {
+    pluginCommandModules.forEach((m) =>
+      m.commands.forEach((c) => pluginCommandsOff.add(c.name))
+    );
+    renderPluginCommandsList();
+  });
+  document.getElementById("pluginCommandsSave").addEventListener("click", () => {
+    savePluginCommandSettings();
+  });
+}
+
+function setPluginCommandOn(name, on) {
+  if (on) pluginCommandsOff.delete(name);
+  else pluginCommandsOff.add(name);
+}
+
+function renderPluginCommandsList() {
+  const list = document.getElementById("pluginCommandsList");
+  const query = document
+    .getElementById("pluginCommandsSearch")
+    .value.trim()
+    .toLowerCase();
+  // Keep each group open or closed as the user left it. A search opens every group,
+  // so what is on screen during one says nothing about the user's choice.
+  if (!pluginCommandsLastQuery) {
+    pluginCommandsCollapsed = new Set(
+      [...list.querySelectorAll("details:not([open])")].map((d) => d.dataset.module)
+    );
+  }
+  pluginCommandsLastQuery = query;
+  const closed = pluginCommandsCollapsed;
+  list.innerHTML = "";
+
+  let total = 0;
+  let off = 0;
+  pluginCommandModules.forEach((module) => {
+    const commands = module.commands;
+    const offHere = commands.filter((c) => pluginCommandsOff.has(c.name)).length;
+    total += commands.length;
+    off += offHere;
+
+    const shown = query
+      ? commands.filter(
+        (c) =>
+          c.name.toLowerCase().includes(query) ||
+          c.description.toLowerCase().includes(query)
+      )
+      : commands;
+    if (!shown.length) return;
+
+    const moduleBox = el("input", { type: "checkbox" });
+    moduleBox.dataset.module = module.id;
+    moduleBox.checked = offHere === 0;
+    moduleBox.indeterminate = offHere > 0 && offHere < commands.length;
+    moduleBox.setAttribute("aria-label", `All ${module.title} commands`);
+
+    const summary = el("summary", { className: "plugin-commands-group-head" }, [
+      moduleBox,
+      el("span", { className: "plugin-commands-group-title", textContent: module.title }),
+      el("span", {
+        className: "plugin-commands-group-count",
+        textContent: `${commands.length - offHere} of ${commands.length} on`,
+      }),
+    ]);
+
+    const rows = shown.map((command) => {
+      const box = el("input", { type: "checkbox" });
+      box.dataset.command = command.name;
+      box.checked = !pluginCommandsOff.has(command.name);
+      return el("label", { className: "plugin-command-row" }, [
+        box,
+        el("span", { className: "plugin-command-name", textContent: command.name }),
+        el("span", {
+          className: "plugin-command-desc",
+          textContent: command.description,
+          title: command.description,
+        }),
+      ]);
+    });
+
+    const group = el("details", { className: "plugin-commands-group" }, [
+      summary,
+      el("div", { className: "plugin-commands-rows" }, rows),
+    ]);
+    group.dataset.module = module.id;
+    group.open = query ? true : !closed.has(module.id);
+    list.append(group);
+  });
+
+  if (!list.children.length) {
+    list.append(
+      el("div", { className: "muted", textContent: "No commands match that search." })
+    );
+  }
+  document.getElementById("pluginCommandsCount").textContent =
+    `${total - off} of ${total} commands on`;
+}
+
+async function openPluginCommandsDialog() {
+  const dlg = document.getElementById("pluginCommandsDlg");
+  if (!dlg) return;
+  let response;
+  try {
+    response = await window.pywebview.api.get_plugin_command_settings();
+  } catch (e) {
+    response = { status: "error", message: "Could not read the plugin's command list." };
+  }
+  if (response?.status !== "success") {
+    toast(response?.message || "Could not read the plugin's command list.");
+    return;
+  }
+  if (!response.installed || !response.modules.length) {
+    toast("Update the ACIES AutoCAD plugin first; this version has no command list.");
+    return;
+  }
+
+  initPluginCommandsDialog();
+  pluginCommandModules = response.modules;
+  const known = new Set(
+    pluginCommandModules.flatMap((m) => m.commands.map((c) => c.name))
+  );
+  pluginCommandsOff = new Set(response.disabled.filter((name) => known.has(name)));
+  document.getElementById("pluginCommandsSearch").value = "";
+  document.getElementById("pluginCommandsList").innerHTML = "";
+  pluginCommandsLastQuery = "";
+  renderPluginCommandsList();
+  if (!dlg.open) dlg.showModal();
+}
+
+async function savePluginCommandSettings() {
+  const saveBtn = document.getElementById("pluginCommandsSave");
+  saveBtn.disabled = true;
+  try {
+    const response = await window.pywebview.api.save_plugin_command_settings(
+      [...pluginCommandsOff]
+    );
+    if (response?.status !== "success") {
+      throw new Error(response?.message || "Could not save the command settings.");
+    }
+    const count = response.disabled.length;
+    const what = count
+      ? `${count} command${count === 1 ? "" : "s"} switched off.`
+      : "All commands are on.";
+    toast(
+      response.autocadRunning
+        ? `${what} Restart AutoCAD to apply the change.`
+        : `${what} AutoCAD applies this the next time it starts.`,
+      5000
+    );
+    closeDlg("pluginCommandsDlg");
+  } catch (err) {
+    toast(err?.message || "Could not save the command settings.", 5000);
+  } finally {
+    saveBtn.disabled = false;
   }
 }
 
@@ -33035,7 +33247,7 @@ function buildLightingScheduleSyncDefaultMessage(project, schedule) {
   } else {
     segments.push("Choose Target DWG to bind a drawing for AutoCAD table updates.");
   }
-  segments.push("Run LFS in AutoCAD to place, link, or edit the same schedule (LFSOPEN is an alias in updated plugins).");
+  segments.push("Run LFS in AutoCAD to place, link, or edit the same schedule.");
   return segments.join(" ");
 }
 
@@ -36225,6 +36437,13 @@ async function installFirstRunPlugins() {
     pluginSetupPromptHandled = true;
     hidePluginSetupBanner();
     await ensureBundlesRendered({ force: true });
+    // The combined plugin lets the user pick which commands are on, right after installing.
+    if (
+      targets.some((bundle) => bundle.bundle_name === "ElectricalCommands.bundle") &&
+      typeof openPluginCommandsDialog === "function"
+    ) {
+      await openPluginCommandsDialog();
+    }
   } else {
     // Nothing was installed, so keep the offer up for another try (for example, after
     // closing AutoCAD).
@@ -36325,14 +36544,7 @@ function initToolCardDetailsToggles() {
 
       helpBtn.append(helpIcon, tooltip);
 
-      helpBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-      });
-      helpBtn.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.stopPropagation();
-        }
-      });
+      bindToolHelp(helpBtn, tooltip, headerText);
 
       actions.appendChild(helpBtn);
     }
@@ -36392,10 +36604,67 @@ function getActiveHelpTopic() {
   return HELP_TOPICS.includes(tab) ? tab : "projects";
 }
 
+function bindToolHelp(trigger, details, title) {
+  trigger.setAttribute("aria-label", `${title} help`);
+  trigger.setAttribute("aria-haspopup", "dialog");
+  trigger.setAttribute("aria-disabled", "false");
+  trigger.setAttribute("title", `Help with ${title}`);
+  trigger.addEventListener("click", (event) => {
+    event.stopPropagation();
+    // Command documentation inside a hover preview has its own click handler.
+    if (event.target !== trigger && !trigger.querySelector("svg")?.contains(event.target)) return;
+    const dialog = document.getElementById("toolHelpDlg");
+    const content = document.getElementById("toolHelpContent");
+    if (!dialog || !content || dialog.open) return;
+    document.getElementById("toolHelpTitle").textContent = `${title} help`;
+    const previewNotice = document.getElementById("toolHelpPreviewNotice");
+    if (previewNotice) previewNotice.hidden = trigger.closest?.(".tool-card")?.dataset.underConstruction !== "true";
+    // Move the live content so asynchronous plugin details and documentation
+    // buttons keep working. Restore it for hover previews when the dialog closes.
+    const parent = details.parentNode;
+    const sibling = details.nextSibling;
+    details.classList.add("tool-help-details");
+    content.replaceChildren(details);
+    dialog.addEventListener("close", () => {
+      details.classList.remove("tool-help-details");
+      parent.insertBefore(details, sibling);
+      if (trigger.isConnected) trigger.focus();
+    }, { once: true });
+    showDialog(dialog);
+  });
+  trigger.addEventListener("keydown", (event) => {
+    if (event.target !== trigger || (event.key !== "Enter" && event.key !== " ")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    trigger.click();
+  });
+}
+
+function filterHelpTopics() {
+  const query = String(document.getElementById("helpSearch")?.value || "").trim().toLowerCase();
+  const terms = query.split(/\s+/).filter(Boolean);
+  const sections = Array.from(document.querySelectorAll("#helpDlgContent .help-topic"));
+  const matches = sections.filter((section) => {
+    const text = section.textContent.toLowerCase().replace(/\s+/g, " ");
+    return terms.every((term) => text.includes(term));
+  }).map((section) => section.dataset.helpTopic);
+  const selected = document.querySelector("#helpDlgSidebar .help-topic-btn.active")?.dataset.helpTopic;
+  document.querySelectorAll("#helpDlgSidebar .help-topic-btn").forEach((button) => {
+    button.hidden = !matches.includes(button.dataset.helpTopic);
+  });
+  const empty = document.getElementById("helpNoResults");
+  if (empty) empty.hidden = matches.length > 0;
+  const status = document.getElementById("helpSearchStatus");
+  if (status) status.textContent = query
+    ? `${matches.length} help topic${matches.length === 1 ? "" : "s"} found.` : "";
+  setActiveHelpTopic(matches.includes(selected) ? selected : matches[0] || "");
+}
+
 function setActiveHelpTopic(topic) {
-  const next = HELP_TOPICS.includes(topic) ? topic : "projects";
+  const next = HELP_TOPICS.includes(topic) ? topic : "";
   document.querySelectorAll("#helpDlgSidebar .help-topic-btn").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.helpTopic === next);
+    btn.setAttribute("aria-pressed", String(btn.dataset.helpTopic === next));
   });
   document.querySelectorAll("#helpDlgContent .help-topic").forEach((section) => {
     section.hidden = section.dataset.helpTopic !== next;
@@ -36407,7 +36676,10 @@ function setActiveHelpTopic(topic) {
 function openHelp(topic) {
   const dlg = document.getElementById("helpDlg");
   if (!dlg) return;
-  setActiveHelpTopic(topic);
+  const search = document.getElementById("helpSearch");
+  if (search) search.value = "";
+  filterHelpTopics();
+  setActiveHelpTopic(HELP_TOPICS.includes(topic) ? topic : getActiveHelpTopic());
   showDialog(dlg);
 }
 
@@ -37421,6 +37693,7 @@ function initEventListeners() {
       if (btn && btn.dataset.helpTopic) setActiveHelpTopic(btn.dataset.helpTopic);
     });
   }
+  document.getElementById("helpSearch")?.addEventListener("input", filterHelpTopics);
   setupProjectsViewModeControls();
   const copyProjectLocallyFolderList = document.getElementById(
     "copyProjectLocallyFolderList"
@@ -39726,7 +39999,10 @@ function initEventListeners() {
     spinner.style.display = "block";
     try {
       const all = await window.pywebview.api.get_bundle_statuses();
-      const bundle = all.data.find((b) => b.name.includes("CleanCADCommands"));
+      // Releases after v0.3.0 ship CleanCADCommands inside the combined plugin.
+      const bundle =
+        all.data.find((b) => b.bundle_name === COMBINED_PLUGIN_BUNDLE) ||
+        all.data.find((b) => b.name.includes("CleanCADCommands"));
       if (bundle) {
         await window.pywebview.api.install_single_bundle(bundle.asset);
         toast("Installed!");

@@ -2315,7 +2315,7 @@ body.scratchpad-open .cmd-dock {
 
 .tl-plugin-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 96px 96px 110px;
+  grid-template-columns: minmax(0, 1fr) 96px 96px 196px;
   gap: 14px;
   align-items: center;
   padding: 9px 13px;

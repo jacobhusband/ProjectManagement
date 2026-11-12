@@ -31,10 +31,13 @@ class LightingPlanAutocadBridgeTests(unittest.TestCase):
         )
 
     def test_scan_and_apply_commands_are_registered_and_packaged(self):
-        for command in ("LIGHTPLANSCAN", "LPSCAN", "LIGHTPLANAPPLY", "LPAPPLY"):
+        for command in ("LIGHTPLANSCAN", "LIGHTPLANAPPLY"):
             self.assertIn(f'[CommandMethod("{command}"', self.command_source)
             self.assertIn(command, self.descriptions["commands"])
         self.assertIn('<Compile Include="LightingPlanCommands.cs" />', self.project_source)
+        for alias in ("LPSCAN", "LPAPPLY"):
+            self.assertNotIn(f'[CommandMethod("{alias}"', self.command_source)
+            self.assertNotIn(alias, self.descriptions["commands"])
 
     def test_scan_exports_configurable_rooms_fixtures_and_attributes(self):
         self.assertIn("ACIESLightingPlan.snapshot.json", self.command_source)

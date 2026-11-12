@@ -17,11 +17,11 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" media="print" data-async-stylesheet>
     <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;700&family=Barlow+Condensed:wght@400;500;600&display=swap" rel="stylesheet" media="print" data-async-stylesheet>
     <script src="app-bootstrap.js?v=20260929-fast-start"></script>
-    <link rel="stylesheet" href="styles.css?v=20261112-project-filters" />
+    <link rel="stylesheet" href="styles.css?v=20261112-help-guides" />
     <link rel="stylesheet" href="symbol_counter.css?v=20260818-delete-actions" />
     <link rel="stylesheet" href="panel_schedule_export.css?v=20261009-initial" />
     <link rel="stylesheet" href="industry.css?v=20260930-work-locally" />
-    <link rel="stylesheet" href="modern-workspace.css?v=20261112-pages-spacing" />
+    <link rel="stylesheet" href="modern-workspace.css?v=20261112-help-guides" />
     <link rel="stylesheet" href="deliverables-workspace.css?v=20261112-header-actions" />
     <link rel="stylesheet" href="project-pages-editor/dist/project-pages-editor-project-pages-editor.css?v=20260918-notes-reliability" />
 </head>
@@ -103,7 +103,7 @@
                     <path d="M12 7v5l4 2"></path>
                 </svg>
             </button>
-            <button class="icon-btn" id="mainHelpBtn" aria-label="Help" title="Help">
+            <button class="icon-btn" id="mainHelpBtn" aria-label="Help" title="Help &amp; guides" aria-haspopup="dialog" aria-controls="helpDlg">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                     stroke-linecap="round" stroke-linejoin="round">
                     <circle cx="12" cy="12" r="10"></circle>
@@ -161,7 +161,7 @@
                 <p>Configure your profile and API keys to get the most out of this application.</p>
             </div>
             <div class="setup-help-actions">
-                <button class="btn btn-primary tiny" data-click-action="startSetupHelp">Yes</button>
+                <button class="btn btn-primary tiny" data-click-action="startSetupHelp">Start setup</button>
                 <button class="btn ghost tiny" data-click-action="dismissSetupHelpLater">Not right now</button>
                 <button class="btn ghost tiny" data-click-action="dismissSetupHelpNever">Do not ask again</button>
             </div>
@@ -525,9 +525,9 @@
                                 </div>
                                 <div class="tool-card-header">Publish</div>
                                 <div class="tool-card-body">
-                                    Plots the layouts of each of the selected DWG files and combines them. Outputs to
-                                    local path "user/document/AutoCAD Plots". Progress and results appear in the
-                                    activity tray.
+                                    Select the DWG files to plot their layouts and combine the PDFs. Check Publish settings
+                                    before starting. Follow progress in the activity tray, then open the combined PDF
+                                    or choose its project PDF destination from the finished activity.
                                 </div>
                             </div>
                             <div class="tool-card-status"></div>
@@ -550,8 +550,9 @@
                                 </div>
                                 <div class="tool-card-header">Freeze / Thaw</div>
                                 <div class="tool-card-body">
-                                    Scans selected DWGs for layers, lets you freeze and/or thaw them, then saves updates in headless
-                                    mode.
+                                    Select DWG files to scan their layers, then choose which layers to freeze or thaw.
+                                    Review the selections before applying: this saves changes to the selected drawings.
+                                    Use the gear button for tool defaults and the activity tray for progress.
                                 </div>
                             </div>
                             <div class="tool-card-status"></div>
@@ -572,6 +573,7 @@
                                 <div class="tool-card-body">
                                     Scans the project's discipline DWGs (or the DWGs you select), shows each unique XREF and its
                                     status, and replaces editable saved paths across every scanned host drawing.
+                                    Review missing references and replacement paths before applying changes.
                                 </div>
                             </div>
                             <div class="tool-card-status"></div>
@@ -593,7 +595,8 @@
                                 <div class="tool-card-body">
                                     Finds the newest Arch drawings (loose or zipped) for the XREFs your discipline's DWGs
                                     use, archives the current Xrefs and replaces them. Strips saved XREF paths, sets
-                                    colors "by layer", purges & audits.
+                                    colors "by layer", purges & audits. Check the selected project, active discipline,
+                                    and cleanup settings before starting; follow progress in the activity tray.
                                 </div>
                             </div>
                             <div class="tool-card-status"></div>
@@ -601,7 +604,7 @@
                         <div id="toolCleanDrawings" class="tool-card" role="button" tabindex="0">
                             <div class="tool-card-content">
                                 <div class="tool-card-header">Clean Drawings</div>
-                                <div class="tool-card-body">Clean a titleblock and electrical drawings on local copies, then deliver validated CAD in a dated folder.</div>
+                                <div class="tool-card-body">Clean a titleblock and electrical drawings on local copies, then deliver validated CAD in a dated folder. Review the detected titleblock, sheet dimensions, and selected drawings in the confirmation window before continuing. Open the finished folder from the activity tray and review any reported warnings.</div>
                             </div>
                             <div class="tool-card-status"></div>
                         </div>
@@ -619,7 +622,8 @@
                                 <div class="tool-card-header">Archive</div>
                                 <div class="tool-card-body">
                                     Archive your configured discipline folders and Xrefs into
-                                    Archive\current-datetime inside the selected project.
+                                    Archive\current-datetime inside the selected project. Confirm the project folder
+                                    before starting, then use the finished activity to open the archive.
                                 </div>
                             </div>
                             <div class="tool-card-status"></div>
@@ -647,6 +651,7 @@
                                 <div class="tool-card-header">Narrative</div>
                                 <div class="tool-card-body">
                                     Generates a Narrative of Changes document from the bundled template.
+                                    Choose the destination folder when prompted, then edit the generated document for the job.
                                 </div>
                             </div>
                             <div class="tool-card-status"></div>
@@ -1526,6 +1531,30 @@
             </div>
         </div>
     </dialog>
+    <!-- AutoCAD command switches: which ACIES commands the plugin defines -->
+    <dialog id="pluginCommandsDlg" class="plugin-commands-dialog">
+        <div class="modal-header">
+            <div class="title">AutoCAD commands</div>
+            <button class="btn ghost" data-close-dialog="pluginCommandsDlg">Close</button>
+        </div>
+        <div class="modal-body stack">
+            <p class="muted plugin-commands-intro">Choose which ACIES commands are on in AutoCAD. A command that
+                is off is not defined at all, so its name is free for your own aliases and scripts. Changes apply
+                the next time AutoCAD starts.</p>
+            <div class="plugin-commands-toolbar">
+                <input id="pluginCommandsSearch" type="search" placeholder="Search commands" autocomplete="off"
+                    aria-label="Search commands" />
+                <span id="pluginCommandsCount" class="muted"></span>
+                <button class="btn ghost" id="pluginCommandsAllOn" type="button">All on</button>
+                <button class="btn ghost" id="pluginCommandsAllOff" type="button">All off</button>
+            </div>
+            <div id="pluginCommandsList" class="plugin-commands-list"></div>
+            <div class="modal-footer-simple">
+                <button class="btn ghost" data-close-dialog="pluginCommandsDlg">Cancel</button>
+                <button class="btn btn-primary" id="pluginCommandsSave" type="button">Save</button>
+            </div>
+        </div>
+    </dialog>
     <!-- Uninstall All Plugins Confirmation Modal -->
     <dialog id="uninstallPluginsDlg" class="danger-modal">
         <div class="modal-body stack centered-content">
@@ -1610,7 +1639,7 @@
                     <label class="label">Google Gemini API Key</label>
                     <div class="input-with-button">
                         <input id="settings_apiKey" type="password" placeholder="Enter your API key" />
-                        <button type="button" class="btn tiny" id="settings_howToSetupBtn">Help</button>
+                        <button type="button" class="btn tiny" id="settings_howToSetupBtn" aria-label="Gemini API key help" aria-haspopup="dialog">Help</button>
                     </div>
                 </div>
             </div>
@@ -2297,7 +2326,7 @@
                             <input id="onboarding_apiKey" type="password" placeholder="Enter your API key"
                                 aria-describedby="onboardingApiKeyStatus" />
                             <button type="button" class="btn tiny" data-click-action="testOnboardingApiKey">Test key</button>
-                            <button type="button" class="btn tiny" data-click-action="showApiKeyHelp">Help</button>
+                            <button type="button" class="btn tiny" data-click-action="showApiKeyHelp" aria-label="Gemini API key help" aria-haspopup="dialog">Help</button>
                         </div>
                         <p id="onboardingApiKeyStatus" class="tiny" role="status" aria-live="polite"></p>
                         <p class="tiny muted">Your API key is stored locally and sent directly to Google for key testing and AI features.</p>
@@ -2419,28 +2448,31 @@
         </div>
     </dialog>
     <!-- API Key Help Modal -->
-    <dialog id="apiKeyHelpDlg">
+    <dialog id="apiKeyHelpDlg" aria-labelledby="apiKeyHelpTitle">
         <div class="modal-header">
-            <div class="title">Setup API Key</div>
+            <div class="title" id="apiKeyHelpTitle">Set up AI features</div>
             <button class="btn ghost" data-close-dialog="apiKeyHelpDlg">Close</button>
         </div>
         <div class="modal-body stack">
-            <p>To use the AI features, you need a free API key from Google AI Studio.</p>
+            <p>AI setup is optional. AI features use a Google Gemini API key. Google account sign-in for sync is a separate connection.</p>
             <ol style="margin: 0; padding-left: 1.25rem; line-height: 1.6;">
-                <li>Click the button to open google API.</li>
-                <li>Login to google account.</li>
-                <li>Click "Create API key".</li>
-                <li>Name the key your acies email (ex. jacobh@acies.net).</li>
-                <li>Click "Select a Cloud Project".</li>
-                <li>Click "Create project" from the dropdown.</li>
-                <li>Name your project as "ACIES".</li>
-                <li>Click the "Create project" button.</li>
-                <li>Click "Create key" button.</li>
-                <li>Click the "Copy API key" on the right side of the API key entry.</li>
-                <li>Paste the copied key into the ACIES application.</li>
+                <li>Open Google AI Studio below and sign in with the account you use for work.</li>
+                <li>On the API keys page, copy an existing Gemini key or choose <strong>Create API key</strong>.
+                    Follow Google's prompts to select or create a Cloud project if needed.</li>
+                <li>Close this help window and paste the key into <strong>Google Gemini API Key</strong>
+                    in setup, or in <strong>Settings &gt; Account &amp; Sync</strong>.</li>
+                <li>In setup, use <strong>Test key</strong> to check access, then <strong>Get Started</strong> to finish. Settings saves changes automatically.</li>
             </ol>
-            <a href="https://aistudio.google.com/api-keys" target="_blank" class="btn-primary block-center">Open Google
+            <a href="https://aistudio.google.com/api-keys" target="_blank" rel="noopener noreferrer" class="btn-primary block-center">Open Google
                 AI Studio</a>
+            <h3>If AI is not working</h3>
+            <ul>
+                <li><strong>Key rejected:</strong> copy the full key again and check its Gemini API access in AI Studio.</li>
+                <li><strong>Quota or rate limit:</strong> check your project's usage and billing in AI Studio, then retry later.</li>
+                <li><strong>Connection error:</strong> check your internet connection and retry.</li>
+            </ul>
+            <p class="tiny muted">Available usage depends on the Google project and model. Keep your key private.</p>
+            <a href="https://ai.google.dev/gemini-api/docs/api-key" target="_blank" rel="noopener noreferrer">Google's API key guide</a>
         </div>
     </dialog>
 
@@ -2466,172 +2498,188 @@
         </div>
     </dialog>
 
-    <dialog id="helpDlg" class="help-dialog">
+    <dialog id="helpDlg" class="help-dialog" aria-labelledby="helpDlgTitle">
         <div class="modal-header">
-            <div class="title">Help</div>
+            <div class="title" id="helpDlgTitle">Help &amp; guides</div>
             <button class="btn ghost" data-close-dialog="helpDlg">Close</button>
+        </div>
+        <div class="help-search-bar">
+            <label class="label" for="helpSearch">Search help</label>
+            <input id="helpSearch" type="search" placeholder="Try hard due, receipt, XREF, or API key"
+                aria-controls="helpDlgSidebar helpDlgContent" />
+            <div id="helpSearchStatus" class="tiny muted" role="status" aria-live="polite"></div>
         </div>
         <div class="modal-body help-dlg-body">
             <nav class="help-dlg-sidebar" id="helpDlgSidebar" aria-label="Help topics">
-                <button type="button" class="help-topic-btn" data-help-topic="projects">Projects</button>
-                <button type="button" class="help-topic-btn" data-help-topic="notes">Notes</button>
-                <button type="button" class="help-topic-btn" data-help-topic="tools">Tools</button>
-                <button type="button" class="help-topic-btn" data-help-topic="timesheets">Timesheets</button>
-                <button type="button" class="help-topic-btn" data-help-topic="misc">Misc</button>
+                <button type="button" class="help-topic-btn" data-help-topic="projects" aria-controls="help-projects">Projects</button>
+                <button type="button" class="help-topic-btn" data-help-topic="deliverables" aria-controls="help-deliverables">Deliverables</button>
+                <button type="button" class="help-topic-btn" data-help-topic="notes" aria-controls="help-notes">Pages &amp; notes</button>
+                <button type="button" class="help-topic-btn" data-help-topic="tools" aria-controls="help-tools">Tools &amp; plugins</button>
+                <button type="button" class="help-topic-btn" data-help-topic="timesheets" aria-controls="help-timesheets">Time &amp; expenses</button>
+                <button type="button" class="help-topic-btn" data-help-topic="misc" aria-controls="help-misc">Setup &amp; troubleshooting</button>
             </nav>
-            <article class="help-dlg-content" id="helpDlgContent">
-                <section class="help-topic" data-help-topic="projects">
+            <article class="help-dlg-content" id="helpDlgContent" tabindex="0" aria-label="Help guide">
+                <p id="helpNoResults" hidden>No matching help topics. Try a shorter search, such as “date” or “export”, or clear the search to see all guides.</p>
+                <section class="help-topic" id="help-projects" data-help-topic="projects">
                     <h2>Projects</h2>
-                    <p>The Projects tab is where you track every active job. Each project holds a set of
-                        deliverables, due dates, and status flags that drive the rest of the app.</p>
-
-                    <h3>Creating &amp; editing</h3>
+                    <p>Track jobs and their deliverables in List or Board view. Select a row or card to see the actions available for that item.</p>
+                    <h3>Get started</h3>
+                    <ol>
+                        <li>Use the <strong>+</strong> button beside search (<strong>New project</strong>) to create a project.</li>
+                        <li>Enter its number, name, and project folder so drawing tools can locate the job.</li>
+                        <li>Add a deliverable for each package or milestone you need to track.</li>
+                    </ol>
+                    <h3>Find the work you need</h3>
                     <ul>
-                        <li><strong>Add a project:</strong> use the <em>New</em> button in the toolbar.</li>
-                        <li><strong>Edit:</strong> click a project card or row to open the edit dialog. You can rename
-                            it, change dates, add/remove deliverables, and adjust status.</li>
+                        <li><strong>Search projects or deliverables:</strong> type a project number, name, or deliverable description. Search switches to List view and temporarily bypasses filters; clear search to return to filtered results.</li>
+                        <li><strong>Filters:</strong> use the Timeframe, Status, and other filter menus to narrow the list. Use <strong>Clear filters</strong> to reset them.</li>
+                        <li><strong>Needs attention:</strong> shows unfinished deliverables that are overdue or due this week. Undated work does not appear in this view.</li>
+                        <li><strong>Pin:</strong> use an item's pin control to keep it near the top across sessions.</li>
+                        <li><strong>List pages:</strong> use the page size and First, Previous, Next, and Last controls below the list to see more results.</li>
                     </ul>
-                    <p class="tiny muted">Merge similar projects is available in <strong>Settings &gt; Actions</strong>
-                        when duplicate cleanup is needed.</p>
-
-                    <h3>Status values</h3>
-                    <p>Setting a deliverable status helps keep work organized and shows where that deliverable stands
-                        at a glance.</p>
-                    <ul>
-                        <li><strong>Waiting:</strong> something is preventing work from proceeding, such as engineer
-                            coordination or background information being prepared. It is not explicitly on hold.</li>
-                        <li><strong>On hold:</strong> explicitly paused, usually waiting on a client or stakeholder.</li>
-                        <li><strong>Pending Review:</strong> finished on your end, awaiting QA or check.</li>
-                        <li><strong>Complete:</strong> deliverable is done but not yet sent out.</li>
-                        <li><strong>Completed (by others):</strong> deliverable was completed by someone else.</li>
-                        <li><strong>Delivered:</strong> final package has been sent.</li>
-                    </ul>
-
-                    <h3>View modes &amp; filters</h3>
-                    <ul>
-                        <li><strong>Card and list view:</strong> both modes are available ways to view workload.</li>
-                        <li><strong>Pin a project or deliverable:</strong> click the pin icon on the card. Pinned
-                            items stay at the top across sessions.</li>
-                        <li><strong>Status filters:</strong> click a status chip at the top of the panel to filter.
-                            <em>On hold</em> is hidden by default; toggle it on to bring those projects back.
-                        </li>
-                        <li><strong>Search</strong> enables quick location of projects using relevant keywords.</li>
-                    </ul>
-
-                    <h3>Deliverables</h3>
-                    <p>Every project has one or more deliverables with their own due dates and status. Use the
-                        deliverable notepad to collect items from multiple projects and export them to Excel when
-                        building a combined scope or invoice.</p>
+                    <h3>A project seems to be missing</h3>
+                    <p>Clear search, turn off <strong>Needs attention</strong>, and clear filters. Check the list's page controls. Search can also find a deliverable under its parent project.</p>
+                    <p>Duplicate cleanup is available under <strong>Settings &gt; Maintenance &gt; Merge similar projects</strong>.</p>
+                    <h3>Use the command line</h3>
+                    <p>Select a project or deliverable, then use the command line at the bottom to find an action by name.
+                        On the Projects tab, <strong>Ctrl+K</strong> focuses it when you are not editing another field.
+                        Check the selected project and deliverable before running an action.</p>
                 </section>
-
-                <section class="help-topic" data-help-topic="notes" hidden>
-                    <h2>Notes</h2>
-                    <p>The Notes tab is for free-form writing. Each page has its own tab in the sidebar and
-                        autosaves as you type.</p>
-
-                    <h3>Pages</h3>
+                <section class="help-topic" id="help-deliverables" data-help-topic="deliverables" hidden>
+                    <h2>Deliverables</h2>
+                    <p>A deliverable is a package or milestone within a project. It has its own description, dates, status, notes, and tasks.</p>
+                    <h3>Add and update work</h3>
+                    <ol>
+                        <li>Select the project, then choose <strong>Add Deliverable</strong> from its available actions.</li>
+                        <li>Enter the description. Add a soft due date and hard due date when known; press <strong>Enter</strong> to skip either date in the command line, or <strong>Esc</strong> to cancel.</li>
+                        <li>Select a deliverable to see its actions. Select its date or status in the list to edit that value directly.</li>
+                    </ol>
+                    <h3>Soft due and hard due dates</h3>
                     <ul>
-                        <li><strong>Create:</strong> click <em>+ New page</em> in the sidebar to add a tab for each
-                            topic (meeting logs, standards references, etc.).</li>
-                        <li><strong>Delete:</strong> hover a page tab and click the X icon. Deletes are permanent
-                            after confirmation.</li>
-                        <li><strong>Autosave:</strong> content saves as you type — there is no save button.</li>
+                        <li><strong>Soft due:</strong> your working target date.</li>
+                        <li><strong>Hard due:</strong> the final deadline. The displayed date uses the soft target until it passes, then the hard deadline. A hard date earlier than the soft date takes priority.</li>
+                        <li><strong>No deadline yet:</strong> leave the dates empty. Record an expected request date in a note rather than treating it as a delivery deadline.</li>
                     </ul>
-
-                    <h3>Searching</h3>
+                    <h3>Choose a status</h3>
                     <ul>
-                        <li>The search box at the top of the Notes tab searches the active page. Results show the
-                            matching paragraphs so you can jump straight in.</li>
-                        <li>Click a result to scroll the textarea to that paragraph and select the matching text.</li>
+                        <li><strong>Waiting:</strong> work is waiting for information or coordination.</li>
+                        <li><strong>On hold:</strong> the work has been explicitly paused.</li>
+                        <li><strong>Pending Review:</strong> ready for QA or checking.</li>
+                        <li><strong>Complete:</strong> finished, but not yet sent.</li>
+                        <li><strong>Completed (by others):</strong> someone else completed the work.</li>
+                        <li><strong>Delivered:</strong> the final package has been sent.</li>
                     </ul>
-
+                    <h3>Keep context with the deliverable</h3>
+                    <p>Use notes and tasks for follow-up items. Pin important items for quick access, and attach supporting files, links, or email references so the next action has its source nearby.</p>
+                </section>
+                <section class="help-topic" id="help-notes" data-help-topic="notes" hidden>
+                    <h2>Pages &amp; notes</h2>
+                    <p>The Pages workspace (Notes tab) holds standalone documents and canvases. Project pages keep notes with a particular job.</p>
+                    <h3>Create and find a page</h3>
+                    <ol>
+                        <li>Choose <strong>+ New page</strong>, then <strong>Document</strong> for writing or <strong>Canvas</strong> for a freeform board.</li>
+                        <li>Give the page a title and select its card to open it.</li>
+                        <li>Use <strong>Search pages</strong> to search page titles and document text across the workspace, then open a matching card.</li>
+                    </ol>
+                    <h3>Write and organize</h3>
+                    <ul>
+                        <li><strong>Document:</strong> write in the rich text editor. Type <strong>/</strong> on an empty line to see available blocks and insert actions.</li>
+                        <li><strong>Find on a page:</strong> use <strong>Ctrl+F</strong> while editing to search within the open document.</li>
+                        <li><strong>Autosave:</strong> edits save as you work. Watch the save indicator; if saving fails, keep the page open and retry before closing the app.</li>
+                        <li><strong>Delete:</strong> use the page card's Delete page control and review the confirmation before deleting.</li>
+                    </ul>
                     <h3>Scratchpad</h3>
-                    <p>The pencil icon in the app header opens a quick scratchpad for unsorted notes that don't
-                        need their own page.</p>
+                    <p>The pencil icon in the app header opens a scratchpad for quick, unsorted notes. It saves automatically and is separate from your document pages.</p>
                 </section>
-
-                <section class="help-topic" data-help-topic="tools" hidden>
-                    <h2>Tools</h2>
-                    <p>The Tools tab is where you run bundled utilities and AutoCAD plugins. Tools are grouped into
-                        cards; click a card's chevron to expand its details.</p>
-
-                    <h3>Running a tool</h3>
+                <section class="help-topic" id="help-tools" data-help-topic="tools" hidden>
+                    <h2>Tools &amp; plugins</h2>
+                    <p>Tools automate drawing and document work. Hover over a question mark for a preview, or click it for a readable help window. Keyboard users can focus it and press Enter or Space.</p>
+                    <h3>Before running a tool</h3>
+                    <ol>
+                        <li>Check the selected project and active discipline. Confirm the project folder points to the correct job.</li>
+                        <li>For CAD tools, check <strong>Settings &gt; Tools</strong> if the AutoCAD executable or cleanup options need changing. Gear buttons beside individual tools open their settings.</li>
+                        <li>Select the tool and review any file selection or confirmation it presents.</li>
+                    </ol>
+                    <h3>Choose a tool</h3>
                     <ul>
-                        <li>Most tools run immediately when you click their action button. Progress and logs appear
-                            on the card.</li>
-                        <li>If a process is running, an <strong>Abort Process</strong> button appears in the toolbar
-                            — use it if a tool hangs or needs to be cancelled.</li>
-                        <li>Tools for different projects run at the same time. Tools for the same project run one at a
-                            time: a tool you start while its project is busy shows as <em>Queued</em> in the activity
-                            tray and starts on its own when the earlier one finishes. <strong>Freeze / Thaw</strong> and
-                            <strong>New Backgrounds</strong> also run one at a time across all projects.</li>
-                        <li>Finished tools stay in <strong>Activity History</strong> (the clock icon in the header, or
-                            <em>History</em> in the activity tray) after you clear them. From there you can reopen
-                            output folders, PDFs and drawings, or rerun the tool.</li>
+                        <li><strong>Publish:</strong> plot DWG layouts and combine the PDFs.</li>
+                        <li><strong>Freeze / Thaw:</strong> change layer visibility in selected drawings.</li>
+                        <li><strong>XREF:</strong> review references and repair their saved file paths.</li>
+                        <li><strong>New Backgrounds:</strong> find updated architectural backgrounds and replace the project's Xrefs.</li>
+                        <li><strong>Clean Drawings:</strong> prepare cleaned copies of a titleblock and electrical drawings.</li>
+                        <li><strong>Archive:</strong> save a dated archive of discipline folders and Xrefs.</li>
+                        <li><strong>Narrative / Plan Check:</strong> create documents from the bundled templates.</li>
+                        <li><strong>Wire Sizer:</strong> open the conductor, voltage-drop, and conduit-fill tool.</li>
                     </ul>
-
-                    <h3>AutoCAD Plugins</h3>
+                    <h3>Progress, results, and cancellation</h3>
                     <ul>
-                        <li><strong>Installation:</strong> the first time you run a plugin, the app installs it into
-                            your AutoCAD profile. If prerequisites are missing you'll see an install prompt.</li>
-                        <li><strong>Version selection:</strong> when multiple AutoCAD versions are installed, the app
-                            asks which one to target.</li>
-                        <li><strong>Uninstall:</strong> available from the plugin card menu. This removes the plugin
-                            from AutoCAD but does not delete your drawings.</li>
+                        <li><strong>Activity tray:</strong> follow progress and open available results from the activity item. Use its cancellation control when a running tool needs to stop.</li>
+                        <li><strong>Queued:</strong> tools for the same project run one at a time. Tools for different projects can run together. Freeze / Thaw and New Backgrounds also run one at a time across projects.</li>
+                        <li><strong>Activity History:</strong> use the clock icon in the header or <strong>History</strong> in the tray to reopen results or rerun a finished tool, including cleared items.</li>
+                        <li><strong>Failed run:</strong> read the activity error, check file access and the AutoCAD path, then retry after resolving the reported problem.</li>
                     </ul>
-
-                    <h3>Updates</h3>
-                    <p>Use the refresh icon next to the version label in the app header to check for tool and app
-                        updates. When an update is available, an <em>Update</em> button appears — click it to install
-                        the latest bundle.</p>
+                    <h3>AutoCAD plugins</h3>
+                    <p>Use <strong>Install</strong>, <strong>Update</strong>, or <strong>Uninstall</strong> on the plugin row. Open its question mark for plugin details and available documentation links. Follow version-selection or prerequisite prompts when shown.</p>
+                    <p>If a <strong>Commands</strong> button is available, use it to choose which ACIES commands are enabled. Save your choices and restart AutoCAD to apply them.</p>
+                    <h3>Under construction</h3>
+                    <p>Symbol Counter, Panel Schedules, Panel Schedule Export, Panel Schedule AI, Light Fixture Scheduler,
+                        and Title 24 Compliance are previews and are disabled by default. Their help can still be opened.
+                        Preview access is controlled in Settings.</p>
                 </section>
-
-                <section class="help-topic" data-help-topic="timesheets" hidden>
-                    <h2>Timesheets</h2>
-                    <p>The Timesheets tab is a weekly grid for logging hours and expenses against your projects.</p>
-
-                    <h3>Navigating weeks</h3>
+                <section class="help-topic" id="help-timesheets" data-help-topic="timesheets" hidden>
+                    <h2>Time &amp; expenses</h2>
+                    <p>Record hours and expenses for the selected week, then export them to Excel.</p>
+                    <h3>Log hours</h3>
+                    <ol>
+                        <li>Use the week arrows to choose a week, or <strong>Today</strong> to return to the current week.</li>
+                        <li>Choose <strong>+ Add Project Entry</strong> for a tracked job, or <strong>+ Add Manual Entry</strong> for other work.</li>
+                        <li>Complete the entry details and edit the daily hour cells. Row, daily, and weekly totals update automatically.</li>
+                    </ol>
+                    <h3>Expenses and receipts</h3>
                     <ul>
-                        <li>Use <strong>Previous</strong> and <strong>Next</strong> to move between weeks, or
-                            <strong>Current week</strong> to jump back to today.
-                        </li>
-                        <li>The displayed range updates the header and determines what's saved and exported.</li>
+                        <li>Choose <strong>+ Add Project Expense</strong> or <strong>+ Add Custom Expense</strong>, then add expense entries.</li>
+                        <li>Attach a receipt and select its thumbnail to view it beside the expense fields.</li>
+                        <li>Select an existing entry to correct it. Use <strong>Add Entry</strong> or <strong>Save Changes</strong> to save; <strong>Close</strong> discards unsaved expense edits.</li>
+                        <li>Use <strong>Save &amp; Next Receipt</strong> when working through multiple receipts.</li>
                     </ul>
-
-                    <h3>Logging time</h3>
-                    <ul>
-                        <li><strong>Add project entry:</strong> pick an existing project and log hours against it —
-                            the entry is linked so the project's status reflects the work.</li>
-                        <li><strong>Add manual entry:</strong> use this for work that isn't tied to a tracked project
-                            (admin, training, etc.). You can free-type the label.</li>
-                        <li>Edit any cell to update hours; totals at the bottom recalculate automatically.</li>
-                    </ul>
-
-                    <h3>Exporting</h3>
-                    <p>Click <strong>Export Excel</strong> to save the current week as an .xlsx file using the
-                        built-in template. The output matches the format the accounting team expects.</p>
-
-                    <h3>Expenses</h3>
-                    <ul>
-                        <li><strong>Add expense:</strong> attach a project and amount. You can attach a photo of the
-                            receipt — click the thumbnail to view it alongside the expense fields. Select an existing
-                            entry to correct it, or add a new one. Use Save &amp; Next Receipt to work through receipts.</li>
-                        <li>Expenses export alongside hours when you export the week.</li>
-                    </ul>
+                    <h3>Export the week</h3>
+                    <p>Check the displayed week and totals, then choose <strong>Export Excel</strong>. The export includes the timesheet and project expense sheet. If an entry is missing, check that it was saved in the week you are exporting.</p>
+                    <p>Default PM initials and the timesheet storage folder are available in <strong>Settings &gt; Timesheets</strong>.</p>
                 </section>
-
-                <section class="help-topic" data-help-topic="misc" hidden>
-                    <h2>Misc</h2>
-                    <p>Global controls are available from the app header.</p>
-
+                <section class="help-topic" id="help-misc" data-help-topic="misc" hidden>
+                    <h2>Setup &amp; troubleshooting</h2>
+                    <h3>Settings and connections</h3>
                     <ul>
-                        <li><strong>Settings:</strong> the cogwheel opens app preferences and actions.</li>
-                        <li><strong>Theme:</strong> the theme toggle switches between light and dark mode.</li>
-                        <li><strong>Scratchpad:</strong> use the scratchpad for quick unsorted notes that do not need a
-                            notebook page.</li>
+                        <li><strong>General:</strong> set your name, disciplines, appearance, and project display preferences.</li>
+                        <li><strong>Tools:</strong> configure AutoCAD and tool defaults.</li>
+                        <li><strong>Account &amp; Sync:</strong> manage Google sign-in and your Gemini API key. The <strong>Help</strong> button beside the key gives setup steps and troubleshooting.</li>
+                        <li><strong>Timesheets:</strong> set default PM initials and open the timesheet storage folder.</li>
+                        <li><strong>Maintenance:</strong> find cleanup actions, including merging similar projects.</li>
+                    </ul>
+                    <p>Settings changes save automatically. The theme control in the header switches between light and dark mode.</p>
+                    <h3>Common problems</h3>
+                    <ul>
+                        <li><strong>Missing project or deliverable:</strong> clear search and filters and turn off Needs attention. Check the List page controls.</li>
+                        <li><strong>Older deliverable missing from the command line:</strong> enable <strong>Show all deliverables in command line</strong> in Settings &gt; General.</li>
+                        <li><strong>AI is unavailable:</strong> check the Gemini key in Account &amp; Sync and use the Help button beside it. Google sign-in alone does not configure AI.</li>
+                        <li><strong>AI key rejected, quota, or connection error:</strong> copy the full key again, check the project's usage in Google AI Studio for rate limits, or check your internet connection. Retry after resolving the reported issue.</li>
+                        <li><strong>Tool failed or output is missing:</strong> open Activity History to check the error and available output links.</li>
+                        <li><strong>Updates:</strong> use the refresh control beside the version in the header to check. An Update button appears when an app update is available.</li>
                     </ul>
                 </section>
             </article>
+        </div>
+    </dialog>
+
+    <dialog id="toolHelpDlg" class="tool-help-dialog" aria-labelledby="toolHelpTitle">
+        <div class="modal-header">
+            <div class="title" id="toolHelpTitle">Tool help</div>
+            <button class="btn ghost" data-close-dialog="toolHelpDlg">Close</button>
+        </div>
+        <div class="modal-body stack">
+            <p id="toolHelpPreviewNotice" class="tiny muted" hidden>This tool is under construction. Preview access is controlled in Settings.</p>
+            <div id="toolHelpContent"></div>
+            <p class="tiny muted">Close this window to return to the tool. Opening help does not run or install it.</p>
         </div>
     </dialog>
 
@@ -2723,7 +2771,7 @@
             <button class="btn ghost" data-close-dialog="installPrereqDlg">Cancel</button>
         </div>
         <div class="modal-body stack">
-            <p id="installPrereqMessage">To use this tool, the "CleanCADCommands" bundle needs to be installed.</p>
+            <p id="installPrereqMessage">To use this tool, the ACIES AutoCAD plugin needs to be installed.</p>
             <div id="installSpinner" class="spinner" style="display:none;">Installing...</div>
         </div>
         <div class="modal-footer">
@@ -3802,7 +3850,7 @@
     </section>
     <div id="updateCheckIndicator" class="corner-status" hidden>Checking for updates...</div>
     <script src="project-pages-editor/dist/project-pages-editor.js?v=20261019-outlook-email-drop"></script>
-    <script src="script.js?v=20261112-project-filters"></script>
+    <script src="script.js?v=20261112-help-guides"></script>
     <script src="industry-projects.js?v=20261112-project-filters"></script>
     <script src="industry-shell.js?v=20261112-header-actions"></script>
     <script src="symbol_counter_ui.js?v=20260818-delete-actions"></script>

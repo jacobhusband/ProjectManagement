@@ -97,10 +97,13 @@ def plugin_for(acad):
     if not match:
         raise ValueError('Cannot determine the AutoCAD release from its installation path.')
     framework = 'net8.0-windows' if int(match.group()) >= 2025 else 'net48'
-    dll = Path(os.environ.get('APPDATA', '')) / 'Autodesk' / 'ApplicationPlugins' / 'ElectricalCommands.CleanCADCommands.bundle' / 'Contents' / framework / 'AutoCADCommands.CleanCADCommands.dll'
-    if not dll.is_file():
-        raise FileNotFoundError('Install the updated CleanCADCommands plugin before running Clean Drawings.')
-    return dll
+    plugins = Path(os.environ.get('APPDATA', '')) / 'Autodesk' / 'ApplicationPlugins'
+    # Plugin releases after v0.3.0 ship one combined bundle; earlier ones a bundle per plugin.
+    for bundle in ('ElectricalCommands.bundle', 'ElectricalCommands.CleanCADCommands.bundle'):
+        dll = plugins / bundle / 'Contents' / framework / 'AutoCADCommands.CleanCADCommands.dll'
+        if dll.is_file():
+            return dll
+    raise FileNotFoundError('Install the updated ACIES AutoCAD plugin before running Clean Drawings.')
 
 
 def preview(project, acad, notify=lambda message: None):

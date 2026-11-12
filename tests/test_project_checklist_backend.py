@@ -213,11 +213,11 @@ class ProjectChecklistMetadataTests(unittest.TestCase):
         self.assertIn('[CommandMethod("CHECKLIST", CommandFlags.Session)]', command_file)
         self.assertIn('[CommandMethod("CHECKLISTS", CommandFlags.Session)]', command_file)
         self.assertIn('[CommandMethod("PROJECTCHECKLIST", CommandFlags.Session)]', command_file)
-        self.assertIn('[CommandMethod("PCL", CommandFlags.Session)]', command_file)
+        self.assertNotIn('[CommandMethod("PCL", CommandFlags.Session)]', command_file)
         self.assertIn("CHECKLIST", descriptions["commands"])
         self.assertIn("CHECKLISTS", descriptions["commands"])
         self.assertIn("PROJECTCHECKLIST", descriptions["commands"])
-        self.assertIn("PCL", descriptions["commands"])
+        self.assertNotIn("PCL", descriptions["commands"])
 
     def test_autocad_store_uses_folder_scoped_json_storage(self):
         store_file = (

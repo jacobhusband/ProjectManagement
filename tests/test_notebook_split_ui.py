@@ -77,7 +77,7 @@ class NotebookSplitUiTests(unittest.TestCase):
         script = SCRIPT_JS_PATH.read_text(encoding="utf-8")
 
         self.assertIn(
-            'const HELP_TOPICS = ["projects", "notes", "tools", "timesheets", "misc"];',
+            'const HELP_TOPICS = ["projects", "deliverables", "notes", "tools", "timesheets", "misc"];',
             script,
         )
 

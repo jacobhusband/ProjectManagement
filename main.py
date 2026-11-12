@@ -584,6 +584,24 @@ KNOWN_PLUGIN_BUNDLES = [
 HIDDEN_PLUGIN_BUNDLES = {
     "ElectricalCommands.GetAttributesCommands.bundle",
 }
+# Plugin releases after v0.3.0 ship every plugin in this one bundle. Its commands.json
+# lists the commands a user may switch off.
+COMBINED_PLUGIN_BUNDLE = "ElectricalCommands.bundle"
+# The per-plugin bundles of v0.3.0 and earlier. Left beside the combined bundle they
+# would make AutoCAD load every command twice, so installing it removes them.
+LEGACY_PLUGIN_BUNDLES = frozenset(
+    f"ElectricalCommands.{name}.bundle"
+    for name in (
+        "AuditCommands", "AutoLispCommands", "CleanCADCommands", "ControlScheduleCommands",
+        "GeneralCommands", "GetAttributesCommands", "LFSCommands", "PlotCommands",
+        "T24Commands", "TextCommands",
+    )
+)
+# One AutoCAD command name per line; the plugin reads this file when AutoCAD starts. It
+# sits in the app data folder (Documents\ProjectManagementApp), which the plugins already
+# read, because Windows Store Python redirects new files under %APPDATA% out of sight.
+PLUGIN_DISABLED_COMMANDS_FILE = "autocad_disabled_commands.txt"
+_PLUGIN_COMMAND_NAME_PATTERN = re.compile(r"^[A-Z0-9_\-]{1,64}$")
 
 
 def load_app_version():
@@ -4432,7 +4450,15 @@ class Api:
                 if bundle_name:
                     asset_by_bundle[bundle_name] = asset
 
-            bundle_names = list(KNOWN_PLUGIN_BUNDLES)
+            # Once the release (or this PC) has the combined bundle, it stands in for
+            # every per-plugin bundle; those are no longer listed.
+            combined_mode = (
+                COMBINED_PLUGIN_BUNDLE in asset_by_bundle
+                or COMBINED_PLUGIN_BUNDLE in local_bundles
+            )
+            legacy_installed = sorted(local_bundles & LEGACY_PLUGIN_BUNDLES)
+
+            bundle_names = [COMBINED_PLUGIN_BUNDLE] if combined_mode else list(KNOWN_PLUGIN_BUNDLES)
             for bundle_name in sorted(asset_by_bundle):
                 if bundle_name not in bundle_names:
                     bundle_names.append(bundle_name)
@@ -4442,20 +4468,29 @@ class Api:
             bundle_names = [
                 bundle_name for bundle_name in bundle_names
                 if bundle_name not in HIDDEN_PLUGIN_BUNDLES
+                and not (combined_mode and bundle_name in LEGACY_PLUGIN_BUNDLES)
             ]
+
+            def read_local_version(name):
+                version_file = os.path.join(self.app_plugins_folder, name, 'version.txt')
+                if os.path.exists(version_file):
+                    with open(version_file, 'r') as f:
+                        return f.read().strip()
+                return None
 
             statuses = []
             for bundle_name in bundle_names:
-                bundle_path = os.path.join(self.app_plugins_folder, bundle_name)
                 is_installed = bundle_name in local_bundles
                 local_version = None
                 asset = asset_by_bundle.get(bundle_name)
 
                 if is_installed:
-                    version_file = os.path.join(bundle_path, 'version.txt')
-                    if os.path.exists(version_file):
-                        with open(version_file, 'r') as f:
-                            local_version = f.read().strip()
+                    local_version = read_local_version(bundle_name)
+                elif bundle_name == COMBINED_PLUGIN_BUNDLE and legacy_installed:
+                    # The per-plugin bundles on this PC are an older version of this one.
+                    is_installed = True
+                    local_version = next(
+                        (v for v in map(read_local_version, legacy_installed) if v), None)
 
                 if asset:
                     if not is_installed:
@@ -4522,15 +4557,145 @@ class Api:
 
             logging.info(
                 f"Successfully installed {bundle_name} version {release_tag}")
-            return {
+            result = {
                 'status': 'success',
                 'bundle_name': bundle_name,
                 'bundlePath': extract_path,
                 'pluginsFolderPath': self.app_plugins_folder,
             }
+            if bundle_name == COMBINED_PLUGIN_BUNDLE:
+                removed, left = self._remove_legacy_plugin_bundles()
+                result['removedLegacyBundles'] = removed
+                if left:
+                    result['legacyBundlesLeft'] = left
+            return result
         except Exception as e:
             logging.error(f"Failed to install {bundle_name}: {e}")
             return {'status': 'error', 'message': f"Failed to install {bundle_name}: {e}"}
+
+    def _remove_legacy_plugin_bundles(self):
+        """Delete the per-plugin bundles the combined bundle replaces.
+
+        Returns the names removed and the names that could not be removed.
+        """
+        removed, left = [], []
+        for name in sorted(LEGACY_PLUGIN_BUNDLES):
+            path = os.path.join(self.app_plugins_folder, name)
+            if not os.path.isdir(path):
+                continue
+            try:
+                shutil.rmtree(path)
+                removed.append(name)
+                logging.info(f"Removed superseded plugin bundle: {name}")
+            except Exception as e:
+                left.append(name)
+                logging.error(f"Could not remove superseded plugin bundle {name}: {e}")
+        return removed, left
+
+    def _plugin_command_settings_path(self):
+        folder = getattr(self, 'plugin_settings_folder', None)
+        if not folder:
+            folder = get_app_data_dir()
+        return os.path.join(folder, PLUGIN_DISABLED_COMMANDS_FILE)
+
+    def _read_disabled_plugin_commands(self):
+        try:
+            with open(self._plugin_command_settings_path(), 'r', encoding='utf-8-sig') as f:
+                lines = f.read().splitlines()
+        except FileNotFoundError:
+            return []
+        names = {line.strip().upper() for line in lines}
+        return sorted(
+            name for name in names
+            if name and not name.startswith('#') and _PLUGIN_COMMAND_NAME_PATTERN.match(name)
+        )
+
+    def get_plugin_command_settings(self):
+        """The installed plugin's commands, by module, and which ones are switched off."""
+        try:
+            catalog_path = os.path.join(
+                self.app_plugins_folder, COMBINED_PLUGIN_BUNDLE, 'commands.json')
+            if not os.path.isfile(catalog_path):
+                return {'status': 'success', 'installed': False, 'modules': [], 'disabled': []}
+            with open(catalog_path, 'r', encoding='utf-8-sig') as f:
+                catalog = json.load(f)
+
+            always_on = {
+                str(name).strip().upper() for name in catalog.get('alwaysOn') or []
+            }
+            modules = []
+            for module in catalog.get('modules') or []:
+                commands = [
+                    {
+                        'name': str(command.get('name') or '').strip().upper(),
+                        'description': str(command.get('description') or ''),
+                        'link': str(command.get('link') or ''),
+                    }
+                    for command in module.get('commands') or []
+                    if isinstance(command, dict)
+                    and _PLUGIN_COMMAND_NAME_PATTERN.match(
+                        str(command.get('name') or '').strip().upper())
+                    and str(command.get('name') or '').strip().upper() not in always_on
+                ]
+                if commands:
+                    modules.append({
+                        'id': str(module.get('id') or ''),
+                        'title': str(module.get('title') or module.get('id') or ''),
+                        'description': str(module.get('description') or ''),
+                        'commands': commands,
+                    })
+
+            switchable = {
+                command['name'] for module in modules for command in module['commands']
+            }
+            return {
+                'status': 'success',
+                'installed': True,
+                'version': str(catalog.get('version') or ''),
+                'modules': modules,
+                'disabled': [name for name in self._read_disabled_plugin_commands()
+                             if name in switchable],
+                'autocadRunning': self._is_autocad_running(),
+            }
+        except Exception as e:
+            logging.error(f"Error reading plugin command settings: {e}")
+            return {'status': 'error', 'message': f"Could not read the plugin's command list: {e}"}
+
+    def save_plugin_command_settings(self, disabled):
+        """Save the commands to switch off. AutoCAD applies the list the next time it starts."""
+        try:
+            settings = self.get_plugin_command_settings()
+            if settings.get('status') != 'success':
+                return settings
+            if not settings.get('installed'):
+                return {'status': 'error', 'message': 'Install the ACIES plugin before changing its commands.'}
+            switchable = {
+                command['name'] for module in settings['modules'] for command in module['commands']
+            }
+            names = sorted({
+                str(name).strip().upper() for name in (disabled or [])
+                if str(name).strip().upper() in switchable
+            })
+            path = self._plugin_command_settings_path()
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            lines = [
+                '# ACIES AutoCAD commands that are switched off, one per line.',
+                '# Edit these in the ACIES app: Tools > AutoCAD Plugins > Commands.',
+                *names,
+            ]
+            temp_path = f"{path}.tmp"
+            with open(temp_path, 'w', encoding='utf-8', newline='\r\n') as f:
+                f.write('\n'.join(lines) + '\n')
+            os.replace(temp_path, path)
+            logging.info(f"Saved {len(names)} switched-off AutoCAD command(s) to {path}")
+            return {
+                'status': 'success',
+                'disabled': names,
+                'autocadRunning': self._is_autocad_running(),
+            }
+        except Exception as e:
+            logging.error(f"Error saving plugin command settings: {e}")
+            return {'status': 'error', 'message': f"Could not save the command settings: {e}"}
 
     def uninstall_bundle(self, bundle_name):
         """Removes a bundle directory."""

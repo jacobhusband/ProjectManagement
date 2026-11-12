@@ -671,7 +671,7 @@ body:has(#appLoader:not(.hidden)) .cmd-dock { display: none; }
 .workspace-dialog-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 24px; border-top: 1px solid var(--modern-line); }
 .workspace-dialog-footer .muted { color: var(--modern-muted); font-size: 12px; }
 #settingsDlg .workspace-dialog-done { background: var(--accent); color: var(--btn-text-on-accent); padding: 9px 22px; }
-#helpDlg .help-dlg-body { height: min(580px, calc(100dvh - 120px)); max-height: none; overflow: hidden; }
+#helpDlg .help-dlg-body { height: min(580px, calc(100dvh - 240px)); max-height: none; overflow: hidden; }
 #helpDlg .help-dlg-sidebar { flex-basis: 200px; }
 #helpDlg .help-dlg-content { padding: 28px 30px; line-height: 1.75; }
 #helpDlg h2 { font: 500 24px/1.3 var(--modern-font); margin-bottom: 18px; }
