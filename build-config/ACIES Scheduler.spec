@@ -42,6 +42,8 @@ a = Analysis(
         (os.path.join(project_root, 'scripts', 'removeXREFPaths.ps1'), 'scripts'),
         (os.path.join(project_root, 'scripts', 'StripRefPaths.dll'), 'scripts'),
         (os.path.join(project_root, 'scripts', 'PrepareXrefs-bin'), 'scripts/PrepareXrefs-bin'),
+        # Clean Drawings worker, fetched by build-config/fetch_clean_cad_worker.py.
+        (os.path.join(project_root, 'scripts', 'CleanCAD-bin'), 'scripts/CleanCAD-bin'),
         (os.path.join(project_root, 'templates'), 'templates'),
         (
             os.path.join(project_root, 'CircuitBreakerAI', 'ElectricalPanels', 'Template.xlsx'),

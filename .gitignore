@@ -97,3 +97,6 @@ CircuitBreakerAI/temp_uploads/
 CircuitBreakerAI/ElectricalPanels/Filled_Panel_Schedules.xlsx
 
 nul
+
+# Clean Drawings AutoCAD worker, fetched at build time by build-config/fetch_clean_cad_worker.py
+scripts/CleanCAD-bin/

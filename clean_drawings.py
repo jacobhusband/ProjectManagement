@@ -18,6 +18,8 @@ import fitz
 from clean_review import compare_sets
 
 _run_lock = threading.Lock()
+WORKER_DLL = 'AutoCADCommands.CleanCADCommands.dll'
+BUNDLED_WORKER_DIR = Path(__file__).resolve().parent / 'scripts' / 'CleanCAD-bin'
 
 
 def _titleblock_name(path):
@@ -97,13 +99,21 @@ def plugin_for(acad):
     if not match:
         raise ValueError('Cannot determine the AutoCAD release from its installation path.')
     framework = 'net8.0-windows' if int(match.group()) >= 2025 else 'net48'
+    # The app ships its own copy of the worker (build-config/fetch_clean_cad_worker.py),
+    # so the AutoCAD plugin does not have to be installed. Source checkouts without that
+    # copy fall back to an installed plugin.
+    bundled = BUNDLED_WORKER_DIR / framework / WORKER_DLL
+    if bundled.is_file():
+        return bundled
     plugins = Path(os.environ.get('APPDATA', '')) / 'Autodesk' / 'ApplicationPlugins'
     # Plugin releases after v0.3.0 ship one combined bundle; earlier ones a bundle per plugin.
     for bundle in ('ElectricalCommands.bundle', 'ElectricalCommands.CleanCADCommands.bundle'):
-        dll = plugins / bundle / 'Contents' / framework / 'AutoCADCommands.CleanCADCommands.dll'
+        dll = plugins / bundle / 'Contents' / framework / WORKER_DLL
         if dll.is_file():
             return dll
-    raise FileNotFoundError('Install the updated ACIES AutoCAD plugin before running Clean Drawings.')
+    raise FileNotFoundError(
+        'The Clean Drawings worker is missing from this installation. Reinstall the ACIES app, '
+        'or run build-config/fetch_clean_cad_worker.py when running from source.')
 
 
 def preview(project, acad, notify=lambda message: None):

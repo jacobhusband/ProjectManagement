@@ -212,6 +212,12 @@ try {
     Assert-PathExists -Path $projectPagesEditorDist -Message "Project Pages editor build completed without producing $projectPagesEditorDist."
     Assert-PathExists -Path $projectPagesEditorBundle -Message "Project Pages editor build output is missing $projectPagesEditorBundle."
 
+    # Clean Drawings runs this AutoCAD worker itself, so users need not install the plugin.
+    Write-Host "`n[1c/3] Fetching the Clean Drawings AutoCAD worker..." -ForegroundColor Yellow
+    Invoke-CheckedCommand -Description "Fetch Clean Drawings worker" -Command {
+        & $venvPython (Join-Path $PSScriptRoot "fetch_clean_cad_worker.py")
+    }
+
     Write-Host "`n[2/3] Bundling application with PyInstaller..." -ForegroundColor Yellow
 
     $bundleOutput = Join-Path $projectRoot "dist\ACIES Scheduler"
@@ -274,7 +280,9 @@ try {
         (Join-Path $bundleInternal "CircuitBreakerAI\ElectricalPanels\Template.xlsx"),
         (Join-Path $bundleInternal "WireSizerApplication\dist\index.html"),
         (Join-Path $bundleInternal "project-pages-editor\dist\project-pages-editor.js"),
-        (Join-Path $bundleInternal "scripts\shrink_pdf.py")
+        (Join-Path $bundleInternal "scripts\shrink_pdf.py"),
+        (Join-Path $bundleInternal "scripts\CleanCAD-bin\net48\AutoCADCommands.CleanCADCommands.dll"),
+        (Join-Path $bundleInternal "scripts\CleanCAD-bin\net8.0-windows\AutoCADCommands.CleanCADCommands.dll")
     )
     foreach ($expectedPath in $expectedBundleFiles) {
         Assert-PathExists -Path $expectedPath -Message "PyInstaller bundle is missing expected output: $expectedPath"

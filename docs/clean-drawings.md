@@ -1,8 +1,12 @@
 # Clean Drawings
 
 Launch **Clean Drawings** from the Workroom or General tools with a project selected.
-Install the updated `ElectricalCommands.CleanCADCommands` bundle first and select
-AutoCAD Core Console in settings. The existing desktop commands remain available.
+Select AutoCAD Core Console in settings. The AutoCAD plugin does not need to be
+installed: the app ships its own copy of the worker DLL in `scripts/CleanCAD-bin`,
+taken from the plugin release pinned in `build-config/fetch_clean_cad_worker.py`
+(the build downloads it; run that script once when running from source, or an
+installed plugin is used instead). Bump the pinned version and checksum together
+when the worker changes. The existing desktop commands remain available.
 
 The confirmation screen lists DWGs directly in `Electrical`, titleblock candidates
 under `XREF` or `Xrefs`, and standard sheet sizes found in recent PDFs under `PDF`
