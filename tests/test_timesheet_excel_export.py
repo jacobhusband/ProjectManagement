@@ -327,6 +327,23 @@ class TimesheetExcelExportTests(unittest.TestCase):
             next_row += 1
         return row_span
 
+    def test_expense_sheet_is_signed_with_the_exporting_users_name(self):
+        # The bundled template once carried the developer's name beside EMPLOYEE:,
+        # so every user's expense report was signed with it.
+        template = load_workbook(TEMPLATE_PATH)
+        self.addCleanup(template.close)
+        self.assertIsNone(template[EXPENSE_SHEET_NAME]["B39"].value)
+        self.assertIsNone(template["time log"]["M1"].value)
+
+        with tempfile.TemporaryDirectory(prefix="timesheet-export-") as temp_dir:
+            output_path = Path(temp_dir) / "signed.xlsx"
+            workbook_path = self._export_timesheet_workbook([_make_project("Alpha", "1001", 1)], output_path)
+            worksheet, _ = self._load_expense_sheet(workbook_path)
+
+        signature_row = next(row for row in range(1, worksheet.max_row + 1)
+                             if worksheet.cell(row=row, column=1).value == "EMPLOYEE:")
+        self.assertEqual("Tester", worksheet.cell(row=signature_row, column=2).value)
+
     def test_combined_export_preserves_second_project_section_formatting(self):
         projects = [
             _make_project("Alpha", "1001", 1),

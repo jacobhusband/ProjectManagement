@@ -9782,11 +9782,13 @@ Return ONLY the JSON object.
         target_dimension.outlineLevel = template["outlineLevel"]
         target_dimension.collapsed = template["collapsed"]
 
-    def _render_project_expense_sheet(self, worksheet, projects, mileage_rate):
+    def _render_project_expense_sheet(self, worksheet, projects, mileage_rate, employee_name=''):
         if not projects:
             return {"image_paths": [], "image_start_row": None}
 
         signature_row = self._find_expense_signature_row(worksheet)
+        # The name sits beside "EMPLOYEE:"; the template leaves it blank for the user's own name.
+        worksheet.cell(row=signature_row, column=2, value=str(employee_name or '').strip() or None)
         section_starts = self._get_expense_section_starts(worksheet, signature_row)
         if not section_starts:
             raise ValueError("No formatted expense sections were found in the template.")
@@ -10216,6 +10218,7 @@ Return ONLY the JSON object.
                         ws_exp,
                         expense_projects,
                         expense_data.get('mileageRate', 0.725),
+                        employee_name=user_name,
                     )
                     temp_files_to_cleanup.extend(
                         self._add_expense_sheet_images(
@@ -11243,6 +11246,7 @@ Return ONLY the JSON object.
                 ws,
                 data.get('projects', []),
                 data.get('mileageRate', 0.725),
+                employee_name=data.get('userName', ''),
             )
             temp_files_to_cleanup = self._add_expense_sheet_images(
                 ws,
