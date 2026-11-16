@@ -62,12 +62,12 @@ $ToolDir = Join-Path $env:LOCALAPPDATA "AcadHeadlessTools"
 Write-Host "PROGRESS: Initializing script..."
 
 # ---------------- 1) FIND ACCORECONSOLE ----------------
+. (Join-Path $PSScriptRoot 'AutoCadDiscovery.ps1')
 if ($AcadCore -and (Test-Path -Path $AcadCore)) {
   $acadCore = $AcadCore
 }
 else {
   $acadCore = $null
-  . (Join-Path $PSScriptRoot 'AutoCadDiscovery.ps1')
   $acadInstalls = @(Find-AcadCoreConsole)
   if ($acadInstalls.Count) {
     # Newest release first.
@@ -682,6 +682,8 @@ if (Test-Path $errLog) { Remove-Item $errLog -Force }
 $scanTimeoutSeconds = [Math]::Min($ProcessTimeoutSeconds * $filesToScan.Count, 120 + 30 * $filesToScan.Count)
 $r = Invoke-AcadCore -DwgPath $filesToScan[0] -ScriptPath $extractScr -OutLog $outLog -ErrLog $errLog -TimeoutSeconds $scanTimeoutSeconds
 if ($r.TimedOut) { Write-Host "Layer scan timed out." -ForegroundColor Red }
+# Output files of the per-drawing fallback below, set only if it runs in this session.
+$directScanLogs = @()
 
 # Files ObjectDBX could not read have no ###DWG: marker in the dump. Re-run each in its own
 # console session (opened with /i) instead of _.OPEN inside the batch session.
@@ -711,6 +713,7 @@ if (-not $r.TimedOut -and (Test-Path $layerDumpFile)) {
       $fbOut = Join-Path $ToolDir "extract_current.out.txt"
       $fbErr = Join-Path $ToolDir "extract_current.err.txt"
       $fb = Invoke-AcadCore -DwgPath $unread -ScriptPath $fallbackScr -OutLog $fbOut -ErrLog $fbErr -TimeoutSeconds $ProcessTimeoutSeconds
+      $directScanLogs = @($fbOut, $fbErr)
       if ($fb.TimedOut) { Write-Warning "Layer scan timed out for $unread" }
     }
   }
@@ -719,7 +722,11 @@ if (-not $r.TimedOut -and (Test-Path $layerDumpFile)) {
 Write-Host "PROGRESS: Reading extracted data..."
 
 if (-not (Test-Path $layerDumpFile)) {
-  Write-Warning "No layer dump file was created. Check logs in: $ToolDir"
+  Write-AcadOutputTail -Label "layer scan" -Paths @($outLog, $errLog) -Count 20
+  $scanProblem = if ($r.TimedOut) { "timed out after $scanTimeoutSeconds seconds" }
+  elseif ($null -eq $r.ExitCode) { "finished without reporting any" }
+  else { "exited with code $($r.ExitCode) without reporting any" }
+  Write-Host "PROGRESS: ERROR: AutoCAD Core Console could not read the layers of the selected drawing(s): it $scanProblem. Its output is in $ToolDir"
   exit 1
 }
 
@@ -731,7 +738,11 @@ foreach ($line in $rawLayers) {
 }
 
 if ($allLayers.Count -eq 0) {
-  Write-Warning "0 layers found."
+  Write-AcadOutputTail -Label "layer scan" -Paths @($outLog, $errLog) -Count 20
+  if ($directScanLogs.Count -gt 0) {
+    Write-AcadOutputTail -Label "layer scan, direct" -Paths $directScanLogs -Count 20
+  }
+  Write-Host "PROGRESS: ERROR: AutoCAD Core Console opened the selected drawing(s) but reported no layers. Its output is in $ToolDir"
   exit 1
 }
 
@@ -1464,6 +1475,7 @@ foreach ($dwgFile in $files) {
     }
 
     Write-Host "    -> FAILED verification: $attemptReason" -ForegroundColor Red
+    Write-AcadOutputTail -Label ([IO.Path]::GetFileName($dwgFile)) -Paths @($outLog, $errLog)
     "FAILED ($attemptReason): $dwgFile" | Out-File $logFile -Append
     $failedFiles += $dwgFile
     $failedDetails += [pscustomobject]@{

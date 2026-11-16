@@ -335,6 +335,7 @@ function Resolve-CombinedPdfName {
 }
 
 # --- SCRIPT CONFIGURATION ---
+. (Join-Path $PSScriptRoot 'AutoCadDiscovery.ps1')
 # Logic to find AutoCAD Core Console
 if ($AcadCore -and (Test-Path -Path $AcadCore)) {
   $acadCore = $AcadCore
@@ -342,7 +343,6 @@ if ($AcadCore -and (Test-Path -Path $AcadCore)) {
 }
 else {
   $acadCore = $null
-  . (Join-Path $PSScriptRoot 'AutoCadDiscovery.ps1')
   $acadInstalls = @(Find-AcadCoreConsole)
   if ($acadInstalls.Count) {
     # Newest release first.
@@ -1398,6 +1398,8 @@ foreach ($dwgPath in $files) {
   "ExitCode: $code" | Out-File $logFile -Append
 
   if ($code -ne 0 -or $missingArcAlignedTextSupport -or $preflightSkipped -or $preflightError -or $noPdfOutputFailure) {
+    Write-AcadOutputTail -Label $dwgItem.Name -Lines $normalizedOutputLines
+    Write-Host "Plot log: $logFile"
     if (-not ($failed -contains $dwgPath)) {
       $failed += $dwgPath
     }

@@ -301,6 +301,47 @@ class WorkroomCadLaunchCommandTests(unittest.TestCase):
             self.assertEqual(set(), self.api._script_workers)
             self.assertEqual(set(), self.api._script_processes)
 
+    def test_failed_script_reports_and_logs_its_last_output(self):
+        command = [
+            sys.executable,
+            "-c",
+            "import sys; print('PROGRESS: starting'); "
+            "print('The term Foo is not recognized'); sys.exit(3)",
+        ]
+        with patch.object(self.api, "_trace_cad_auto_select"), patch.object(
+            self.api, "_notify_tool_status"
+        ), self.assertLogs(level="WARNING") as logs:
+            result = self.api._run_script_with_progress(
+                command, "toolPublishDwgs", wait=True)
+
+        self.assertEqual("error", result["status"])
+        self.assertEqual(3, result["returnCode"])
+        self.assertIn("error code 3", result["message"])
+        self.assertIn("The term Foo is not recognized", result["message"])
+        self.assertTrue(
+            any("The term Foo is not recognized" in line for line in logs.output))
+
+    def test_failed_script_error_includes_autocads_last_line(self):
+        command = [
+            sys.executable,
+            "-c",
+            "import sys; print('ACAD_OUTPUT[E1.dwg]: Regenerating model.'); "
+            "print('ACAD_OUTPUT[E1.dwg]: Unable to load the plot style table'); "
+            "print('PROGRESS: ERROR: E1.dwg - No PDFs were generated from layouts.'); "
+            "sys.exit(1)",
+        ]
+        with patch.object(self.api, "_trace_cad_auto_select"), patch.object(
+            self.api, "_notify_tool_status"
+        ), self.assertLogs(level="WARNING") as logs:
+            result = self.api._run_script_with_progress(
+                command, "toolPublishDwgs", wait=True)
+
+        self.assertEqual("error", result["status"])
+        self.assertIn("No PDFs were generated", result["message"])
+        self.assertIn(
+            "AutoCAD's last line: Unable to load the plot style table", result["message"])
+        self.assertTrue(any("Regenerating model." in line for line in logs.output))
+
     def test_resolve_workroom_context_accepts_snake_case_project_path(self):
         with tempfile.TemporaryDirectory(prefix="acies-context-path-") as temp_dir:
             selected_path = str(Path(temp_dir) / "260001 Example")

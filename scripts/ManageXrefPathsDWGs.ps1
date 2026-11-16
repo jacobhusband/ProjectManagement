@@ -64,12 +64,12 @@ function Find-ProjectXrefsFolder {
 
 Write-Host "PROGRESS: Initializing XREF path repair..."
 
+. (Join-Path $PSScriptRoot 'AutoCadDiscovery.ps1')
 if ($AcadCore -and (Test-Path -LiteralPath $AcadCore -PathType Leaf)) {
   $acadCore = $AcadCore
 }
 else {
   $acadCore = $null
-  . (Join-Path $PSScriptRoot 'AutoCadDiscovery.ps1')
   $acadInstalls = @(Find-AcadCoreConsole)
   if ($acadInstalls.Count) {
     # Newest release first.
@@ -537,6 +537,7 @@ try {
     Remove-Item Env:\ACIES_XREF_SCAN_OUT -ErrorAction SilentlyContinue
 
     if ($result.TimedOut -or -not (Test-Path -LiteralPath $scanOutput -PathType Leaf)) {
+      Write-AcadOutputTail -Label ([IO.Path]::GetFileName($dwgPath)) -Paths @($outLog, $errLog)
       $scanFailures.Add([IO.Path]::GetFileName($dwgPath))
       continue
     }
@@ -1249,6 +1250,7 @@ try {
     }
 
     if ($result.TimedOut -or -not $saveOkay -or -not $updatesOkay) {
+      Write-AcadOutputTail -Label $dwgName -Paths @($outLog, $errLog)
       $failedDrawings.Add($dwgName)
     }
   }

@@ -21,13 +21,13 @@ param(
 Write-Host "PROGRESS: Initializing script..."
 
 # --- AUTOCAD VERSION DETECTION ---
+. (Join-Path $PSScriptRoot 'AutoCadDiscovery.ps1')
 if ($AcadCore -and (Test-Path -Path $AcadCore)) {
   $acadCore = $AcadCore
   Write-Host "PROGRESS: Using specified AutoCAD Core Console: $AcadCore"
 }
 else {
   $acadCore = $null
-  . (Join-Path $PSScriptRoot 'AutoCadDiscovery.ps1')
   $acadInstalls = @(Find-AcadCoreConsole)
   if ($acadInstalls.Count) {
     # Newest release first.
@@ -1050,10 +1050,12 @@ try {
     }
     $failureSignal = Get-AcadOutputFailureSignal -OutputLines $acadRun.Output
     if ($acadRun.ExitCode -ne 0) {
+      Write-AcadOutputTail -Label $workingName -Lines $acadRun.Output
       Write-Host "PROGRESS: ERROR: AutoCAD Core Console exited with code $($acadRun.ExitCode) for $workingName."
       $failed += $workingPath
     }
     elseif ($failureSignal) {
+      Write-AcadOutputTail -Label $workingName -Lines $acadRun.Output
       Write-Host "PROGRESS: ERROR: AutoCAD reported a problem while processing $workingName - $failureSignal"
       $failed += $workingPath
     }
@@ -1083,6 +1085,7 @@ if (-not $SkipAcad -and $processed.Count -gt 0) {
     $verifyRun = Invoke-AcadCoreScript -AcadCorePath $acadCore -DwgPath $dwg -ScriptPath $verifyScript
     $verifyErrors = Get-AuditErrorCount -OutputLines $verifyRun.Output
     if ($verifyRun.ExitCode -ne 0) {
+      Write-AcadOutputTail -Label $name -Lines $verifyRun.Output
       Write-Host "PROGRESS: ERROR: $name failed to reopen for verification (exit code $($verifyRun.ExitCode))."
       $failed += $dwg
     }

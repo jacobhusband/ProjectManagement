@@ -28,6 +28,7 @@ import re
 import base64
 from typing import List
 import importlib
+import collections
 import itertools
 import uuid
 from contextlib import closing, contextmanager
@@ -4930,8 +4931,20 @@ class Api:
                     process.pid,
                 )
                 last_progress_error = ""
+                # The file log is INFO-level, so the debug line below never reaches it.
+                # Keep the tail to record why a script failed without reporting an error.
+                output_tail = collections.deque(maxlen=80)
+                # What AutoCAD itself last said in a failed run; see Write-AcadOutputTail
+                # in scripts/AutoCadDiscovery.ps1.
+                last_acad_output = ""
                 for line in iter(process.stdout.readline, ''):
                     line = line.strip()
+                    if line:
+                        output_tail.append(line)
+                    acad_output = re.match(r"ACAD_OUTPUT\[[^\]]*\]:\s*(.+)", line)
+                    if acad_output:
+                        last_acad_output = acad_output.group(1).strip()
+                        continue
                     # PowerShell/AutoCAD output can contain replacement characters
                     # that a bundled Windows app's legacy stdout codec cannot encode.
                     # This output is diagnostic only, so escape non-ASCII characters
@@ -4996,12 +5009,30 @@ class Api:
                         'returnCode': return_code,
                     })
                 else:
+                    logging.warning(
+                        "CAD script for %r failed (exit code %s). Command: %a. Last output:\n%s",
+                        tool_id,
+                        return_code,
+                        command,
+                        "\n".join(ascii(item) for item in output_tail) or "(none)",
+                    )
                     if last_progress_error:
                         error_message = (
                             f"{last_progress_error} (exit code {return_code})."
                         )
                     else:
                         error_message = f"Script finished with error code {return_code}."
+                        # A script that PowerShell could not start or parse prints its
+                        # reason without the PROGRESS prefix; show that instead of nothing.
+                        last_plain_line = next(
+                            (item for item in reversed(output_tail)
+                             if not item.startswith(("PROGRESS:", "ACAD_OUTPUT["))),
+                            "",
+                        )
+                        if last_plain_line:
+                            error_message += f" Last output: {last_plain_line[:300]}"
+                    if last_acad_output and "(AutoCAD wrote no output)" not in last_acad_output:
+                        error_message += f" AutoCAD's last line: {last_acad_output[:300]}"
                     self._notify_tool_status(
                         tool_id,
                         f"ERROR: {error_message}",
