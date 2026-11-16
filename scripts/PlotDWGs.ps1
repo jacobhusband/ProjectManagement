@@ -1080,7 +1080,25 @@ function Invoke-CorePlotAttempt {
   )
 )
 
+;; BACKGROUNDPLOT, DEMANDLOAD and PROXYSHOW are saved in the user's AutoCAD profile, which
+;; Core Console shares. Keep their values and put them back before the session quits.
+(defun AciesSavePlotSettings ()
+  (if (not *acies-saved-plot-settings*)
+    (setq *acies-saved-plot-settings*
+      (mapcar '(lambda (name) (cons name (getvar name))) '("BACKGROUNDPLOT" "DEMANDLOAD" "PROXYSHOW"))
+    )
+  )
+)
+
+(defun AciesRestorePlotSettings ()
+  (foreach setting *acies-saved-plot-settings*
+    (vl-catch-all-apply 'setvar (list (car setting) (cdr setting)))
+  )
+  (setq *acies-saved-plot-settings* nil)
+)
+
 (defun EnsurePublishPreflight (/ hasArcAlignedText arcSupportLoaded arcSelectResult)
+  (AciesSavePlotSettings)
   (setvar "BACKGROUNDPLOT" 0)
   (setvar "DEMANDLOAD" 3)
   (setvar "PROXYSHOW" 1)
@@ -1125,12 +1143,18 @@ function Invoke-CorePlotAttempt {
   )
 )
 
-(defun PlotLayoutsAfterPreflight (/ main-dict layout-dict item layout-name pdfName preflightResult)
+(defun PlotLayoutsAfterPreflight (/ main-dict layout-dict item layout-name pdfName preflightResult *error*)
+  (defun *error* (msg)
+    (AciesRestorePlotSettings)
+    (if msg (princ (strcat "\n; error: " msg)))
+    (princ)
+  )
   (setq preflightResult (vl-catch-all-apply 'EnsurePublishPreflight '()))
   (if (vl-catch-all-error-p preflightResult)
     (progn
       (AciesLog (strcat "${preflightErrorMarker}: " (vl-catch-all-error-message preflightResult)))
       (AciesLog "$plotDecisionSkipMarker")
+      (AciesRestorePlotSettings)
       (command "_.QUIT")
     )
     (if preflightResult
@@ -1151,10 +1175,12 @@ function Invoke-CorePlotAttempt {
             )
           )
         )
+        (AciesRestorePlotSettings)
         (command "_.QUIT")
       )
       (progn
         (AciesLog "Skipping plot because ARCALIGNEDTEXT support is unavailable in headless mode.")
+        (AciesRestorePlotSettings)
         (command "_.QUIT")
       )
     )

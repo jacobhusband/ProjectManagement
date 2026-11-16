@@ -8,6 +8,22 @@
 # finds AutoCAD on any drive and any future release. The Program Files scan covers
 # installs whose registry entries are missing.
 
+# Core Console runs without /isolate, so it reads and saves the same AutoCAD profile as the
+# user's own AutoCAD. Profile-backed settings (SECURELOAD, CMDDIA, FILEDIA, PROXYNOTICE,
+# BACKGROUNDPLOT, ...) changed by a script stay changed in the user's AutoCAD afterwards.
+# Scripts must not set those settings unless they put them back, and must put them back
+# right after the step that needs them: a run stopped on timeout skips anything later.
+#
+# Returns .scr lines that lower SECURELOAD only for -LoadLines (LOAD/NETLOAD of the tool's
+# own files from the temp folder) and then restore the user's value.
+function Get-AcadTrustedLoadScriptLines {
+  param([Parameter(Mandatory = $true)][string[]]$LoadLines)
+
+  return @('(setq aciesSavedSecureLoad (getvar "SECURELOAD"))', '(setvar "SECURELOAD" 0)') +
+    $LoadLines +
+    @('(setvar "SECURELOAD" aciesSavedSecureLoad)')
+}
+
 # Prints the end of what AutoCAD wrote during a failed run, one "ACAD_OUTPUT[label]: ..."
 # line each. The app keeps these lines in its log and shows the last one with the error,
 # so a failure on someone else's PC can be read without collecting files from it.

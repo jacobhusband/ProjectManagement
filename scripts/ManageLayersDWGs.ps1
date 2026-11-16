@@ -660,15 +660,8 @@ if ($filesToScan.Count -eq 0) {
 $filesToScan | ForEach-Object { ($_ -replace '\\', '/') } |
   Set-Content -Path $scanListFile -Encoding ASCII
 
-# Scripts already use command-line file prompts. Leave registry-backed FILEDIA alone.
-$extractScrLines = @(
-  "CMDDIA",
-  "0",
-  "PROXYNOTICE",
-  "0",
-  "SECURELOAD",
-  "0",
-  "(load `"$extractLspForLisp`")",
+# Core Console shows no dialogs, so profile-backed FILEDIA/CMDDIA/PROXYNOTICE are left alone.
+$extractScrLines = @(Get-AcadTrustedLoadScriptLines -LoadLines @("(load `"$extractLspForLisp`")")) + @(
   "(c:ExtractLayersBatch)"
 )
 Set-Content -Path $extractScr -Value ($extractScrLines -join "`r`n") -Encoding ASCII
@@ -698,16 +691,9 @@ if (-not $r.TimedOut -and (Test-Path $layerDumpFile)) {
   $unreadFiles = @($filesToScan | Where-Object { -not $scannedNames.Contains([System.IO.Path]::GetFileName($_)) })
   if ($unreadFiles.Count -gt 0) {
     $fallbackScr = Join-Path $ToolDir "extract_current.scr"
-    Set-Content -Path $fallbackScr -Value (@(
-        "CMDDIA",
-        "0",
-        "PROXYNOTICE",
-        "0",
-        "SECURELOAD",
-        "0",
-        "(load `"$extractLspForLisp`")",
+    Set-Content -Path $fallbackScr -Value ((@(Get-AcadTrustedLoadScriptLines -LoadLines @("(load `"$extractLspForLisp`")")) + @(
         "(c:ExtractLayersCurrent)"
-      ) -join "`r`n") -Encoding ASCII
+      )) -join "`r`n") -Encoding ASCII
     foreach ($unread in $unreadFiles) {
       Write-Host "PROGRESS: Reading layers from $([System.IO.Path]::GetFileName($unread)) directly..."
       $fbOut = Join-Path $ToolDir "extract_current.out.txt"
@@ -1405,14 +1391,7 @@ $updateLspContent = @"
 Set-Content -Path $updateLsp -Value $updateLspContent -Encoding ASCII
 
 $updateScr = Join-Path $ToolDir "update.scr"
-$updateScrLines = @(
-  "CMDDIA",
-  "0",
-  "PROXYNOTICE",
-  "0",
-  "SECURELOAD",
-  "0",
-  "(load `"$updateLspForLisp`")",
+$updateScrLines = @(Get-AcadTrustedLoadScriptLines -LoadLines @("(load `"$updateLspForLisp`")")) + @(
   "(c:BatchUpdateFiles)"
 )
 Set-Content -Path $updateScr -Value ($updateScrLines -join "`r`n") -Encoding ASCII

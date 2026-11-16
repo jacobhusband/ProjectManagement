@@ -489,12 +489,8 @@ try {
 (princ)
 '@
   Set-Content -LiteralPath $scanLspPath -Value $scanLisp -Encoding ASCII
-  # Scripts already use command-line file prompts. Leave registry-backed FILEDIA alone.
-  $scanScript = @(
-    "CMDDIA", "0",
-    "PROXYNOTICE", "0",
-    "SECURELOAD", "0",
-    "(load `"$scanLspForAcad`")",
+  # Core Console shows no dialogs, so profile-backed FILEDIA/CMDDIA/PROXYNOTICE are left alone.
+  $scanScript = @(Get-AcadTrustedLoadScriptLines -LoadLines @("(load `"$scanLspForAcad`")")) + @(
     "ACIESXREFSCAN",
     "_.QUIT", "_N"
   )
@@ -1191,11 +1187,7 @@ try {
 (princ)
 '@
   Set-Content -LiteralPath $updateLspPath -Value $updateLisp -Encoding ASCII
-  $updateScript = @(
-    "CMDDIA", "0",
-    "PROXYNOTICE", "0",
-    "SECURELOAD", "0",
-    "(load `"$updateLspForAcad`")",
+  $updateScript = @(Get-AcadTrustedLoadScriptLines -LoadLines @("(load `"$updateLspForAcad`")")) + @(
     "ACIESXREFUPDATE",
     "_.QUIT", "_N"
   )

@@ -738,22 +738,16 @@ Set-Content -Encoding ASCII -Path $lisp -Value $lispContent
 # Make .scr that runs the requested steps
 $script = Join-Path $env:TEMP "run_STRIP.scr"
 $lispPathForScript = ($lisp -replace '\\', '/')
-# Scripts already use command-line file prompts. Leave registry-backed FILEDIA alone.
-$scriptLines = @(
-  "CMDECHO 1",
-  "SECURELOAD 0"
-)
-if ($StripXrefs) {
-  $scriptLines += "NETLOAD"
-  $scriptLines += "`"$dll`""
-  $scriptLines += "STRIPREFPATHS"
-}
-
+# Core Console shows no dialogs, so profile-backed FILEDIA/CMDDIA are left alone.
+# Both tool files load first, so SECURELOAD is the user's again before any drawing work.
 $runCleanup = $SetByLayer -or $Purge -or $Audit -or $HatchColor
-if ($runCleanup) {
-  $scriptLines += "(load `"$lispPathForScript`")"
-  $scriptLines += "CLEANUP"
-}
+$loadLines = @()
+if ($StripXrefs) { $loadLines += @("NETLOAD", "`"$dll`"") }
+if ($runCleanup) { $loadLines += "(load `"$lispPathForScript`")" }
+$scriptLines = @("CMDECHO 1")
+if ($loadLines.Count -gt 0) { $scriptLines += Get-AcadTrustedLoadScriptLines -LoadLines $loadLines }
+if ($StripXrefs) { $scriptLines += "STRIPREFPATHS" }
+if ($runCleanup) { $scriptLines += "CLEANUP" }
 
 $scriptLines += "QSAVE"
 $scriptLines += "QUIT"
@@ -944,8 +938,8 @@ try {
         $prepareOutput = Join-Path $prepareDir 'prepared.dwg'
         Copy-Item -LiteralPath $sourcePath -Destination $prepareInput
         $prepareScript = Join-Path $prepareDir 'prepare.scr'
-        @('SECURELOAD 0', '_.NETLOAD', ('"' + $prepareDll + '"'),
-          'ACIESPREPAREXREFS', '_.QUIT', '_Y') | Set-Content -LiteralPath $prepareScript -Encoding UTF8
+        (@(Get-AcadTrustedLoadScriptLines -LoadLines @('_.NETLOAD', ('"' + $prepareDll + '"'))) +
+          @('ACIESPREPAREXREFS', '_.QUIT', '_Y')) | Set-Content -LiteralPath $prepareScript -Encoding UTF8
         Write-Host "PROGRESS: Binding and exploding modelspace Xrefs in $name..."
         $prepareRun = Invoke-AcadCoreScript -AcadCorePath $acadCore -DwgPath $prepareInput -ScriptPath $prepareScript -Environment @{
           ACIES_XREF_SOURCE = $sourcePath
