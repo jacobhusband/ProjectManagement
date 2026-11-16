@@ -21902,7 +21902,11 @@ async function runDeliverableQuickAccessOpen({
     if (String(result?.status || "").trim().toLowerCase() !== "success") {
       throw new Error(result?.message || `No ${fallbackLabel} was found.`);
     }
-    toast(`Opening ${result.fileName || fallbackLabel}.`);
+    const selectionNote = methodName === "open_latest_arch_set" &&
+      ["dates", "scope_and_dates"].includes(result.selectionMethod) && result.selectionReason !== "single_candidate"
+      ? " Selected by drawing type and dates."
+      : "";
+    toast(`Opening ${result.fileName || fallbackLabel}.${selectionNote}`);
   } catch (error) {
     console.warn(`Failed to open ${fallbackLabel}:`, error);
     toast(error?.message || `Unable to open the ${fallbackLabel}.`);
@@ -21921,8 +21925,8 @@ function openLatestDeliverablePdf(project, deliverable) {
   });
 }
 
-// The architect's set is whatever PDF sits newest under the project's Arch
-// folder, so it needs no discipline or deliverable context.
+// The backend compares PDF names, parent folders, and dates under Arch to select
+// the latest architectural set, comparing drawing type then dates without AI.
 function openLatestArchSet(project) {
   return runDeliverableQuickAccessOpen({
     project,

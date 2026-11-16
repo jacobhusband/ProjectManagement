@@ -103,7 +103,11 @@ does not replace the later cleanup and validation.
 - Wipeout masks are supported; they are not treated as external image attachments.
   Validation records their count and checks it again after reopening the output.
 - PDF underlays and supported raster images are converted automatically. PDF
-  attachments must be directly in a layout with no custom clip or display adjustment.
+  attachments must be directly in a layout with no display adjustment (fade,
+  contrast, monochrome). A clipped underlay keeps its clip: the imported page block
+  receives the same boundary as an XCLIP, and page content wholly outside a
+  non-inverted clip is dropped because it was never visible. Layers that were
+  frozen, off or locked are returned to that state after conversion.
   PDFs with annotations, form widgets, optional layers or passwords are refused
   to avoid losing visible content. DGN/DWF and linked OLE remain unsupported.
 - The titleblock must contain measurable local geometry. Local blocks that cannot
