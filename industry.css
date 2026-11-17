@@ -696,10 +696,6 @@
   color: var(--accent-hover);
 }
 
-.reg-field.is-hard {
-  border-left-color: color-mix(in srgb, var(--text) 40%, transparent);
-}
-
 .reg-field .reg-val,
 .plate-rule-cell .reg-val {
   display: flex;
@@ -3123,89 +3119,7 @@ body.scratchpad-open .cmd-dock {
   box-shadow: none;
 }
 
-/* — the account plate —
-   The account and the discipline filter were two stacked boxes. They are one
-   plate now: the wrapper carries the only border and the two controls sit in
-   it as cells, divided by a hairline. The radios stay real buttons — a button
-   cannot be nested inside another — so "inside" is drawn, not nested. */
-.app-header .header-auth-dropdown {
-  flex-direction: row;
-  align-items: stretch;
-  justify-content: flex-start;
-  gap: 0;
-  padding: 0;
-  min-width: 0;
-  border: 1px solid var(--ind-line);
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-  overflow: hidden;
-}
-
-.app-header .header-auth-dropdown:hover {
-  border-color: var(--ind-line-strong);
-  background: transparent;
-}
-
-.app-header .header-auth-btn {
-  min-width: 0;
-  height: auto;
-  align-self: stretch;
-  padding: 3px 10px 3px 5px;
-  gap: 8px;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  color: var(--text);
-  box-shadow: none;
-  transition: background 0.15s ease;
-}
-
-.app-header .header-auth-btn:hover {
-  background: color-mix(in srgb, var(--text) 7%, transparent);
-  transform: none;
-  box-shadow: none;
-}
-
-/* the monogram the design draws: a bordered square, not a filled disc */
-.app-header .header-auth-avatar,
-.app-header .header-auth-btn.is-compact .header-auth-avatar {
-  width: 22px;
-  height: 22px;
-  border-radius: 0;
-  border: 1px solid var(--accent);
-  background: transparent;
-  color: var(--accent);
-  font-family: var(--font-heading);
-  font-weight: 600;
-  font-size: 11px;
-  letter-spacing: 0.04em;
-  box-shadow: none;
-}
-
-.app-header .header-auth-label {
-  font-family: var(--font-heading);
-  font-weight: 600;
-  font-size: 12.5px;
-  letter-spacing: 0.02em;
-  color: var(--text);
-}
-
-.app-header .header-auth-meta {
-  font-family: var(--font-heading);
-  font-weight: 600;
-  font-size: 9.5px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--ind-ink-55);
-}
-
-.app-header .header-auth-status-dot {
-  border-radius: 0;
-  box-shadow: none;
-}
-
-/* — the discipline filter: the right-hand cells of the account plate — */
+/* Header discipline filter. */
 .app-header .header-discipline-switcher {
   display: flex;
   align-items: stretch;
@@ -3214,7 +3128,6 @@ body.scratchpad-open .cmd-dock {
   margin-top: 0;
   padding: 0;
   border: 0;
-  border-left: 1px solid var(--ind-line);
   border-radius: 0;
   background: transparent;
   box-shadow: none;
@@ -3421,42 +3334,6 @@ body.scratchpad-open .cmd-dock {
   border-radius: 6px;
   font: 500 12px/1.4 var(--font-main);
 }
-.app-header .header-auth-dropdown {
-  align-items: center;
-  gap: 10px;
-  border: 0;
-  overflow: visible;
-}
-.app-header .header-auth-btn,
-.app-header .header-auth-btn.is-compact {
-  width: auto;
-  height: 36px;
-  min-width: 36px;
-  padding: 2px;
-  border: 0;
-  border-radius: 18px;
-  background: transparent;
-  box-shadow: none;
-}
-.app-header .header-auth-avatar,
-.app-header .header-auth-btn.is-compact .header-auth-avatar {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  border: 1px solid var(--ind-line);
-  background: var(--bg-secondary);
-  color: var(--text);
-  font: 500 11px/1 var(--font-main);
-  letter-spacing: 0;
-}
-.app-header .header-auth-label { font: 500 12px/1.4 var(--font-main); }
-.app-header .header-auth-meta {
-  font: 400 10px/1.4 var(--font-main);
-  letter-spacing: 0;
-  text-transform: none;
-  color: var(--header-muted);
-}
-.app-header .header-auth-status-dot { border-radius: 50%; }
 .app-header .header-discipline-switcher {
   padding: 3px;
   gap: 2px;
@@ -3505,8 +3382,6 @@ body.scratchpad-open .cmd-dock {
   .app-header .icon-btn,
   .app-header .icon-btn.mini,
   .app-header .header-version-corner .icon-btn.mini,
-  .app-header .header-auth-btn,
-  .app-header .header-auth-btn.is-compact,
   .app-header .header-discipline-toggle { min-width: 44px; min-height: 44px; }
 }
 

@@ -672,7 +672,7 @@ function installModernWorkspaceDialogs() {
   const pageTitles = new Map([
     ["general", "General"],
     ["tools", "Tools"],
-    ["account", "Account & Sync"],
+    ["account", "Account & AI"],
     ["timesheets", "Timesheets"],
     ["maintenance", "Maintenance"],
   ]);

@@ -26,7 +26,7 @@ function extract(name) {
     const names = ['el', 'createIcon', 'val', 'normalizePinnedProjectOrder', 'normalizePinnedDeliverableOrder',
       'isDeliverablePinned', 'createWorkItemPinButton', 'addDeliverableCard', 'refreshModalDeliverableSummary',
       'toggleModalDeliverableCard', 'buildStatusPicker', 'readStatusPickerFrom', 'getModalDeliverableTaskItems',
-      'getModalDeliverableNoteItems', 'addRefRowFrom', 'readForm', 'fillForm', 'onSaveProject', 'closeDlg'];
+      'getEffectiveDueStr', 'getLegacyDueDates', 'getModalDeliverableNoteItems', 'addRefRowFrom', 'readForm', 'fillForm', 'onSaveProject', 'closeDlg'];
     await page.addScriptTag({ content: `
       ${source.match(/^const PIN_ICON_PATH =[\s\S]*?;/m)[0]}
       ${source.match(/^const STATUS_CANON =[\s\S]*?;/m)[0]}
@@ -55,11 +55,9 @@ function extract(name) {
       const renderModalDeliverableTaskList = () => {};
       const getActiveDiscipline = () => 'Electrical';
       const parseDueStr = value => value ? new Date(value) : null;
-      const getHardDueStr = deliverable => deliverable.hardDue || '';
       const getActiveDueField = deliverable => deliverable.hardDue ? 'hardDue' : deliverable.due ? 'due' : '';
       const getDueBadgeStateClass = () => 'upcoming';
-      const describeDeliverableDue = () => 'Hard due date';
-      const createDueKindTag = () => el('span', { textContent: 'HARD ' });
+      const describeDeliverableDue = () => 'Due date';
       const humanDate = value => value;
       const compareDeliverablesByDueDesc = () => 0;
       const isFinished = deliverable => (deliverable.statuses || []).includes('Complete');
@@ -93,6 +91,8 @@ function extract(name) {
 
     // Pinning an existing unpinned deliverable stays in the draft until Save Changes.
     await page.evaluate(deliverables => openPinTestProject(deliverables), [fixture(false)]);
+    assert.equal(await card.locator('.d-due').inputValue(), '10/07/2026');
+    assert.equal(await card.locator('.d-hard-due').count(), 0);
     assert.equal(await pin.getAttribute('aria-pressed'), 'false');
     await pin.click();
     assert.equal(await pin.textContent(), 'Unpin');
@@ -113,6 +113,9 @@ function extract(name) {
     assert.equal(await card.getAttribute('data-pinned-order'), '');
     await page.locator('#btnSaveProject').click();
     const unpinned = await page.evaluate(() => savedProjects.at(-1)[0].deliverables[0]);
+    assert.equal(unpinned.due, '10/07/2026');
+    assert.equal(unpinned.hardDue, undefined);
+    assert.deepEqual(unpinned.legacyDueDates, { due: '', hardDue: '10/07/2026' });
     assert.equal(unpinned.pinned, false);
     assert.equal(unpinned.pinnedOrder, null);
     assert.equal(unpinned.tasks[0].text, 'Existing task');

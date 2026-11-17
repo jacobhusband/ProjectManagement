@@ -12,6 +12,8 @@ const extract = name => {
   return match[0];
 };
 const block = source.slice(source.indexOf('let currentOnboardingStep = 1;'), source.indexOf('function showAppLoader()'));
+const pluginStart = source.indexOf('// ===================== AUTOCAD PLUGIN SETUP PROMPT');
+const pluginBlock = source.slice(pluginStart, source.indexOf('// =====================', pluginStart + 10));
 
 (async () => {
   const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined });
@@ -29,13 +31,19 @@ const block = source.slice(source.indexOf('let currentOnboardingStep = 1;'), sou
         let userSettings = { userName: '', discipline: ['Electrical'], activeDiscipline: 'Electrical',
           apiKey: '', onboardingComplete: false, showSetupHelp: true, ...${JSON.stringify(settings)} };
         let db = [], globalPages = [], timesheetDb = { weeks: {} }, checklistsDb = { checklists: [] },
-          googleAuthState = { signedIn: false }, projectDataLoadError = '', currentTimesheetWeek = new Date();
+          projectDataLoadError = '', currentTimesheetWeek = new Date();
         let saves = [], keyTests = [], renders = [], toasts = [], failSave = false, deferSave = false, releaseSave;
         const toast = message => toasts.push(message);
         const val = id => document.getElementById(id).value;
-        const maybeShowPluginSetupBanner = async () => {};
+        let pluginBundles = [{ bundle_name: 'ElectricalCommands.bundle', state: 'not_installed', asset: { name: 'ACIES.zip' } }],
+          autocadVersions = [{ year: 2026 }], failPluginList = false, installFailure = null, installs = [],
+          deferInstall = false, releaseInstall, commandDialogs = 0;
+        const fetchBundleStatuses = async () => failPluginList ? null : pluginBundles;
+        const createActivityId = () => 'plugin-test';
+        const beginActivity = () => 'plugin-test', updateActivity = () => {}, completeActivity = () => {}, failActivity = () => {};
+        const ensureBundlesRendered = async () => {};
+        const openPluginCommandsDialog = async () => { commandDialogs++; };
         const refreshActiveDisciplineDependentUi = () => renders.push('discipline');
-        const renderGoogleAuthUi = () => renders.push('account');
         const renderGlobalPagesView = () => renders.push('pages');
         const renderChecklistTabs = () => renders.push('checklistTabs');
         const renderChecklistsView = () => renders.push('checklists');
@@ -45,6 +53,14 @@ const block = source.slice(source.indexOf('let currentOnboardingStep = 1;'), sou
         const updateTimesheetsDuplicateIndicator = () => renders.push('timesheetIndicator');
         const getWeekEntries = () => [], formatWeekKey = () => '';
         window.pywebview = { api: {
+          get_installed_autocad_versions: async () => ({ status: 'success', versions: autocadVersions }),
+          install_single_bundle: async asset => {
+            installs.push(asset.name);
+            if (deferInstall) await new Promise(resolve => releaseInstall = resolve);
+            if (installFailure) return installFailure;
+            pluginBundles.find(bundle => bundle.asset?.name === asset.name).state = 'installed';
+            return { status: 'success' };
+          },
           save_user_settings: async settings => {
             saves.push(JSON.parse(JSON.stringify(settings)));
             if (deferSave) await new Promise(resolve => releaseSave = resolve);
@@ -57,9 +73,10 @@ const block = source.slice(source.indexOf('let currentOnboardingStep = 1;'), sou
           }
         } };
         ${['normalizeDisciplineList', 'normalizeConfiguredDisciplineList', 'closeDlg', 'persistUserSettingsLocally', 'hideSetupHelpBanner',
-          'startSetupHelp', 'getDeclarativeClickAction', 'handleDeclarativeClick'].map(extract).join('\n')}
+          'startSetupHelp', 'getDeclarativeClickAction', 'handleDeclarativeClick', 'normalizeBundleCoreName'].map(extract).join('\n')}
         const normalizeWorkroomCadDiscipline = (value, fallback) => ['Electrical', 'Mechanical', 'Plumbing'].includes(value) ? value : fallback;
         ${block}
+        ${pluginBlock}
         document.addEventListener('click', handleDeclarativeClick, true);
         hideMainApp(); showOnboardingModal();
       ` });
@@ -67,12 +84,19 @@ const block = source.slice(source.indexOf('let currentOnboardingStep = 1;'), sou
     }
     const next = () => page.locator('#onboardingNextBtn').click();
     const skip = () => page.locator('#onboardingDlg [data-click-action="skipOnboarding"]');
-    async function toAi(discipline = 'Mechanical') {
+    async function toPlugins(discipline = 'Mechanical') {
       await next();
       await page.locator('#onboarding_userName').fill('Test Engineer');
       await next();
       await page.locator('input[name="onboarding_discipline_checkbox"][value="Electrical"]').uncheck();
       await page.locator(`input[name="onboarding_discipline_checkbox"][value="${discipline}"]`).check();
+      await next();
+      assert.equal(await page.locator('#onboardingStep4').isVisible(), true);
+      assert.match(await page.locator('#onboardingStep4').textContent(), /Recommended for AutoCAD users/);
+      assert.match(await page.locator('#onboardingStep4').textContent(), /Tools → AutoCAD Plugins/);
+    }
+    async function toAi(discipline = 'Mechanical') {
+      await toPlugins(discipline);
       await next();
     }
 
@@ -180,5 +204,97 @@ const block = source.slice(source.indexOf('let currentOnboardingStep = 1;'), sou
     assert.equal(await page.evaluate(() => userSettings.onboardingComplete), true);
     assert.deepEqual(errors, []);
     console.log('PASS: save failures retain setup; retries and Escape cannot start overlapping saves.');
+
+    const install = () => page.locator('#onboardingInstallPluginsBtn');
+    const pluginStatus = () => page.locator('#onboardingPluginStatus').textContent();
+    await boot();
+    await toPlugins();
+    await page.evaluate(() => deferInstall = true);
+    await install().click();
+    await page.waitForFunction(() => installs.length === 1);
+    assert.match(await pluginStatus(), /Installing ACIES Commands/);
+    assert.equal(await install().isDisabled(), true);
+    assert.equal(await page.locator('#onboardingNextBtn').isDisabled(), true);
+    assert.equal(await skip().isDisabled(), true);
+    await page.keyboard.press('Escape');
+    await page.evaluate(() => { void installOnboardingPlugins(); releaseInstall(); });
+    await page.waitForFunction(() => !onboardingBusy);
+    assert.deepEqual(await page.evaluate(() => installs), ['ACIES.zip']);
+    assert.match(await pluginStatus(), /Installed 1 plugin/);
+    assert.equal(await install().textContent(), 'Plugins installed');
+    assert.equal(await install().isDisabled(), true);
+    assert.equal(await page.evaluate(() => commandDialogs), 0, 'command settings do not cover onboarding');
+    assert.equal(await page.evaluate(() => saves.length), 0, 'installation keeps onboarding open');
+    await next();
+    await page.locator('#onboardingPrevBtn').click();
+    assert.equal(await install().isDisabled(), true, 'navigation does not enable reinstall');
+    await next();
+    await next();
+    await page.waitForFunction(() => !document.getElementById('onboardingDlg').open);
+    assert.equal(await page.locator('#pluginSetupBanner').isVisible(), false);
+    console.log('PASS: installs from onboarding with inline progress, prevents duplicate installs and permits completing setup.');
+
+    await boot();
+    await toPlugins();
+    await page.evaluate(() => installFailure = { status: 'error', code: 'autocad_running', message: 'Close AutoCAD and try again.' });
+    await install().click();
+    await page.waitForFunction(() => !onboardingBusy);
+    assert.match(await pluginStatus(), /Close AutoCAD/);
+    assert.equal(await install().isEnabled(), true);
+    await page.evaluate(() => installFailure = null);
+    await install().click();
+    await page.waitForFunction(() => !onboardingBusy);
+    assert.match(await pluginStatus(), /Installed 1 plugin/);
+    console.log('PASS: AutoCAD running errors stay in onboarding and allow retry.');
+
+    await boot();
+    await toPlugins();
+    await page.evaluate(() => {
+      pluginBundles.push({ bundle_name: 'ElectricalCommands.PlotCommands.bundle', state: 'not_installed', asset: { name: 'Plot.zip' } });
+      const originalInstall = window.pywebview.api.install_single_bundle;
+      window.pywebview.api.install_single_bundle = async asset => {
+        if (asset.name === 'Plot.zip') {
+          installs.push(asset.name);
+          return { status: 'error', message: 'Download failed.' };
+        }
+        return originalInstall(asset);
+      };
+      window.restorePluginInstall = () => { window.pywebview.api.install_single_bundle = originalInstall; };
+    });
+    await install().click();
+    await page.waitForFunction(() => !onboardingBusy);
+    assert.match(await pluginStatus(), /Installed 1 plugin.*1 plugin failed.*Download failed/);
+    assert.equal(await install().isEnabled(), true);
+    await page.evaluate(() => window.restorePluginInstall());
+    await install().click();
+    await page.waitForFunction(() => !onboardingBusy);
+    assert.deepEqual(await page.evaluate(() => installs), ['ACIES.zip', 'Plot.zip', 'Plot.zip']);
+    assert.equal(await install().isDisabled(), true);
+    console.log('PASS: partial installs show failures and retry only the missing plugins.');
+
+    for (const scenario of ['no-autocad', 'offline', 'already-installed', 'no-download']) {
+      await boot();
+      await toPlugins();
+      await page.evaluate(scenario => {
+        if (scenario === 'no-autocad') autocadVersions = [];
+        if (scenario === 'offline') failPluginList = true;
+        if (scenario === 'already-installed') pluginBundles[0].state = 'installed';
+        if (scenario === 'no-download') pluginBundles[0].asset = null;
+      }, scenario);
+      await install().click();
+      await page.waitForFunction(() => !onboardingBusy);
+      assert.match(await pluginStatus(), {
+        'no-autocad': /AutoCAD was not detected/,
+        offline: /Could not install plugins/,
+        'already-installed': /already installed/,
+        'no-download': /No plugin downloads/,
+      }[scenario]);
+      assert.equal(await page.evaluate(() => installs.length), 0);
+      assert.equal(await page.locator('#onboardingNextBtn').isEnabled(), true);
+      await next();
+      assert.equal(await page.locator('#onboardingStep5').isVisible(), true);
+    }
+    assert.deepEqual(errors, []);
+    console.log('PASS: missing AutoCAD, unavailable downloads and existing installs do not block continuing setup.');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

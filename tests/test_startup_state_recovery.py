@@ -210,7 +210,7 @@ class StartupStateRecoveryTests(unittest.TestCase):
                 repaired["autocadPath"],
             )
             self.assertEqual("JH", repaired["defaultPmInitials"])
-            self.assertEqual({"email": "existing@example.com"}, repaired["googleAuth"])
+            self.assertNotIn("googleAuth", repaired)
             self.assertEqual([{"mark": "A1"}], repaired["lightingTemplates"])
             self.assertFalse(repaired["showSetupHelp"])
 
@@ -224,23 +224,26 @@ class StartupStateRecoveryTests(unittest.TestCase):
 
         self.assertIn("function hasExistingUserData() {", script)
         self.assertIn("if (Array.isArray(db) && db.length > 0) return true;", script)
-        self.assertIn("if (googleAuthState.signedIn) return true;", script)
+        self.assertNotIn("googleAuthState", script)
         self.assertNotIn("microsoftAuthState.signedIn", script)
         self.assertIn("return !hasExistingUserData();", script)
 
-    def test_get_user_settings_strips_legacy_microsoft_auth_state(self):
+    def test_get_user_settings_strips_legacy_account_auth_state(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings_path = Path(temp_dir) / "settings.json"
             payload = main_module.build_default_user_settings()
             payload["microsoftAuth"] = {"accessToken": "stale-token"}
+            payload["googleAuth"] = {"accessToken": "old-google-token"}
             settings_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
             with patch.object(main_module, "SETTINGS_FILE", str(settings_path)):
                 sanitized = self.api.get_user_settings()
 
             self.assertNotIn("microsoftAuth", sanitized)
+            self.assertNotIn("googleAuth", sanitized)
             saved = json.loads(settings_path.read_text(encoding="utf-8"))
             self.assertNotIn("microsoftAuth", saved)
+            self.assertNotIn("googleAuth", saved)
 
 
 if __name__ == "__main__":

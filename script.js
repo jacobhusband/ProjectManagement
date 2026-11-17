@@ -7460,6 +7460,7 @@ function getDeclarativeClickAction(name) {
     dismissSetupHelpLater: () => dismissSetupHelp("later"),
     dismissSetupHelpNever: () => dismissSetupHelp("never"),
     installFirstRunPlugins: () => installFirstRunPlugins(),
+    installOnboardingPlugins: () => installOnboardingPlugins(),
     nextOnboardingStep: () => nextOnboardingStep(),
     onDeleteActiveProjectFromPageView: () => onDeleteActiveProjectFromPageView(),
     onDeleteCurrentProject: () => onDeleteCurrentProject(),
@@ -7468,6 +7469,9 @@ function getDeclarativeClickAction(name) {
     showApiKeyHelp: () => showApiKeyHelp(),
     skipOnboarding: () => skipOnboarding(),
     startSetupHelp: () => startSetupHelp(),
+    startProjectTutorial: () => startProjectTutorial(),
+    stopProjectTutorial: () => stopProjectTutorial(),
+    nextProjectTutorial: () => nextProjectTutorial(),
     testOnboardingApiKey: () => testOnboardingApiKey(),
   };
   return Object.hasOwn(actions, String(name)) ? actions[name] : null;
@@ -7514,7 +7518,7 @@ const debounce = (fn, delay) => {
     if (timeoutId === undefined) return;
     clearTimeout(timeoutId);
     timeoutId = undefined;
-    fn(...(lastArgs || []));
+    return fn(...(lastArgs || []));
   };
   debounced.cancel = () => {
     clearTimeout(timeoutId);
@@ -7559,21 +7563,13 @@ function dueState(dueStr) {
   return "ok";
 }
 
-// A deliverable stores two dates but shows one. `due` is the soft due date (an
-// earlier target that can slip) and `hardDue` is the hard due date (must finish).
-// The soft date shows until it passes, then the hard date takes over. A soft date
-// on or after the hard date adds nothing, so the hard date wins outright.
-// Returns "due" | "hardDue" | "".
+// Legacy records prefer their firm deadline; normalized records have only `due`.
+// The selected date is stable and never changes just because a day passes.
 function getActiveDueField(deliverable, now = new Date()) {
-  const soft = String(deliverable?.due || "").trim();
-  const hard = getHardDueStr(deliverable);
-  if (!soft) return hard ? "hardDue" : "";
-  if (!hard) return "due";
-  const hardDate = parseDueStr(hard);
-  if (!hardDate) return "due";
-  const softDate = parseDueStr(soft);
-  if (!softDate || !isEarlierDay(softDate, hardDate)) return "hardDue";
-  return isEarlierDay(softDate, now) ? "hardDue" : "due";
+  const due = String(deliverable?.due || "").trim();
+  const hard = String(deliverable?.hardDue || "").trim();
+  if (hard && (parseDueStr(hard) || !parseDueStr(due))) return "hardDue";
+  return due ? "due" : "";
 }
 
 function isEarlierDay(a, b) {
@@ -7584,78 +7580,39 @@ function isEarlierDay(a, b) {
   return left < right;
 }
 
-// The date that drives scheduling — the same single date every surface shows — so
-// sorting, filters and the week view follow the soft → hard hand-off.
+// One date drives every schedule, filter, export and editable badge.
 function getEffectiveDueStr(deliverable, now = new Date()) {
   const field = getActiveDueField(deliverable, now);
   return field ? String(deliverable[field] || "").trim() : "";
 }
 
-function getHardDueStr(deliverable) {
-  return String(deliverable?.hardDue || "").trim();
+// Preserve the original dates once when migrating an older record.
+function getLegacyDueDates(deliverable) {
+  if (deliverable?.legacyDueDates) return { ...deliverable.legacyDueDates };
+  if (!String(deliverable?.hardDue || "").trim()) return null;
+  return {
+    due: String(deliverable?.due || "").trim(),
+    hardDue: String(deliverable.hardDue).trim(),
+  };
 }
 
-const DUE_FIELD_LABELS = Object.freeze({ due: "Soft", hardDue: "Hard" });
-
-// Tooltip copy for the single shown date, naming the date that is hidden.
 function describeDeliverableDue(deliverable, now = new Date()) {
-  const field = getActiveDueField(deliverable, now);
-  if (!field) return "No due date set.";
-  const show = (value) => humanDate(value) || value;
-  const soft = String(deliverable?.due || "").trim();
-  const hard = getHardDueStr(deliverable);
-  if (field === "due") {
-    return hard
-      ? `Soft due date ${show(soft)}. Hard due date ${show(hard)} shows once it passes.`
-      : `Soft due date ${show(soft)}.`;
-  }
-  if (!soft) return `Hard due date ${show(hard)}.`;
-  const softDate = parseDueStr(soft);
-  const hardDate = parseDueStr(hard);
-  return softDate && hardDate && isEarlierDay(softDate, hardDate)
-    ? `Hard due date ${show(hard)}. Soft due date ${show(soft)} has passed.`
-    : `Hard due date ${show(hard)}. Soft due date ${show(soft)} is not before it, so it is ignored.`;
+  const due = getEffectiveDueStr(deliverable, now);
+  return due ? `Due date ${humanDate(due) || due}.` : "No due date set.";
 }
 
-// Writes one of the two dates, keeping the soft date before the hard date. A soft
-// date on or after the hard date is refused; a hard date that lands on or before
-// the soft date clears the soft date. Returns false when nothing was written.
 function applyDeliverableDueDate(deliverable, field, value) {
   const next = String(value || "").trim();
-  const nextDate = parseDueStr(next);
-  if (field === "hardDue") {
-    deliverable.hardDue = next;
-    const softDate = parseDueStr(String(deliverable.due || "").trim());
-    if (nextDate && softDate && !isEarlierDay(softDate, nextDate)) {
-      deliverable.due = "";
-      toast("Soft due date cleared — it was not before the new hard due date.");
-    }
-    return true;
-  }
-  const hard = getHardDueStr(deliverable);
-  const hardDate = parseDueStr(hard);
-  if (nextDate && hardDate && !isEarlierDay(nextDate, hardDate)) {
-    toast(`The soft due date must be before the hard due date (${humanDate(hard)}).`);
-    return false;
-  }
+  if (next && !parseDueStr(next)) return false;
+  const legacy = getLegacyDueDates(deliverable);
+  if (legacy) deliverable.legacyDueDates = legacy;
   deliverable.due = next;
+  delete deliverable.hardDue;
   return true;
 }
 
-// "critical" | "overdue" | "dueSoon" | "ok" — a missed hard due date outranks a
-// missed soft-only date.
 function deliverableDueState(deliverable) {
-  const hard = parseDueStr(getHardDueStr(deliverable));
-  if (hard && !isFinished(deliverable)) {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    if (hard < today) return "critical";
-  }
   return dueState(getEffectiveDueStr(deliverable));
-}
-
-function isDeliverableHardDueMissed(deliverable) {
-  return deliverableDueState(deliverable) === "critical";
 }
 
 function humanDate(s) {
@@ -7762,43 +7719,12 @@ function validateDueDateInput(inputElement) {
   return true;
 }
 
-// The soft date only means something while it comes before the hard date, so a
-// soft date on or after the hard date blocks the save.
-function validateDeliverableDateOrder(card) {
-  if (!card) return true;
-  const dueInput = card.querySelector('.d-due');
-  const hardDueInput = card.querySelector('.d-hard-due');
-  if (!dueInput || !hardDueInput) return true;
-
-  const due = parseDueStr(dueInput.value.trim());
-  const hardDue = parseDueStr(hardDueInput.value.trim());
-  if (!due || !hardDue || isEarlierDay(due, hardDue)) return true;
-
-  // Leave format errors from validateDueDateInput in place.
-  if (dueInput.classList.contains('input-error')) return false;
-
-  dueInput.classList.remove('input-warning');
-  dueInput.classList.add('input-error');
-  const validationMsg = dueInput.parentElement.querySelector('.date-validation-msg');
-  if (validationMsg) {
-    validationMsg.textContent = 'Soft due date must be before the hard due date';
-    validationMsg.className = 'date-validation-msg error';
-  }
-  return false;
-}
-
 function validateAllDueDates() {
-  const inputs = document.querySelectorAll('.d-due, .d-hard-due');
+  const inputs = document.querySelectorAll('.d-due');
   let allValid = true;
 
   inputs.forEach(input => {
     if (!validateDueDateInput(input)) {
-      allValid = false;
-    }
-  });
-
-  document.querySelectorAll('.deliverable-card').forEach(card => {
-    if (!validateDeliverableDateOrder(card)) {
       allValid = false;
     }
   });
@@ -8014,8 +7940,7 @@ function showCalendarForInput(inputElement, onSelectCallback) {
   }, 100);
 }
 
-// Opens on the date the deliverable is showing; the Soft / Hard switch picks which
-// of its two dates the next click (or Clear) writes.
+// Opens a calendar to edit the single due date.
 function showCalendarForDeliverableBadge(
   anchorElement,
   deliverable,
@@ -8028,7 +7953,7 @@ function showCalendarForDeliverableBadge(
   const existingCalendar = document.getElementById('inlineCalendarPicker');
   if (existingCalendar) existingCalendar.remove();
 
-  let activeField = field || getActiveDueField(deliverable) || "due";
+  const activeField = "due";
 
   // Always open to the current month/day.
   const openDate = new Date();
@@ -8056,46 +7981,14 @@ function showCalendarForDeliverableBadge(
     }
   );
 
-  const switcher = el('div', {
-    className: 'calendar-due-kind-switch',
-    role: 'group',
-    'aria-label': 'Which due date to set',
-  });
   const clearBtn = el('button', {
     className: 'btn ghost',
     textContent: 'Clear',
     type: 'button',
+    title: 'Clear the due date',
+    hidden: !getEffectiveDueStr(deliverable),
   });
   clearBtn.onclick = () => commit("");
-  const syncSwitch = () => {
-    switcher.querySelectorAll('button').forEach((button) => {
-      const isActive = button.dataset.field === activeField;
-      button.classList.toggle('is-active', isActive);
-      button.setAttribute('aria-pressed', String(isActive));
-    });
-    const current = String(deliverable[activeField] || "").trim();
-    clearBtn.hidden = !current;
-    clearBtn.title = `Clear the ${DUE_FIELD_LABELS[activeField].toLowerCase()} due date`;
-  };
-  ["due", "hardDue"].forEach((key) => {
-    const value = String(deliverable[key] || "").trim();
-    const button = el('button', {
-      type: 'button',
-      className: `calendar-due-kind calendar-due-kind--${key === "hardDue" ? "hard" : "soft"}`,
-    });
-    button.dataset.field = key;
-    button.append(
-      el('span', { className: 'calendar-due-kind__label', textContent: `${DUE_FIELD_LABELS[key]} due` }),
-      el('span', { className: 'calendar-due-kind__value', textContent: value ? humanDate(value) || value : 'Not set' })
-    );
-    button.onclick = () => {
-      activeField = key;
-      syncSwitch();
-    };
-    switcher.appendChild(button);
-  });
-  syncSwitch();
-  calendar.prepend(switcher);
   calendar.querySelector('.calendar-footer')?.prepend(clearBtn);
 
   calendarContainer.appendChild(calendar);
@@ -12062,17 +11955,6 @@ let userSettings = {
   workflowCadDefaults: { ...DEFAULT_WORKFLOW_CAD_DEFAULTS },
   workroomAutoSelectCadFiles: true,
   enableUnderConstructionTools: false,
-  googleAuth: null,
-};
-const DEFAULT_GOOGLE_AUTH_STATE = {
-  signedIn: false,
-  provider: "google",
-  email: "",
-  displayName: "",
-  avatarUrl: "",
-  signedInAt: "",
-  expiresAt: "",
-  hasRefreshToken: false,
 };
 const DEFAULT_OUTLOOK_SCAN_CAPABILITY = {
   loaded: false,
@@ -12244,8 +12126,6 @@ const DEFAULT_OUTLOOK_SCAN_STATE = {
   reportOpen: false,
   reportStats: null,
 };
-let googleAuthState = { ...DEFAULT_GOOGLE_AUTH_STATE };
-let googleAuthBusy = false;
 let outlookScanCapabilityState = { ...DEFAULT_OUTLOOK_SCAN_CAPABILITY };
 let outlookScanState = { ...DEFAULT_OUTLOOK_SCAN_STATE };
 let separateDeliverableCompletionGroups = true;
@@ -12375,7 +12255,6 @@ let title24ScopeOptionsDataset = null;
 let title24ScopeOptionsLoadError = "";
 let title24ScopeOptionsLoadingPromise = null;
 let openProjectsFilterDropdown = null;
-let headerAccountPopoverOpen = false;
 let aiNoMatchState = {
   rawAiData: null,
   aiProject: null,
@@ -12454,100 +12333,6 @@ function isLikelyLocalPath(value) {
 function isLocalOnlyLink(link) {
   const raw = String(link?.raw || link?.url || link || "").trim();
   return isLikelyLocalPath(raw);
-}
-
-function normalizeGoogleAuthState(raw = {}) {
-  return {
-    ...DEFAULT_GOOGLE_AUTH_STATE,
-    ...(raw && typeof raw === "object" ? raw : {}),
-    signedIn: !!raw?.signedIn,
-    provider: String(raw?.provider || "google").trim() || "google",
-    email: String(raw?.email || "").trim(),
-    displayName: String(raw?.displayName || "").trim(),
-    avatarUrl: String(raw?.avatarUrl || "").trim(),
-    signedInAt: String(raw?.signedInAt || "").trim(),
-    expiresAt: String(raw?.expiresAt || "").trim(),
-    hasRefreshToken: !!raw?.hasRefreshToken,
-  };
-}
-
-function getGoogleAuthDisplayName(state = googleAuthState) {
-  return state.displayName || state.email || "Google";
-}
-
-function getGoogleAuthInitials(state = googleAuthState) {
-  const displayName = String(state?.displayName || "").trim();
-  if (displayName) {
-    const initials = displayName
-      .split(/\s+/)
-      .filter(Boolean)
-      .slice(0, 2)
-      .map((token) => {
-        const match = token.match(/[A-Za-z0-9]/);
-        return match ? match[0].toUpperCase() : "";
-      })
-      .join("");
-    if (initials) return initials;
-  }
-
-  const emailLocal = String(state?.email || "")
-    .split("@")[0]
-    .trim();
-  const emailFallback = (emailLocal.match(/[A-Za-z0-9]/g) || [])
-    .slice(0, 2)
-    .join("")
-    .toUpperCase();
-  return emailFallback || "G";
-}
-
-function getGoogleAuthAvatarFallback(state = googleAuthState) {
-  return getGoogleAuthInitials(state);
-}
-
-function applyGoogleAuthAvatar(
-  element,
-  state = googleAuthState,
-  { forceInitials = false } = {}
-) {
-  if (!element) return;
-  const fallback = getGoogleAuthAvatarFallback(state);
-  element.textContent = fallback;
-  if (!forceInitials && state.avatarUrl) {
-    const safeUrl = state.avatarUrl.replace(/'/g, "%27");
-    element.style.backgroundImage = `url('${safeUrl}')`;
-    element.style.color = "transparent";
-  } else {
-    element.style.backgroundImage = "";
-    element.style.color = "";
-  }
-}
-
-function updateHeaderAccountPopoverVisibility() {
-  const dropdown = document.getElementById("headerAccountDropdown");
-  const popover = document.getElementById("headerAccountPopover");
-  const headerBtn = document.getElementById("headerGoogleAuthBtn");
-  const isOpen = googleAuthState.signedIn && !googleAuthBusy && headerAccountPopoverOpen;
-
-  headerAccountPopoverOpen = isOpen;
-  dropdown?.classList.toggle("open", isOpen);
-  if (popover) {
-    popover.hidden = !isOpen;
-  }
-  if (headerBtn) {
-    headerBtn.setAttribute("aria-expanded", String(isOpen));
-  }
-}
-
-function setHeaderAccountPopoverOpen(isOpen, { focusTrigger = false } = {}) {
-  headerAccountPopoverOpen = !!isOpen;
-  updateHeaderAccountPopoverVisibility();
-  if (focusTrigger) {
-    document.getElementById("headerGoogleAuthBtn")?.focus();
-  }
-}
-
-function toggleHeaderAccountPopover() {
-  setHeaderAccountPopoverOpen(!headerAccountPopoverOpen);
 }
 
 function renderHeaderDisciplineSwitcher() {
@@ -12650,257 +12435,6 @@ function initializeHeaderDisciplineSwitcher() {
   });
   switcher.addEventListener("keydown", handleHeaderDisciplineSwitcherKeydown);
   renderHeaderDisciplineSwitcher();
-}
-
-function renderGoogleAuthUi() {
-  const headerBtn = document.getElementById("headerGoogleAuthBtn");
-  const headerLabel = document.getElementById("headerGoogleAuthLabel");
-  const headerMeta = document.getElementById("headerGoogleAuthMeta");
-  const headerAvatar = document.getElementById("headerGoogleAuthAvatar");
-  const statusEl = document.getElementById("settings_googleAuthStatus");
-  const detailsEl = document.getElementById("settings_googleAuthDetails");
-  const settingsActionBtn = document.getElementById(
-    "settings_googleAuthActionBtn"
-  );
-  const signOutBtn = document.getElementById("googleSignOutBtn");
-  const headerPopoverName = document.getElementById("headerAccountPopoverName");
-  const headerPopoverEmail = document.getElementById("headerAccountPopoverEmail");
-  const headerPopoverAvatar = document.getElementById("headerAccountPopoverAvatar");
-  const headerPopoverSignOutBtn = document.getElementById(
-    "headerAccountSignOutBtn"
-  );
-  const accountName = document.getElementById("googleAccountName");
-  const accountEmail = document.getElementById("googleAccountEmail");
-  const accountAvatar = document.getElementById("googleAccountAvatar");
-  const displayName = getGoogleAuthDisplayName();
-  const isSignedIn = googleAuthState.signedIn;
-  const primaryLabel = googleAuthBusy
-    ? "Connecting..."
-    : isSignedIn
-      ? displayName
-      : "Sign in";
-  const secondaryLabel = googleAuthBusy
-    ? "Check your browser"
-    : isSignedIn
-      ? googleAuthState.email && googleAuthState.email !== displayName
-        ? googleAuthState.email
-        : "Signed in"
-      : "Google account";
-
-  if (headerBtn) {
-    headerBtn.disabled = googleAuthBusy;
-    headerBtn.dataset.signedIn = isSignedIn ? "true" : "false";
-    headerBtn.classList.toggle("is-compact", isSignedIn);
-    headerBtn.setAttribute(
-      "aria-label",
-      isSignedIn
-        ? `Open Google account menu for ${displayName}`
-        : "Sign in with Google"
-    );
-    if (isSignedIn) {
-      headerBtn.setAttribute("aria-haspopup", "dialog");
-      headerBtn.setAttribute("aria-controls", "headerAccountPopover");
-    } else {
-      headerBtn.removeAttribute("aria-haspopup");
-      headerBtn.removeAttribute("aria-controls");
-    }
-    headerBtn.title = googleAuthBusy
-      ? "Completing Google sign-in"
-      : isSignedIn
-        ? `Signed in as ${displayName}`
-        : "Sign in with Google";
-  }
-  if (headerLabel) {
-    headerLabel.textContent = primaryLabel;
-  }
-  if (headerMeta) {
-    headerMeta.textContent = secondaryLabel;
-  }
-  applyGoogleAuthAvatar(headerAvatar, googleAuthState, {
-    forceInitials: isSignedIn,
-  });
-  if (headerPopoverName) {
-    headerPopoverName.textContent = isSignedIn ? displayName : "Not signed in";
-  }
-  if (headerPopoverEmail) {
-    headerPopoverEmail.textContent = isSignedIn
-      ? googleAuthState.email || "Signed in with Google."
-      : "Sign in to connect your Google account.";
-  }
-  applyGoogleAuthAvatar(headerPopoverAvatar, googleAuthState);
-  if (headerPopoverSignOutBtn) {
-    headerPopoverSignOutBtn.disabled = googleAuthBusy || !isSignedIn;
-    headerPopoverSignOutBtn.textContent = googleAuthBusy
-      ? "Signing out..."
-      : "Sign out";
-  }
-
-  if (statusEl) {
-    statusEl.textContent = isSignedIn
-      ? `Signed in as ${displayName}`
-      : "Not signed in";
-  }
-  if (detailsEl) {
-    detailsEl.textContent = isSignedIn
-      ? googleAuthState.email || "Google account connected."
-      : "Sign in with Google. Configure GOOGLE_OAUTH_CLIENT_ID and, if your Google OAuth client requires it, GOOGLE_CLIENT_SECRET.";
-  }
-  if (settingsActionBtn) {
-    settingsActionBtn.disabled = googleAuthBusy;
-    settingsActionBtn.textContent = googleAuthBusy
-      ? "Working..."
-      : isSignedIn
-        ? "Account"
-        : "Sign in";
-  }
-  if (signOutBtn) {
-    signOutBtn.disabled = googleAuthBusy || !isSignedIn;
-    signOutBtn.style.display = isSignedIn ? "inline-flex" : "none";
-    signOutBtn.textContent = googleAuthBusy ? "Signing out..." : "Sign out";
-  }
-  if (accountName) {
-    accountName.textContent = isSignedIn
-      ? displayName
-      : "Not signed in";
-  }
-  if (accountEmail) {
-    accountEmail.textContent = isSignedIn
-      ? googleAuthState.email || "Signed in with Google."
-      : "Sign in to connect your Google account.";
-  }
-  applyGoogleAuthAvatar(accountAvatar, googleAuthState);
-  if (!isSignedIn || googleAuthBusy) {
-    headerAccountPopoverOpen = false;
-  }
-  updateHeaderAccountPopoverVisibility();
-  renderHeaderDisciplineSwitcher();
-}
-
-async function loadGoogleAuthState({ silent = false, refresh = true } = {}) {
-  if (!window.pywebview?.api?.get_google_auth_state) {
-    googleAuthState = normalizeGoogleAuthState();
-    renderGoogleAuthUi();
-    return googleAuthState;
-  }
-  try {
-    const response = await window.pywebview.api.get_google_auth_state(refresh);
-    if (response?.status !== "success") {
-      throw new Error(response?.message || "Failed to load Google sign-in state.");
-    }
-    googleAuthState = normalizeGoogleAuthState(response.auth);
-  } catch (e) {
-    console.warn("Failed to load Google auth state:", e);
-    googleAuthState = normalizeGoogleAuthState();
-    if (!silent) {
-      toast("Could not load Google sign-in state.");
-    }
-  }
-  renderGoogleAuthUi();
-  return googleAuthState;
-}
-
-// Renewing an expiring Google token is a network call, so it runs once the app is on
-// screen instead of holding up the first render. The stored record already says who
-// is signed in.
-async function refreshGoogleAuthStateInBackground() {
-  if (googleAuthBusy || !googleAuthState.signedIn) return;
-  await loadGoogleAuthState({ silent: true });
-  // The backend may have replaced the stored record, or cleared it after a revoked
-  // grant. Copy it over only this key so a later settings save does not write the old
-  // record back, without touching settings edited in the meantime.
-  try {
-    const stored = await window.pywebview.api.get_user_settings();
-    userSettings.googleAuth =
-      stored?.googleAuth && typeof stored.googleAuth === "object"
-        ? stored.googleAuth
-        : null;
-  } catch (e) {
-    console.warn("Could not re-read Google sign-in from settings:", e);
-  }
-}
-
-function openGoogleAccountDialog() {
-  const dialog = document.getElementById("googleAccountDlg");
-  setHeaderAccountPopoverOpen(false);
-  renderGoogleAuthUi();
-  showDialog(dialog);
-}
-
-function handleHeaderGoogleAuthAction() {
-  if (googleAuthBusy) return;
-  if (googleAuthState.signedIn) {
-    toggleHeaderAccountPopover();
-    return;
-  }
-  handleGoogleSignIn();
-}
-
-function handleGoogleAuthAction() {
-  if (googleAuthBusy) return;
-  if (googleAuthState.signedIn) {
-    openGoogleAccountDialog();
-    return;
-  }
-  handleGoogleSignIn();
-}
-
-async function handleGoogleSignIn() {
-  if (googleAuthBusy || !window.pywebview?.api?.sign_in_with_google) return;
-  googleAuthBusy = true;
-  renderGoogleAuthUi();
-  try {
-    const response = await window.pywebview.api.sign_in_with_google();
-    if (response?.status === "success") {
-      googleAuthState = normalizeGoogleAuthState(response.auth);
-      await loadUserSettings();
-      const verifiedAuthState = await loadGoogleAuthState({ silent: true });
-      if (!verifiedAuthState.signedIn) {
-        toast(
-          "Google sign-in completed in the browser, but the app could not confirm your signed-in state."
-        );
-        return;
-      }
-      googleAuthBusy = false;
-      renderGoogleAuthUi();
-      toast(`Signed in as ${getGoogleAuthDisplayName()}.`);
-      return;
-    }
-    if (response?.status === "cancelled") {
-      toast(response.message || "Google sign-in was cancelled.");
-      return;
-    }
-    throw new Error(response?.message || "Google sign-in failed.");
-  } catch (e) {
-    console.warn("Google sign-in failed:", e);
-    toast(e?.message || "Google sign-in failed.");
-  } finally {
-    googleAuthBusy = false;
-    renderGoogleAuthUi();
-  }
-}
-
-async function handleGoogleSignOut() {
-  if (googleAuthBusy || !window.pywebview?.api?.sign_out_google) return;
-  setHeaderAccountPopoverOpen(false);
-  googleAuthBusy = true;
-  renderGoogleAuthUi();
-  try {
-    const response = await window.pywebview.api.sign_out_google();
-    if (response?.status !== "success") {
-      throw new Error(response?.message || "Google sign-out failed.");
-    }
-    closeDlg("googleAccountDlg");
-    await loadUserSettings();
-    googleAuthState = normalizeGoogleAuthState(response.auth);
-    renderGoogleAuthUi();
-    toast("Signed out of Google.");
-  } catch (e) {
-    console.warn("Google sign-out failed:", e);
-    toast(e?.message || "Google sign-out failed.");
-  } finally {
-    googleAuthBusy = false;
-    renderGoogleAuthUi();
-  }
 }
 
 function normalizeOutlookScanCapability(raw = {}) {
@@ -13151,7 +12685,6 @@ function buildOutlookScanProjectContext(scanDate = "") {
         .map((deliverable) => ({
           name: String(deliverable?.name || "").trim(),
           due: String(deliverable?.due || "").trim(),
-          hardDue: getHardDueStr(deliverable),
           status: String(deliverable?.status || "").trim(),
         }))
         .sort((left, right) => {
@@ -14102,10 +13635,7 @@ async function loadUserSettings() {
   try {
     const storedSettings = await window.pywebview.api.get_user_settings();
     if (storedSettings) userSettings = { ...userSettings, ...storedSettings };
-    userSettings.googleAuth =
-      userSettings.googleAuth && typeof userSettings.googleAuth === "object"
-        ? userSettings.googleAuth
-        : null;
+    delete userSettings.googleAuth;
     delete userSettings.microsoftAuth;
     userSettings.discipline = normalizeConfiguredDisciplineList(userSettings.discipline);
     syncActiveDisciplineWithConfigured();
@@ -14164,7 +13694,6 @@ async function loadUserSettings() {
     syncProjectViewPreferencesFromSettings();
     syncUnderConstructionToolsAvailability();
     refreshActiveDisciplineDependentUi();
-    renderGoogleAuthUi();
   } catch (e) {
     console.error("Failed to load settings:", e);
   }
@@ -14370,7 +13899,6 @@ async function populateSettingsModal() {
   syncWorkroomCadRoutingInputs();
   syncUnderConstructionToolsInputs();
   syncUnderConstructionToolsAvailability();
-  renderGoogleAuthUi();
 
   await refreshTimesheetsInfo();
 
@@ -14508,6 +14036,107 @@ async function saveUserSettings() {
   await persistUserSettingsLocally();
 }
 const debouncedSaveUserSettings = debounce(saveUserSettings, 500);
+
+let dataTransferBusy = false;
+let dataTransferWritesPaused = false;
+let dataTransferReloadPending = false;
+let dataTransferWriteFailed = false;
+const dataTransferPendingWrites = new Set();
+
+function initializeDataTransferWriteTracking() {
+  const api = window.pywebview.api;
+  // Drain in-flight saves before taking a snapshot. Pause late autosaves while
+  // importing so an old in-memory record cannot overwrite the restored data.
+  Object.keys(api).forEach((name) => {
+    if (!/^(save_|delete_|update_|import_|persist_|set_)/.test(name) || name === "import_app_data") return;
+    const original = api[name];
+    if (typeof original !== "function") return;
+    api[name] = (...args) => {
+      if (dataTransferWritesPaused) {
+        return Promise.resolve({ status: "error", message: "Saves are paused during data transfer." });
+      }
+      const pending = Promise.resolve().then(() => original.apply(api, args));
+      dataTransferPendingWrites.add(pending);
+      const finish = () => dataTransferPendingWrites.delete(pending);
+      return pending.then((result) => {
+        finish();
+        if (dataTransferBusy && result?.status === "error") dataTransferWriteFailed = true;
+        return result;
+      }, (error) => {
+        finish();
+        if (dataTransferBusy) dataTransferWriteFailed = true;
+        throw error;
+      });
+    };
+  });
+}
+
+async function runDataTransfer(action) {
+  if (dataTransferBusy) return;
+  const api = window.pywebview?.api;
+  const method = action === "export" ? "export_app_data" : "import_app_data";
+  if (!api?.[method]) {
+    toast("Restart with the updated desktop app to use data transfer.");
+    return;
+  }
+  dataTransferBusy = true;
+  dataTransferWriteFailed = false;
+  const dialog = document.getElementById("dataTransferBusyDlg");
+  const status = document.getElementById("settings_dataTransferStatus");
+  const buttons = ["settings_exportDataBtn", "settings_importDataBtn"].map(id => document.getElementById(id));
+  buttons.forEach(button => { if (button) button.disabled = true; });
+  document.getElementById("dataTransferBusyTitle").textContent = action === "export" ? "Exporting data" : "Importing data";
+  document.getElementById("dataTransferBusyMessage").textContent = "Saving pending changes. A file chooser will open next.";
+  dialog.oncancel = event => event.preventDefault();
+  dialog.showModal();
+  try {
+    if (!(await flushPageSave())) throw new Error("Save your note changes before transferring data.");
+    if (!(await flushPendingProjectSave())) throw new Error("Save your project changes before transferring data.");
+    await Promise.all([
+      debouncedSaveUserSettings.flush(), debouncedSaveActivityHistory.flush(),
+      debouncedSaveChecklists.flush(), debouncedSaveLightingSchedule.flush(),
+      debouncedSaveTitle24.flush(),
+    ]);
+    while (dataTransferPendingWrites.size) {
+      await Promise.allSettled([...dataTransferPendingWrites]);
+    }
+    if (dataTransferWriteFailed) throw new Error("Some changes could not be saved. Try again after resolving the save error.");
+    dataTransferWritesPaused = true;
+    document.getElementById("dataTransferBusyMessage").textContent = action === "export"
+      ? "Choose where to save your transfer ZIP."
+      : "Choose a transfer ZIP, then confirm the import.";
+    const result = await api[method]();
+    if (result?.status === "cancelled") {
+      status.textContent = "Transfer cancelled. Your data is unchanged.";
+      return;
+    }
+    if (result?.status !== "success") throw new Error(result?.message || "Data transfer failed.");
+    if (action === "import") {
+      dataTransferReloadPending = true;
+      // pagehide must not flush this page's old settings over the imported ones.
+      try {
+        sessionStorage.setItem("aciesDataImportNotice", `Data imported. Recovery copy: ${result.backupPath}`);
+      } catch (error) {
+        console.warn("Could not store the import notice:", error);
+      }
+      window.location.reload();
+      return;
+    }
+    status.textContent = `Export saved: ${result.path}`;
+    toast("App data exported.");
+  } catch (error) {
+    console.warn("Data transfer failed:", error);
+    status.textContent = error?.message || "Data transfer failed.";
+    toast(status.textContent, 10000);
+  } finally {
+    if (!dataTransferReloadPending) {
+      dataTransferWritesPaused = false;
+      dataTransferBusy = false;
+      dialog.close();
+      buttons.forEach(button => { if (button) button.disabled = false; });
+    }
+  }
+}
 
 function createId(prefix = "dlv") {
   if (window.crypto?.randomUUID) return `${prefix}_${crypto.randomUUID()}`;
@@ -15458,11 +15087,12 @@ function normalizeDeliverable(deliverable = {}) {
     legacyEmailRef: deliverable.emailRef,
   });
   const emailRefs = buildLegacyEmailRefsFromAttachments(attachments);
+  const legacyDueDates = getLegacyDueDates(deliverable);
   const out = {
     id: deliverable.id || createId("dlv"),
     name: String(deliverable.name || "").trim(),
-    due: String(deliverable.due || "").trim(),
-    hardDue: String(deliverable.hardDue || "").trim(),
+    due: getEffectiveDueStr(deliverable),
+    ...(legacyDueDates ? { legacyDueDates } : {}),
     notes: String(deliverable.notes || ""),
     page: normalizePage(deliverable.page),
     noteItems: normalizeDeliverableNoteItems(
@@ -15526,7 +15156,8 @@ function createDeliverable(seed = {}) {
     id: seed.id || createId("dlv"),
     name: seed.name || "",
     due: seed.due || "",
-    hardDue: seed.hardDue || "",
+    hardDue: seed.hardDue || "", // Read older seeds during migration only.
+    legacyDueDates: seed.legacyDueDates,
     notes: seed.notes || "",
     noteItems: seed.noteItems || [],
     tasks: seed.tasks || [],
@@ -16032,12 +15663,9 @@ function getAllDeliverables() {
 
 async function pinUrgentDeliverables() {
   const confirmed = confirm(
-    "Pin all overdue incomplete deliverables, deliverables due today, and anything with a hard deadline this week?"
+    "Pin all incomplete deliverables that are overdue or due this week?"
   );
   if (!confirmed) return;
-
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
 
   let deliverablesPinned = 0;
   let deliverablesMatched = 0;
@@ -16045,15 +15673,8 @@ async function pinUrgentDeliverables() {
   db.forEach((project) => {
     getProjectDeliverables(project).forEach((deliverable) => {
       if (isFinished(deliverable)) return false;
-      // A hard deadline that is past or lands this week is urgent even when the
-      // internal date still has runway.
-      const hardDueStr = getHardDueStr(deliverable);
-      const hardUrgent = !!parseDueStr(hardDueStr) && dueState(hardDueStr) !== "ok";
-      const due = parseDueStr(getEffectiveDueStr(deliverable));
-      if (!hardUrgent) {
-        if (!due) return false;
-        if (!isSameDay(due, today) && due >= today) return false;
-      }
+      const dueStr = getEffectiveDueStr(deliverable);
+      if (!parseDueStr(dueStr) || dueState(dueStr) === "ok") return;
       deliverablesMatched += 1;
       if (isDeliverablePinned(deliverable)) return;
       setDeliverablePinnedState(deliverable, true);
@@ -22698,29 +22319,16 @@ function createCardHeader(deliverable, card, project) {
   return header;
 }
 
-// The Soft / Hard tag that marks which of a deliverable's two dates is showing.
-function createDueKindTag(field) {
-  return el("span", {
-    className: `due-kind due-kind--${field === "hardDue" ? "hard" : "soft"}`,
-    textContent: DUE_FIELD_LABELS[field] || "",
-  });
-}
-
-// Badge styling for the shown date: soft dates use the usual ok / due-soon /
-// overdue colours, hard dates the red outline (solid once missed).
 function getDueBadgeStateClass(deliverable, field, value) {
-  if (field === "hardDue") {
-    return isDeliverableHardDueMissed(deliverable) ? "hard critical" : "hard";
-  }
   const ds = dueState(value);
-  return `soft ${ds === "overdue" ? "overdue" : ds === "dueSoon" ? "due-soon" : "ok"}`;
+  return ds === "overdue" ? "overdue" : ds === "dueSoon" ? "due-soon" : "ok";
 }
 
 function createDeliverableDueBadge(deliverable, project, { field, stateClass, text, label }) {
   const badge = el("div", {
     className: `deliverable-due-badge ${isFinished(deliverable) ? "finished" : stateClass} is-clickable`,
   });
-  badge.append(createDueKindTag(field), document.createTextNode(text));
+  badge.append(document.createTextNode(text));
   badge.setAttribute("role", "button");
   badge.setAttribute("tabindex", "0");
   badge.setAttribute("title", `${describeDeliverableDue(deliverable)} Click to change.`);
@@ -22741,14 +22349,13 @@ function createDeliverableDueBadge(deliverable, project, { field, stateClass, te
   return badge;
 }
 
-// One badge for the date the deliverable is showing (soft until it passes, then
-// hard), tagged so it is clear which one it is. None when no date is set.
+// One due date badge. None when no date is set.
 function createDeliverableDueBadges(deliverable, project) {
   const field = getActiveDueField(deliverable);
   if (!field) return [];
   const value = String(deliverable[field] || "").trim();
   const stateClass = getDueBadgeStateClass(deliverable, field, value);
-  const late = / (overdue|critical)$/.test(stateClass);
+  const late = stateClass === "overdue";
   return [
     createDeliverableDueBadge(deliverable, project, {
       field,
@@ -24276,7 +23883,6 @@ function buildProjectDeliverableRowEntries(items, projectListContextMap = null) 
         dueDate: parseDueStr(getEffectiveDueStr(deliverable)),
         isPinnedDeliverable: isDeliverablePinned(deliverable),
         isCompleteDeliverable: isFinished(deliverable),
-        isHardDueMissed: isDeliverableHardDueMissed(deliverable),
       });
     });
   });
@@ -24441,12 +24047,6 @@ function compareProjectDeliverableRows(a, b) {
     return compareProjectDeliverableRowIdentity(a, b);
   }
 
-  // A missed hard deadline outranks everything else in the due sort — it is the
-  // one thing that genuinely cannot be pushed.
-  const aHardMissed = !!a?.isHardDueMissed;
-  const bHardMissed = !!b?.isHardDueMissed;
-  if (aHardMissed !== bHardMissed) return aHardMissed ? -1 : 1;
-
   if (!separateDeliverableCompletionGroups) {
     const mixedDueDiff = compareDueDateValues(
       a?.dueDate || null,
@@ -24530,7 +24130,6 @@ function getPinnedDeliverableOrderEntries(items = db) {
         deliverableIndex,
         dueDate: parseDueStr(getEffectiveDueStr(deliverable)),
         isPinnedDeliverable: true,
-        isHardDueMissed: isDeliverableHardDueMissed(deliverable),
       });
     });
   });
@@ -26218,7 +25817,6 @@ function getMatchContext(q, p) {
     };
     if (str(d.name).includes(q)) dCtx.fields.push("name");
     if (str(d.due).includes(q)) dCtx.fields.push("due");
-    if (str(d.hardDue).includes(q)) dCtx.fields.push("hardDue");
     const hasStatusMatch = (d.statuses || []).some((s) => str(s).includes(q));
     if (
       dCtx.fields.length ||
@@ -26293,6 +25891,7 @@ function openNew() {
   fillForm(createBlankProject());
   dlg.showModal();
   setTimeout(() => document.getElementById("f_id")?.focus(), 0);
+  if (typeof projectTutorialOpened === "function") projectTutorialOpened();
 }
 
 function clearModalFieldErrors() {
@@ -26438,6 +26037,7 @@ function removeDeliverable(project, deliverable) {
 function onSaveProject() {
   const dlg = document.getElementById("editDlg");
   const mode = dlg?.dataset.mode || "full";
+  if (typeof validateProjectTutorialForm === "function" && !validateProjectTutorialForm(mode)) return;
 
   if (mode === "create-basics") {
     clearModalFieldErrors();
@@ -26469,6 +26069,7 @@ function onSaveProject() {
     document.getElementById("dlgTitle").textContent = `Edit Project — ${data.id || "Untitled"}`;
     document.getElementById("btnSaveProject").textContent = "Save Changes";
     fillForm(db[editIndex]);
+    if (typeof projectTutorialCreated === "function") projectTutorialCreated();
     toast("Project created. Add deliverables to continue.");
     const deliverablesSection = document.getElementById("deliverablesSection");
     if (deliverablesSection) {
@@ -26483,7 +26084,7 @@ function onSaveProject() {
   // Validate all due dates first
   if (!validateAllDueDates()) {
     // Focus first invalid input
-    const firstInvalid = document.querySelector('.d-due.input-error, .d-hard-due.input-error');
+    const firstInvalid = document.querySelector('.d-due.input-error');
     if (firstInvalid) {
       firstInvalid.focus();
       // Scroll to the invalid input
@@ -26502,10 +26103,11 @@ function onSaveProject() {
     db.push(data);
     toast("Project created.");
   }
-  save();
+  const projectSave = save();
   render();
   flushModalEmailSession(true);
   closeDlg("editDlg");
+  if (typeof projectTutorialSaved === "function") void projectTutorialSaved(data, projectSave);
 }
 
 // ===================== FORM HANDLING =====================
@@ -26800,15 +26402,8 @@ function addDeliverableCard(deliverable, options = {}) {
     };
   }
 
-  // A soft date on the same day as the hard date (left by the old "same as
-  // internal" shortcut) adds nothing and would fail the soft-before-hard check.
-  const softDate = parseDueStr(String(deliverable.due || "").trim());
-  const hardDate = parseDueStr(getHardDueStr(deliverable));
-  const redundantSoft = !!softDate && !!hardDate && softDate.toDateString() === hardDate.toDateString();
-  card.querySelector(".d-due").value = redundantSoft ? "" : deliverable.due || "";
-  card.querySelector(".d-hard-due").value = deliverable.hardDue || "";
-
-
+  card.querySelector(".d-due").value = getEffectiveDueStr(deliverable);
+  card._legacyDueDates = getLegacyDueDates(deliverable);
 
   const taskList = card.querySelector(".deliverable-task-list");
   card._taskItems = (deliverable.tasks || []).map(normalizeTask);
@@ -26848,10 +26443,10 @@ function addDeliverableCard(deliverable, options = {}) {
   });
   statusContainer.appendChild(picker);
 
-  // Wire up calendar icon buttons and date validation for both date fields
+  // Wire up the due date calendar and validation.
   card.querySelectorAll('.input-with-calendar').forEach((wrapper) => {
     const calendarBtn = wrapper.querySelector('.calendar-icon-btn');
-    const dateInput = wrapper.querySelector('.d-due, .d-hard-due');
+    const dateInput = wrapper.querySelector('.d-due');
     if (!calendarBtn || !dateInput) return;
 
     calendarBtn.onclick = (e) => {
@@ -26863,12 +26458,6 @@ function addDeliverableCard(deliverable, options = {}) {
     const handleDateEdit = () => {
       autoFormatDateInput(dateInput);
       validateDueDateInput(dateInput);
-      // Moving the hard date can resolve a soft-before-hard error on the other input.
-      const softInput = card.querySelector('.d-due');
-      if (softInput && softInput !== dateInput && softInput.classList.contains('input-error')) {
-        validateDueDateInput(softInput);
-      }
-      validateDeliverableDateOrder(card);
       refreshModalDeliverableSummary(card);
     };
 
@@ -26948,14 +26537,12 @@ function refreshModalDeliverableSummary(card) {
   ).some((b) => isFinished({ statuses: [b.dataset.status] }));
 
   const dueInput = card.querySelector(".d-due");
-  const hardDueInput = card.querySelector(".d-hard-due");
   const dueHost = summary.querySelector(".deliverable-summary-due");
   if (dueHost) {
     dueHost.replaceChildren();
     // Preview the single date the card will show, from the unsaved inputs.
     const draft = {
       due: (dueInput?.value || "").trim(),
-      hardDue: (hardDueInput?.value || "").trim(),
       statuses: isCardFinished ? ["Complete"] : [],
     };
     const field = getActiveDueField(draft);
@@ -26965,7 +26552,7 @@ function refreshModalDeliverableSummary(card) {
         className: `deliverable-due-badge ${getDueBadgeStateClass(draft, field, value)}`,
         title: describeDeliverableDue(draft),
       });
-      badge.append(createDueKindTag(field), document.createTextNode(humanDate(value)));
+      badge.append(document.createTextNode(humanDate(value)));
       dueHost.appendChild(badge);
     }
   }
@@ -27450,7 +27037,7 @@ function readForm() {
       : null;
     const name = card.querySelector(".d-name").value.trim();
     const due = card.querySelector(".d-due").value.trim();
-    const hardDue = card.querySelector(".d-hard-due").value.trim();
+    const legacyDueDates = card._legacyDueDates || getLegacyDueDates(existingDeliverable);
     const statuses = readStatusPickerFrom(
       card.querySelector(".deliverable-status")
     );
@@ -27500,7 +27087,7 @@ function readForm() {
       id: deliverableId,
       name,
       due,
-      hardDue,
+      legacyDueDates,
       page: existingDeliverable?.page,
       notes: existingDeliverable?.notes || buildDeliverableNotesText(noteItems, ""),
       noteItems,
@@ -28761,8 +28348,8 @@ window.__aciesAutomation = {
       deliverables: getProjectDeliverables(project).map((deliverable) => ({
         id: deliverable.id || "",
         name: deliverable.name || "",
-        due: deliverable.due || "",
-        hardDue: deliverable.hardDue || "",
+        due: getEffectiveDueStr(deliverable),
+        legacyDueDates: getLegacyDueDates(deliverable),
         taskCount: Array.isArray(deliverable.tasks) ? deliverable.tasks.length : 0,
       })),
     };
@@ -34857,8 +34444,9 @@ function closeTitle24Compliance() {
 // ===================== ONBOARDING SYSTEM =====================
 
 let currentOnboardingStep = 1;
-const totalOnboardingSteps = 4;
+const totalOnboardingSteps = 5;
 let onboardingBusy = false;
+let onboardingPluginsInstalled = false;
 let validatedOnboardingApiKey = "";
 
 function isNewUser() {
@@ -34889,7 +34477,6 @@ function hasExistingUserData() {
   ) {
     return true;
   }
-  if (googleAuthState.signedIn) return true;
   if (String(userSettings.apiKey || "").trim()) return true;
   if (String(userSettings.autocadPath || "").trim()) return true;
   return false;
@@ -34940,6 +34527,7 @@ function updateOnboardingUI() {
     "Welcome to ACIES!",
     "What's your full name?",
     "What's your engineering discipline?",
+    "Recommended AutoCAD plugins",
     "Set up your AI assistant",
   ];
   document.getElementById("onboardingTitle").textContent =
@@ -34961,7 +34549,7 @@ function updateOnboardingUI() {
   setupOnboardingEnterKeyListeners();
   const focusTarget = currentOnboardingStep === 2
     ? document.getElementById("onboarding_userName")
-    : currentOnboardingStep === 4
+    : currentOnboardingStep === 5
       ? document.getElementById("onboarding_apiKey")
       : currentOnboardingStep === 3
         ? document.querySelector('input[name="onboarding_discipline_checkbox"]')
@@ -34994,7 +34582,10 @@ function setupOnboardingEnterKeyListeners() {
     // Step 3: Discipline checkboxes - Enter on modal to validate and proceed
     modal.addEventListener("keydown", handleOnboardingModalKeydown);
   } else if (currentOnboardingStep === 4) {
-    // Step 4: API key input - Enter to validate and proceed
+    // Step 4: Plugin recommendation - Enter on modal to proceed
+    modal.addEventListener("keydown", handleOnboardingModalKeydown);
+  } else if (currentOnboardingStep === 5) {
+    // Step 5: API key input - Enter to validate and proceed
     if (apiKeyInput)
       apiKeyInput.addEventListener("keydown", handleOnboardingInputKeydown);
   }
@@ -35063,7 +34654,63 @@ function setOnboardingBusy(busy) {
     control.disabled = busy;
   });
   document.getElementById("onboardingPrevBtn").disabled = busy || currentOnboardingStep === 1;
+  document.getElementById("onboardingInstallPluginsBtn").disabled = busy || onboardingPluginsInstalled;
   document.getElementById("onboardingDlg").setAttribute("aria-busy", String(busy));
+}
+
+async function installOnboardingPlugins() {
+  if (onboardingBusy || pluginSetupInstalling || onboardingPluginsInstalled) return;
+  const button = document.getElementById("onboardingInstallPluginsBtn");
+  const status = document.getElementById("onboardingPluginStatus");
+  setOnboardingBusy(true);
+  button.textContent = "Installing…";
+  status.textContent = "Checking AutoCAD and available plugins…";
+  try {
+    if (!String(userSettings.autocadPath || "").trim()) {
+      const found = await window.pywebview.api.get_installed_autocad_versions();
+      if (found?.status !== "success") {
+        status.textContent = "Could not check for AutoCAD. Try again, or install plugins later from Tools.";
+        return;
+      }
+      if (!Array.isArray(found.versions) || !found.versions.length) {
+        status.textContent = "AutoCAD was not detected. You can continue setup and install plugins from Tools after installing AutoCAD.";
+        return;
+      }
+    }
+    const bundles = await fetchBundleStatuses({ silent: true });
+    if (!bundles) throw new Error("Could not load plugins.");
+    const acies = bundles.filter((bundle) =>
+      String(bundle?.bundle_name || "").startsWith(ACIES_PLUGIN_BUNDLE_PREFIX)
+    );
+    const missing = acies.filter((bundle) => bundle.state === "not_installed");
+    if (acies.length && !missing.length && acies.every((bundle) =>
+      bundle.state === "installed" || bundle.state === "update_available"
+    )) {
+      onboardingPluginsInstalled = true;
+      status.textContent = "The ACIES plugins are already installed. Manage them in Tools → AutoCAD Plugins.";
+      return;
+    }
+    const targets = missing.filter((bundle) => bundle.asset);
+    if (!targets.length) {
+      status.textContent = "No plugin downloads are available right now. Try again, or install them later from Tools.";
+      return;
+    }
+    const result = await installFirstRunPlugins({
+      targets,
+      onboarding: true,
+      onProgress: (message) => { status.textContent = message; },
+    });
+    onboardingPluginsInstalled = result?.installed === missing.length;
+    if (result?.installed === targets.length && targets.length < missing.length) {
+      status.textContent += " Some plugin downloads are unavailable. Try again later for the rest.";
+    }
+  } catch (error) {
+    status.textContent = "Could not install plugins. Try again, or install them later from Tools.";
+    console.warn("Onboarding plugin installation failed:", error);
+  } finally {
+    button.textContent = onboardingPluginsInstalled ? "Plugins installed" : "Install plugins";
+    setOnboardingBusy(false);
+  }
 }
 
 async function validateOnboardingApiKey(apiKey) {
@@ -35127,6 +34774,7 @@ async function completeOnboarding({ skipped = false } = {}) {
     closeDlg("onboardingDlg");
     hideSetupHelpBanner();
     showMainApp();
+    if (!skipped && db.length === 0) startProjectTutorial();
     toast(skipped ? "Your setup progress has been saved. You can continue in Settings." : "Welcome to ACIES! Your settings have been saved.");
     void maybeShowPluginSetupBanner();
   } catch (e) {
@@ -35136,11 +34784,180 @@ async function completeOnboarding({ skipped = false } = {}) {
   }
 }
 
+// A short tour of the real project form and command line. It never fills or
+// submits fields, selects a deliverable, or runs Publish on the user's behalf.
+let projectTutorial = null;
+const PROJECT_TUTORIAL_STEPS = {
+  new: [1, "Create a new project", "Click the + button beside search to open New Project."],
+  path: [2, "Enter your project information", "Enter a Project ID and Project Name. Paste the project's folder path into Project Path, then click Create & Continue."],
+  details: [3, "Name your deliverable and set a due date", "Enter a Deliverable Name, such as DD90. Set Due Date, using MM/DD/YYYY or the calendar. Then choose Next."],
+  save: [4, "Save the project information", "Click Save Changes to save the project and its deliverable."],
+  saving: [4, "Saving your project", "Waiting for the project information to finish saving…"],
+  retry: [4, "Save needs another try", "The project could not be saved. Choose Retry save before continuing."],
+  select: [5, "Select your deliverable", "Click the deliverable you just saved in the project list. Its name will appear in the command line at the bottom."],
+  publish: [6, "Type publish in the command line", "With your deliverable selected, click the command line at the bottom and type publish to find the Publish action."],
+  done: [6, "You're ready to publish", "You created a project, saved a deliverable and due date, and found Publish. When you're ready to plot drawings, choose Publish and follow its prompts."],
+};
+
+function startProjectTutorial() {
+  if (document.getElementById("editDlg")?.open) {
+    toast("Save or close the project form before starting the tutorial.");
+    return;
+  }
+  stopProjectTutorial();
+  closeDlg("helpDlg");
+  document.querySelector('.main-tab-btn[data-tab="projects"]')?.click();
+  projectTutorial = { stage: "new", project: null, deliverable: null, events: new AbortController() };
+  const { signal } = projectTutorial.events;
+  document.getElementById("editDlg").addEventListener("close", () => {
+    if (["path", "details", "save"].includes(projectTutorial?.stage)) stopProjectTutorial();
+  }, { signal });
+  document.addEventListener("input", (event) => {
+    if (event.target.matches("#commandDock .cmd-search")) updateProjectTutorialSelection();
+  }, { signal });
+  renderProjectTutorial();
+}
+
+function stopProjectTutorial() {
+  const panel = document.getElementById("projectTutorial");
+  const restoreFocus = panel?.contains(document.activeElement);
+  projectTutorial?.events.abort();
+  projectTutorial = null;
+  document.querySelectorAll(".project-tutorial-target").forEach(node => node.classList.remove("project-tutorial-target"));
+  if (panel) {
+    panel.hidden = true;
+    document.body.appendChild(panel);
+  }
+  if (restoreFocus) {
+    const target = document.getElementById("editDlg")?.open
+      ? document.getElementById("f_id")
+      : document.querySelector("#commandDock .cmd-search") || document.getElementById("quickNew");
+    target?.focus();
+  }
+}
+
+function renderProjectTutorial(error = "") {
+  if (!projectTutorial) return;
+  const panel = document.getElementById("projectTutorial");
+  const stage = projectTutorial.stage;
+  const [step, title, description] = PROJECT_TUTORIAL_STEPS[stage];
+  const form = document.getElementById("editDlg");
+  // Keep the guide inside a modal while it is open so it remains interactive
+  // in the browser's top layer, and reserve space instead of covering inputs.
+  const host = form.open ? form : document.body;
+  if (panel.parentNode !== host) {
+    if (form.open) form.insertBefore(panel, form.querySelector(".modal-body"));
+    else host.appendChild(panel);
+  }
+  panel.hidden = false;
+  panel.dataset.stage = stage;
+  document.getElementById("projectTutorialProgress").textContent = stage === "done" ? "Tutorial complete" : `New user tutorial · ${step} of 6`;
+  document.getElementById("projectTutorialTitle").textContent = title;
+  document.getElementById("projectTutorialText").textContent = description;
+  const message = document.getElementById("projectTutorialError");
+  message.hidden = !error;
+  message.textContent = error;
+  const next = document.getElementById("projectTutorialNext");
+  next.hidden = !["details", "retry", "done"].includes(stage);
+  next.textContent = stage === "retry" ? "Retry save" : stage === "done" ? "Finish tutorial" : "Next: save project";
+  document.querySelectorAll(".project-tutorial-target").forEach(node => node.classList.remove("project-tutorial-target"));
+  const selectors = {
+    new: "#quickNew", path: "#f_id, #f_name, #f_path, #btnSaveProject",
+    details: "#deliverableList .d-name, #deliverableList .d-due",
+    save: "#btnSaveProject", publish: "#commandDock .cmd-search",
+  };
+  if (selectors[stage]) document.querySelectorAll(selectors[stage]).forEach(node => node.classList.add("project-tutorial-target"));
+  if (stage === "select") {
+    const id = CSS.escape(projectTutorial.deliverable.id);
+    const row = document.querySelector(`#tbody [data-deliverable-id="${id}"], #projectsCardView [data-deliverable-id="${id}"]`);
+    row?.classList.add("project-tutorial-target");
+    row?.scrollIntoView({ block: "center" });
+  }
+}
+
+function projectTutorialOpened() {
+  if (projectTutorial?.stage !== "new") return;
+  projectTutorial.stage = "path";
+  renderProjectTutorial();
+}
+
+function projectTutorialCreated() {
+  if (projectTutorial?.stage !== "path") return;
+  projectTutorial.stage = "details";
+  renderProjectTutorial();
+  document.querySelector("#deliverableList .d-name")?.focus();
+}
+
+function validateProjectTutorialForm(mode) {
+  if (!projectTutorial || !["path", "details", "save"].includes(projectTutorial.stage)) return true;
+  const path = document.getElementById("f_path");
+  if (!path.value.trim()) {
+    renderProjectTutorial("Paste your project folder path into Project Path to continue.");
+    path.focus();
+    return false;
+  }
+  if (mode === "create-basics") return true;
+  const card = document.querySelector("#deliverableList .deliverable-card");
+  const name = card?.querySelector(".d-name");
+  const due = card?.querySelector(".d-due");
+  if (!name?.value.trim() || !parseDueStr(due?.value)) {
+    renderProjectTutorial("Enter a deliverable name and a valid due date to continue.");
+    (name?.value.trim() ? due : name)?.focus();
+    return false;
+  }
+  return true;
+}
+
+function nextProjectTutorial() {
+  if (projectTutorial?.stage === "done") {
+    stopProjectTutorial();
+  } else if (projectTutorial?.stage === "retry") {
+    void projectTutorialSaved(projectTutorial.project, save());
+  } else if (projectTutorial?.stage === "details" && validateProjectTutorialForm("full") && validateAllDueDates()) {
+    projectTutorial.stage = "save";
+    renderProjectTutorial();
+    document.getElementById("btnSaveProject").focus();
+  }
+}
+
+async function projectTutorialSaved(project, pendingSave) {
+  if (!projectTutorial || !["details", "save", "retry"].includes(projectTutorial.stage)) return;
+  const session = projectTutorial;
+  session.project = project;
+  session.deliverable = project.deliverables.find(item => item.name.trim() && parseDueStr(getEffectiveDueStr(item)));
+  if (!session.deliverable) return;
+  session.stage = "saving";
+  renderProjectTutorial();
+  let saved = false;
+  try { saved = await pendingSave; } catch { /* The app reports the save failure. */ }
+  if (projectTutorial !== session) return;
+  session.stage = saved === true ? "select" : "retry";
+  if (saved === true) {
+    // Search brings the new deliverable into view even when filters or the
+    // current list page would otherwise hide it. Selection stays with the user.
+    const search = document.getElementById("search");
+    search.value = project.id;
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  renderProjectTutorial();
+}
+
+function updateProjectTutorialSelection() {
+  if (!projectTutorial || !["select", "publish"].includes(projectTutorial.stage)) return;
+  const dock = typeof industryCommandDock === "undefined" ? null : industryCommandDock;
+  const matches = dock?.project === projectTutorial.project &&
+    dock?.deliverable?.id === projectTutorial.deliverable.id && dock.multi.length < 2;
+  let stage = matches ? "publish" : "select";
+  if (matches && dock.input.value.trim().toLowerCase() === "publish") stage = "done";
+  if (projectTutorial.stage === stage) return;
+  projectTutorial.stage = stage;
+  renderProjectTutorial();
+}
+
 function showMainApp() {
   document.querySelector("main").style.display = "block";
   document.querySelector(".app-header").style.display = "flex";
   refreshActiveDisciplineDependentUi();
-  renderGoogleAuthUi();
   renderGlobalPagesView();
   renderChecklistTabs();
   renderChecklistsView();
@@ -36372,9 +36189,12 @@ async function dismissPluginSetup(type) {
   // "Not right now" changes nothing saved, so the offer returns at the next launch.
 }
 
-async function installFirstRunPlugins() {
+async function installFirstRunPlugins({
+  targets = pluginSetupInstallable.slice(),
+  onboarding = false,
+  onProgress = () => {},
+} = {}) {
   if (pluginSetupInstalling) return;
-  const targets = pluginSetupInstallable.slice();
   if (!targets.length) {
     hidePluginSetupBanner();
     return;
@@ -36396,6 +36216,7 @@ async function installFirstRunPlugins() {
   try {
     for (const [index, bundle] of targets.entries()) {
       const label = normalizeBundleCoreName(bundle.bundle_name);
+      onProgress(`Installing ${label} (${index + 1} of ${targets.length})…`);
       updateActivity(activityId, {
         message: `Installing ${label} (${index + 1} of ${targets.length})...`,
         progress: 5 + Math.round((90 * index) / targets.length),
@@ -36419,15 +36240,20 @@ async function installFirstRunPlugins() {
     }
     const noun = (n) => `${n} plugin${n === 1 ? "" : "s"}`;
     if (autocadRunning && !installed) {
+      onProgress(autocadRunning);
       failActivity(activityId, { message: autocadRunning });
     } else if (!installed) {
+      onProgress(failures[0] || "No plugins were installed.");
       failActivity(activityId, { message: failures[0] || "No plugins were installed." });
     } else {
       const problems = autocadRunning
-        ? ` AutoCAD was opened partway; install the rest from the Tools tab.`
+        ? onboarding
+          ? " Close AutoCAD and try again to install the rest."
+          : " AutoCAD was opened partway; install the rest from the Tools tab."
         : failures.length
           ? ` ${noun(failures.length)} failed: ${failures.join("; ")}`
           : "";
+      onProgress(`Installed ${noun(installed)}. They load the next time AutoCAD starts.${problems}`);
       completeActivity(activityId, {
         message: `Installed ${noun(installed)}. They load the next time AutoCAD starts.${problems}`,
         openFolderPath: pluginsFolderPath,
@@ -36440,10 +36266,14 @@ async function installFirstRunPlugins() {
   if (installed) {
     pluginSetupPromptHandled = true;
     hidePluginSetupBanner();
-    await ensureBundlesRendered({ force: true });
+    try {
+      await ensureBundlesRendered({ force: true });
+    } catch (error) {
+      console.warn("Could not refresh installed plugins:", error);
+    }
     // The combined plugin lets the user pick which commands are on, right after installing.
     if (
-      targets.some((bundle) => bundle.bundle_name === "ElectricalCommands.bundle") &&
+      !onboarding && targets.some((bundle) => bundle.bundle_name === "ElectricalCommands.bundle") &&
       typeof openPluginCommandsDialog === "function"
     ) {
       await openPluginCommandsDialog();
@@ -36452,8 +36282,9 @@ async function installFirstRunPlugins() {
     // Nothing was installed, so keep the offer up for another try (for example, after
     // closing AutoCAD).
     setPluginSetupBusy(false);
-    showPluginSetupBanner(targets.length);
+    if (!onboarding) showPluginSetupBanner(targets.length);
   }
+  return { installed };
 }
 
 // ===================== INITIALIZATION & EVENTS =====================
@@ -37963,9 +37794,6 @@ function initEventListeners() {
   initToolCardDetailsToggles();
 
   const handleAppFocus = async () => {
-    if (!googleAuthBusy) {
-      await loadGoogleAuthState({ silent: true });
-    }
     checkBundlesForUpdates({ showIndicator: true });
   };
   window.addEventListener("focus", handleAppFocus);
@@ -38026,10 +37854,6 @@ function initEventListeners() {
   if (mergeSimilarBtn) mergeSimilarBtn.onclick = scanAndMergeSimilarProjects;
 
   document.getElementById("quickNew").onclick = openNew;
-  const headerGoogleAuthBtn = document.getElementById("headerGoogleAuthBtn");
-  if (headerGoogleAuthBtn) {
-    headerGoogleAuthBtn.onclick = () => handleHeaderGoogleAuthAction();
-  }
   initializeHeaderDisciplineSwitcher();
   document.getElementById("settingsBtn").onclick = async () => {
     hideSetupHelpBanner(); // Hide the banner when user manually opens settings
@@ -38055,22 +37879,8 @@ function initEventListeners() {
   initActivityHistory();
   document.getElementById("settings_howToSetupBtn").onclick = () =>
     document.getElementById("apiKeyHelpDlg").showModal();
-  const settingsGoogleAuthActionBtn = document.getElementById(
-    "settings_googleAuthActionBtn"
-  );
-  if (settingsGoogleAuthActionBtn) {
-    settingsGoogleAuthActionBtn.onclick = () => handleGoogleAuthAction();
-  }
-  const googleSignOutBtn = document.getElementById("googleSignOutBtn");
-  if (googleSignOutBtn) {
-    googleSignOutBtn.onclick = () => handleGoogleSignOut();
-  }
-  const headerAccountSignOutBtn = document.getElementById(
-    "headerAccountSignOutBtn"
-  );
-  if (headerAccountSignOutBtn) {
-    headerAccountSignOutBtn.onclick = () => handleGoogleSignOut();
-  }
+  document.getElementById("settings_exportDataBtn").onclick = () => runDataTransfer("export");
+  document.getElementById("settings_importDataBtn").onclick = () => runDataTransfer("import");
   const openTimesheetsBtn = document.getElementById(
     "settings_openTimesheetsFolder"
   );
@@ -38294,24 +38104,11 @@ function initEventListeners() {
     setProjectsFilterDropdownState(openProjectsFilterDropdown, false);
   });
 
-  document.addEventListener("click", (e) => {
-    if (!headerAccountPopoverOpen) return;
-    const dropdown = document.getElementById("headerAccountDropdown");
-    if (dropdown?.contains(e.target)) return;
-    setHeaderAccountPopoverOpen(false);
-  });
-
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape" || !openProjectsFilterDropdown) return;
     const dropdown = openProjectsFilterDropdown;
     setProjectsFilterDropdownState(dropdown, false);
     dropdown.querySelector(".projects-filter-trigger")?.focus();
-  });
-
-  document.addEventListener("keydown", (e) => {
-    if (e.key !== "Escape" || !headerAccountPopoverOpen) return;
-    e.preventDefault();
-    setHeaderAccountPopoverOpen(false, { focusTrigger: true });
   });
 
   syncProjectsFilterDropdowns();
@@ -40024,6 +39821,7 @@ function initEventListeners() {
 async function init() {
   showAppLoader();
   window.addEventListener("pagehide", () => {
+    if (dataTransferReloadPending) return;
     if (typeof debouncedSaveUserSettings?.flush === "function") {
       debouncedSaveUserSettings.flush();
     }
@@ -40032,6 +39830,7 @@ async function init() {
   try {
     if (!window.pywebview)
       await new Promise((r) => window.addEventListener("pywebviewready", r));
+    initializeDataTransferWriteTracking();
     startCspViolationReporting();
     void loadActivityHistory();
     initEventListeners();
@@ -40039,7 +39838,6 @@ async function init() {
     initProjectsBackToTop();
     updateStickyOffsets();
     refreshAppUpdateStatus();
-    await loadGoogleAuthState({ silent: true, refresh: false });
     await loadUserSettings();
     initThemeFromPreferences();
     const [
@@ -40092,6 +39890,15 @@ async function init() {
       }
     }
     await showDataRecoveryNotices();
+    try {
+      const importNotice = sessionStorage.getItem("aciesDataImportNotice");
+      if (importNotice) {
+        sessionStorage.removeItem("aciesDataImportNotice");
+        toast(importNotice, 15000);
+      }
+    } catch (error) {
+      console.warn("Could not read the import notice:", error);
+    }
     if (projectDataLoadError) {
       // Let the loader close first so the warning is not hidden behind it.
       setTimeout(showProjectDataLoadError, 300);
@@ -40099,7 +39906,6 @@ async function init() {
     prefetchBundles();
     // A brand-new user is offered the plugins when onboarding finishes instead.
     if (!isNewUser()) void maybeShowPluginSetupBanner();
-    void refreshGoogleAuthStateInBackground();
   } finally {
     hideAppLoader();
   }

@@ -25,7 +25,7 @@ function context(extra = {}) {
     isFinished: (d) => (d.statuses || []).some(s => ['Complete', 'Delivered'].includes(s)),
     ...extra,
   });
-  for (const name of ['parseDueStr', 'getWeekStartDate', 'isEarlierDay', 'getActiveDueField', 'getEffectiveDueStr', 'getHardDueStr',
+  for (const name of ['parseDueStr', 'getWeekStartDate', 'isEarlierDay', 'getActiveDueField', 'getEffectiveDueStr', 'getLegacyDueDates',
     'deliverableNeedsAttention', 'filterPanelScheduleProjects', 'toggleProjectAttentionView', 'areProjectFiltersPausedForSearch']) {
     vm.runInContext(extract(name), scope);
   }
@@ -53,7 +53,7 @@ test('a hard date cannot be hidden by a later soft date', () => {
   assert.equal(c.deliverableNeedsAttention({ hardDue: '09/04/26' }, now), true);
 });
 
-test('a missed soft date hands over to the hard date instead of counting as overdue', () => {
+test('legacy firm deadlines drive attention consistently', () => {
   const c = context();
   const now = new Date('2026-09-04T12:00:00');
   assert.equal(c.deliverableNeedsAttention({ due: '2026-09-01', hardDue: '2026-10-01' }, now), false);
@@ -61,20 +61,19 @@ test('a missed soft date hands over to the hard date instead of counting as over
   assert.equal(c.deliverableNeedsAttention({ due: '2026-09-01' }, now), true);
 });
 
-test('the soft date shows until it passes, then the hard date', () => {
+test('the merged due date is stable and prefers the legacy firm deadline', () => {
   const c = context();
   const now = new Date('2026-09-04T09:00:00');
   const cases = [
     [{}, '', ''],
     [{ due: '2026-09-10' }, 'due', '2026-09-10'],
     [{ hardDue: '2026-09-20' }, 'hardDue', '2026-09-20'],
-    [{ due: '2026-09-10', hardDue: '2026-09-20' }, 'due', '2026-09-10'],
-    // The soft date's own day still shows it; the day after hands over.
-    [{ due: '09/04/26', hardDue: '2026-09-20' }, 'due', '09/04/26'],
+    [{ due: '2026-09-10', hardDue: '2026-09-20' }, 'hardDue', '2026-09-20'],
+    [{ due: '09/04/26', hardDue: '2026-09-20' }, 'hardDue', '2026-09-20'],
     [{ due: '2026-09-03', hardDue: '2026-09-20' }, 'hardDue', '2026-09-20'],
-    // A passed soft date with no hard date keeps showing (as overdue).
+    // A record with only the previous soft date retains it.
     [{ due: '2026-09-01' }, 'due', '2026-09-01'],
-    // A soft date on or after the hard date is ignored.
+    // Firm deadlines take precedence in every ordering.
     [{ due: '2026-09-20', hardDue: '2026-09-20' }, 'hardDue', '2026-09-20'],
     [{ due: '2026-09-25', hardDue: '2026-09-20' }, 'hardDue', '2026-09-20'],
     // An unreadable date never beats a readable one.
@@ -88,25 +87,19 @@ test('the soft date shows until it passes, then the hard date', () => {
   }
 });
 
-test('writing a date keeps the soft date before the hard date', () => {
-  const toasts = [];
-  const c = context({ toast: (message) => toasts.push(message), humanDate: (s) => s });
+test('editing and clearing one due date retains legacy history without restoring old deadlines', () => {
+  const c = context();
   vm.runInContext(extract('applyDeliverableDueDate'), c);
-
   const deliverable = { due: '09/10/2026', hardDue: '09/20/2026' };
-  assert.equal(c.applyDeliverableDueDate(deliverable, 'due', '09/20/2026'), false);
-  assert.equal(deliverable.due, '09/10/2026');
-  assert.equal(c.applyDeliverableDueDate(deliverable, 'due', '09/15/2026'), true);
-  assert.equal(deliverable.due, '09/15/2026');
-
-  // Moving the hard date onto or before the soft date clears the soft date.
-  assert.equal(c.applyDeliverableDueDate(deliverable, 'hardDue', '09/15/2026'), true);
-  assert.deepEqual({ ...deliverable }, { due: '', hardDue: '09/15/2026' });
-
-  // Clearing always works.
-  assert.equal(c.applyDeliverableDueDate(deliverable, 'hardDue', ''), true);
-  assert.equal(deliverable.hardDue, '');
-  assert.equal(toasts.length, 2);
+  assert.equal(c.applyDeliverableDueDate(deliverable, 'due', '09/25/2026'), true);
+  assert.equal(deliverable.due, '09/25/2026');
+  assert.equal('hardDue' in deliverable, false);
+  assert.deepEqual({ ...deliverable.legacyDueDates }, { due: '09/10/2026', hardDue: '09/20/2026' });
+  assert.equal(c.applyDeliverableDueDate(deliverable, 'due', 'invalid'), false);
+  assert.equal(deliverable.due, '09/25/2026');
+  assert.equal(c.applyDeliverableDueDate(deliverable, 'due', ''), true);
+  assert.equal(c.getEffectiveDueStr(deliverable), '');
+  assert.equal(deliverable.legacyDueDates.hardDue, '09/20/2026');
 });
 
 test('attention follows the local week across a year boundary', () => {

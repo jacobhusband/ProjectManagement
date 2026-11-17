@@ -29,11 +29,12 @@ class ReleaseEnvTests(unittest.TestCase):
         self.assertNotIn("GOOGLE_API_KEY", text)
         self.assertNotIn("GEMINI_API_KEY", text)
 
-    def test_the_installer_env_only_has_the_sign_in_client(self):
+    def test_the_installer_env_is_empty_without_sign_in_configuration(self):
         step = step_named("Create release .env")
-        self.assertEqual({"GOOGLE_CLIENT_SECRET", "GOOGLE_OAUTH_CLIENT_ID"}, set(step["env"]))
-        written = set(re.findall(r"^\s*(GOOGLE_[A-Z_]+)\s*=", step["run"], flags=re.MULTILINE))
-        self.assertEqual({"GOOGLE_CLIENT_SECRET", "GOOGLE_OAUTH_CLIENT_ID"}, written)
+        self.assertNotIn("env", step)
+        self.assertIn('WriteAllText', step["run"])
+        self.assertIn('"",', step["run"])
+        self.assertNotIn("GOOGLE_OAUTH", RELEASE_WORKFLOW.read_text(encoding="utf-8"))
 
     def test_a_local_build_warns_when_it_would_bundle_a_key(self):
         text = BUILD_SCRIPT.read_text(encoding="utf-8")

@@ -59,7 +59,7 @@ class ProjectFiltersUiTests(unittest.TestCase):
     def test_project_filter_script_wiring_exists(self):
         script = SCRIPT_JS_PATH.read_text(encoding="utf-8")
         user_settings_start = script.index("let userSettings = {")
-        user_settings_end = script.index("const DEFAULT_GOOGLE_AUTH_STATE = {")
+        user_settings_end = script.index("\n};", user_settings_start) + len("\n};")
         user_settings_block = script[user_settings_start:user_settings_end]
         load_settings_start = script.index("async function loadUserSettings() {")
         load_settings_end = script.index("function setCheckboxValue(id, value) {")

@@ -78,7 +78,7 @@ function getProjectShortName(project) {
 //   kind     — late | open | done
 //   rail     — hatch | dashed | accent | muted   (the left rail / bar treatment)
 //   stamp    — the status object drawn in the Status column
-//   dueField — "due" (soft) | "hardDue" (hard) | "" — the one date on show
+//   dueField — the stored field providing the due date (including legacy records)
 function getDeliverableRegisterState(deliverable) {
   const finished = isFinished(deliverable);
   const status = getDeliverablePrimaryStatus(deliverable);
@@ -99,8 +99,7 @@ function getDeliverableRegisterState(deliverable) {
     };
   }
 
-  // A passed soft date has already handed over to the hard date, so only the
-  // shown date can make a deliverable late.
+  // The due date determines whether a deliverable is late.
   if (effectiveDays !== null && effectiveDays < 0) {
     const daysLate = -effectiveDays;
     return {
@@ -190,25 +189,24 @@ function createRegisterStamp(state, deliverable, project, { text, dateField } = 
   return stamp;
 }
 
-// The single Due cell: whichever date the deliverable is showing (soft until it
-// passes, then hard), tagged Soft or Hard. The calendar it opens can set either.
+// The single Due cell opens the due date calendar.
 function createRegisterDueField(deliverable, project, state) {
   const field = state.dueField;
   const value = field ? String(deliverable?.[field] || "").trim() : "";
   const description = describeDeliverableDue(deliverable);
   const wrap = el("div", {
     className: `reg-field reg-field--due${
-      value ? ` is-${field === "hardDue" ? "hard" : "soft"}` : " is-blank"
+      value ? " is-dated" : " is-blank"
     }`,
     role: "button",
     tabIndex: 0,
-    title: value ? `${description} Click to change.` : "Set a soft or hard due date.",
+    title: value ? `${description} Click to change.` : "Set a due date.",
     "aria-label": value ? description : "Set a due date",
   });
   // An unset date reads as an empty cell.
   const val = el("div", { className: `reg-val${value ? "" : " is-empty"}` });
   if (value) {
-    val.append(createDueKindTag(field), document.createTextNode(humanDate(value) || value));
+    val.append(document.createTextNode(humanDate(value) || value));
   } else {
     val.textContent = "—";
   }
@@ -618,21 +616,20 @@ function renderDeliverablePlateCard(deliverable, project) {
     card.appendChild(nameEl);
   }
 
-  // Milestone rule: due (soft or hard, whichever is showing) → delivered
+  // Milestone rule: due → delivered
   const rule = el("div", { className: "plate-rule" });
   const dueValue = state.dueField ? String(deliverable[state.dueField] || "").trim() : "";
   const dueCell = createPlateRuleCell("Due", dueValue ? humanDate(dueValue) || dueValue : "", {
     muted: !dueValue,
-    strong: state.dueField === "hardDue" && state.kind !== "done",
+    strong: state.kind === "late",
     hatched: state.kind === "late",
     title: dueValue
       ? `${describeDeliverableDue(deliverable)} Click to change.`
-      : "Set a soft or hard due date",
+      : "Set a due date",
     onClick: (event) => {
       showCalendarForDeliverableBadge(event.currentTarget, deliverable, project, state.dueField);
     },
   });
-  if (dueValue) dueCell.querySelector(".reg-val").prepend(createDueKindTag(state.dueField));
   rule.appendChild(dueCell);
   rule.appendChild(
     createPlateRuleCell("Delivered", state.kind === "done" ? state.status || "Complete" : "", {
@@ -704,7 +701,7 @@ function ensureCommandDock() {
   const scope = el("span", { className: "reg-kick cmd-scope" });
   const footShortcuts = el("span", {
     className: "reg-kick cmd-shortcuts",
-    textContent: "←→ ↑↓ move · ↩ run · # find a project · esc clear / collapse",
+    textContent: "←→ ↑↓ move · ↩ run · # find a project · esc exit",
   });
   foot.append(
     footShortcuts,
@@ -955,7 +952,7 @@ function buildCommandDockTargetGroup(deliverable, project) {
     const items = getCommandDockProjectDeliverables(project).map((candidate) => {
       const state = getDeliverableRegisterState(candidate);
       const dateStr = getEffectiveDueStr(candidate);
-      const dateLabel = dateStr ? `${DUE_FIELD_LABELS[state.dueField]} ${humanDate(dateStr) || dateStr}` : "";
+      const dateLabel = dateStr ? `${humanDate(dateStr) || dateStr}` : "";
       const meta = [state.status || (state.kind === "done" ? "" : "no status"), dateLabel, state.kind === "late" ? state.stamp.text.toLowerCase() : state.sub]
         .filter(Boolean)
         .join(" · ");
@@ -1589,6 +1586,12 @@ function focusCommandDockGroup(focus) {
 function handleCommandDockKeydown(event) {
   const dock = industryCommandDock;
   if (!dock) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    dismissCommandDock();
+    return;
+  }
   if (industryActivePrompt) {
     handleCommandDockPromptKeydown(event);
     return;
@@ -1641,24 +1644,6 @@ function handleCommandDockKeydown(event) {
     if (dock.input.value.trim() && visible.length === 1) runCommandDockItem(visible[0]);
     return;
   }
-  if (event.key === "Escape") {
-    event.preventDefault();
-    if (dock.input.value) {
-      dock.input.value = "";
-      filterCommandDock();
-    } else if (dock.pendingKey) {
-      dock.pendingKey = null;
-      dock.pendingLabel = "";
-      updateCommandDockContext();
-    } else if (dock.deliverable || dock.project) {
-      clearCommandDockSelection();
-    } else if (dock.expanded) {
-      setCommandDockExpanded(false);
-    } else {
-      dock.input.blur();
-    }
-    return;
-  }
   if ((event.ctrlKey || event.metaKey) && /^[1-9]$/.test(event.key)) {
     const target = dock.items.find((item) => item.shortcut === event.key);
     if (target) {
@@ -1666,6 +1651,26 @@ function handleCommandDockKeydown(event) {
       runCommandDockItem(target);
     }
   }
+}
+
+// Escape exits the whole command interaction in one step.
+function dismissCommandDock() {
+  const dock = industryCommandDock;
+  if (!dock || industryActivePrompt?.saving) return;
+  if (industryActivePrompt) cancelCommandDockPrompt();
+  dock.input.value = "";
+  dock.pendingKey = null;
+  dock.pendingLabel = "";
+  dock.deliverable = null;
+  dock.project = null;
+  dock.multi = [];
+  dock.anchor = null;
+  setCommandDockExpanded(false);
+  renderCommandDockItems();
+  updateCommandDockContext();
+  syncCommandDockSelection();
+  const focused = document.activeElement;
+  if (focused && dock.root.contains(focused)) focused.blur();
 }
 
 // ---------------------------------------------------------------------------
@@ -1852,7 +1857,6 @@ function startAddDeliverablePrompt(project, initialDescription = "") {
     values: {
       name: initialName,
       due: "",
-      hardDue: "",
     },
   };
 
@@ -1881,25 +1885,18 @@ function syncPromptInput() {
     return;
   }
   if (step === 0) {
-    dock.pending.textContent = "Add Deliverable · 1/3 Description";
+    dock.pending.textContent = "Add Deliverable · 1/2 Description";
     dock.pending.hidden = false;
     dock.input.placeholder = "Enter deliverable description (e.g. DD90) and press Enter…";
     dock.input.value = values.name || "";
-    dock.scope.textContent = "Step 1 of 3: Description · ↩ continue · esc cancel";
+    dock.scope.textContent = "Step 1 of 2: Description · ↩ continue · esc cancel";
     if (dock.footShortcuts) dock.footShortcuts.textContent = "↩ continue · esc cancel";
   } else if (step === 1) {
-    dock.pending.textContent = "Add Deliverable · 2/3 Soft Due Date";
+    dock.pending.textContent = "Add Deliverable · 2/2 Due Date";
     dock.pending.hidden = false;
-    dock.input.placeholder = "Enter soft due date (MM/DD/YYYY) or press Enter to skip…";
+    dock.input.placeholder = "Enter due date (MM/DD/YYYY) or press Enter to complete…";
     dock.input.value = values.due || "";
-    dock.scope.textContent = "Step 2 of 3: Soft Due Date · ↩ continue · ⌫ back · esc cancel";
-    if (dock.footShortcuts) dock.footShortcuts.textContent = "↩ continue · ⌫ back · esc cancel";
-  } else if (step === 2) {
-    dock.pending.textContent = "Add Deliverable · 3/3 Hard Due Date";
-    dock.pending.hidden = false;
-    dock.input.placeholder = "Enter hard due date (MM/DD/YYYY) or press Enter to complete…";
-    dock.input.value = values.hardDue || "";
-    dock.scope.textContent = "Step 3 of 3: Hard Due Date · ↩ complete · ⌫ back · esc cancel";
+    dock.scope.textContent = "Step 2 of 2: Due Date · ↩ complete · ⌫ back · esc cancel";
     if (dock.footShortcuts) dock.footShortcuts.textContent = "↩ complete · ⌫ back · esc cancel";
   }
   dock.input.focus({ preventScroll: true });
@@ -1911,7 +1908,7 @@ function syncPromptInput() {
 function setPromptStep(stepIndex) {
   if (!industryActivePrompt) return;
   if (industryActivePrompt.saving) return;
-  const lastStep = industryActivePrompt.type === "timesheet-hours" ? 1 : 2;
+  const lastStep = 1;
   industryActivePrompt.step = Math.max(0, Math.min(lastStep, stepIndex));
   renderPromptView();
   syncPromptInput();
@@ -1937,41 +1934,15 @@ function advancePromptStep(forcedValue) {
   } else if (step === 1) {
     if (!raw || raw.toLowerCase() === "skip" || raw.toLowerCase() === "none") {
       values.due = "";
-      setPromptStep(2);
-      return;
-    }
-    const d = parsePromptDate(raw);
-    if (!d) {
-      toast("Invalid date format. Use MM/DD/YYYY (or press Enter to skip).");
-      return;
-    }
-    values.due = formatPromptDate(d);
-    setPromptStep(2);
-  } else if (step === 2) {
-    if (!raw || raw.toLowerCase() === "skip" || raw.toLowerCase() === "none") {
-      values.hardDue = "";
-      completeAddDeliverablePrompt();
-      return;
-    }
-    // "Same" makes the date just entered the hard date rather than storing it twice.
-    if (raw.toLowerCase() === "same" || raw.toLowerCase() === "same as soft") {
-      values.hardDue = values.due || "";
-      values.due = "";
-      completeAddDeliverablePrompt();
-      return;
+      return completeAddDeliverablePrompt();
     }
     const d = parsePromptDate(raw);
     if (!d) {
       toast("Invalid date format. Use MM/DD/YYYY (or press Enter to complete).");
       return;
     }
-    const soft = parseDueStr(values.due);
-    if (soft && !isEarlierDay(soft, d)) {
-      toast(`The hard due date must be after the soft due date (${values.due}).`);
-      return;
-    }
-    values.hardDue = formatPromptDate(d);
-    completeAddDeliverablePrompt();
+    values.due = formatPromptDate(d);
+    return completeAddDeliverablePrompt();
   }
 }
 
@@ -1980,15 +1951,13 @@ async function completeAddDeliverablePrompt() {
   const { project, values } = industryActivePrompt;
   const name = String(values.name || "").trim() || "Deliverable";
   const due = String(values.due || "").trim();
-  const hardDue = String(values.hardDue || "").trim();
 
   const deliverable = typeof createDeliverable === "function"
-    ? createDeliverable({ name, due, hardDue })
+    ? createDeliverable({ name, due })
     : {
         id: "dlv-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
         name,
         due,
-        hardDue,
         statuses: [],
         statusTags: [],
         attachments: [],
@@ -2042,7 +2011,7 @@ function cancelCommandDockPrompt({ silent = false } = {}) {
   dock.pendingLabel = "";
   dock.input.value = "";
   if (dock.footShortcuts) {
-    dock.footShortcuts.textContent = "←→ ↑↓ move · ↩ run · esc clear / collapse";
+    dock.footShortcuts.textContent = "←→ ↑↓ move · ↩ run · # find a project · esc exit";
   }
   renderCommandDockItems();
   updateCommandDockContext();
@@ -2058,7 +2027,8 @@ function handleCommandDockPromptKeydown(event) {
 
   if (event.key === "Escape") {
     event.preventDefault();
-    cancelCommandDockPrompt();
+    event.stopPropagation();
+    dismissCommandDock();
     return;
   }
   if (event.key === "Backspace" && dock.input.value === "") {
@@ -2115,14 +2085,11 @@ function handleCommandDockPromptInput() {
 
   const previewName = dock.promptView.querySelector('[data-preview="name"]');
   const previewDue = dock.promptView.querySelector('[data-preview="due"]');
-  const previewHardDue = dock.promptView.querySelector('[data-preview="hardDue"]');
 
   if (step === 0 && previewName) {
     previewName.textContent = liveVal || "Untitled";
   } else if (step === 1 && previewDue) {
     previewDue.textContent = liveVal || "—";
-  } else if (step === 2 && previewHardDue) {
-    previewHardDue.textContent = liveVal || "—";
   }
 }
 
@@ -2157,8 +2124,7 @@ function renderPromptView() {
   const stepper = el("div", { className: "cmd-prompt-stepper" });
   const stepsConfig = [
     { label: "Description", val: values.name },
-    { label: "Soft Due Date", val: values.due || "None" },
-    { label: "Hard Due Date", val: values.hardDue || "None" },
+    { label: "Due Date", val: values.due || "None" },
   ];
   stepsConfig.forEach((cfg, idx) => {
     if (idx > 0) {
@@ -2207,8 +2173,8 @@ function renderPromptView() {
       { label: "As-Built", value: "As-Built" },
     ];
   } else if (step === 1) {
-    instructionText = "Enter the soft due date — an earlier target that can slip. It shows until it passes.";
-    subinstructionText = "Format: MM/DD/YYYY (or pick a shortcut below). Press Enter to skip if there is no soft date:";
+    instructionText = "Enter the due date for this deliverable.";
+    subinstructionText = "Format: MM/DD/YYYY (or pick a shortcut below). Press Enter to complete without a date:";
     chipsList = [
       { label: "This Friday", value: "this friday" },
       { label: "Next Friday", value: "next friday" },
@@ -2217,22 +2183,6 @@ function renderPromptView() {
       { label: "Today", value: "today" },
       { label: "Skip (No date)", value: "skip", isPrimary: true },
     ];
-  } else if (step === 2) {
-    instructionText = "Enter the hard due date — the must-finish date. It shows once the soft date passes.";
-    subinstructionText = values.due
-      ? `Format: MM/DD/YYYY, after the soft date (${values.due}). Press Enter or Complete to finish:`
-      : "Format: MM/DD/YYYY. Press Enter or Complete to finish creating this deliverable:";
-    chipsList = [];
-    if (values.due) {
-      chipsList.push({ label: `Make ${values.due} the hard date`, value: "same", isPrimary: true });
-    }
-    chipsList.push(
-      { label: "This Friday", value: "this friday" },
-      { label: "Next Friday", value: "next friday" },
-      { label: "In 2 Weeks", value: "2 weeks" },
-      { label: "End of Month", value: "end of month" },
-      { label: "Complete (No hard date)", value: "skip", isPrimary: !values.due }
-    );
   }
 
   guide.append(
@@ -2271,8 +2221,7 @@ function renderPromptView() {
   preview.append(
     createPreviewRow("Deliverable", values.name || "Untitled", "name"),
     createPreviewRow("Project", getProjectShortName(project), "project"),
-    createPreviewRow("Soft Due", values.due || "—", "due"),
-    createPreviewRow("Hard Due", values.hardDue || "—", "hardDue"),
+    createPreviewRow("Due Date", values.due || "—", "due"),
     createPreviewRow("Status", "In progress", "status")
   );
 
@@ -2433,6 +2382,7 @@ function clearCommandDockSelection() {
 // Re-applies the highlight after every render and drops selections whose
 // records no longer exist.
 function syncCommandDockSelection() {
+  if (typeof updateProjectTutorialSelection === "function") updateProjectTutorialSelection();
   const dock = industryCommandDock;
   if (!dock) return;
   document

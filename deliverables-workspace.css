@@ -17,6 +17,8 @@ body[data-projects-view-mode="card"] #projects-panel > .panel.stack { border: 0;
 #projects-panel .plate-project { font: 400 13px/1.5 var(--modern-font); color: var(--text); margin: 12px 0; }
 #projects-panel .plate-rule { grid-template-columns: repeat(2, minmax(0, 1fr)); border: 0; gap: 10px; }
 #projects-panel .plate-rule-cell { border: 0; padding: 6px 0; background: transparent; }
+/* Keep the due-date target close to its text instead of stretching across the card. */
+body[data-projects-view-mode="card"] #projects-panel .plate-rule-cell.is-clickable { justify-self: start; min-width: 44px; max-width: 100%; }
 #projects-panel .plate-rule-cell:last-child { display: none; }
 #projects-panel .plate-rule-cell .reg-val { font: 400 13px/1.5 var(--modern-font); }
 #projects-panel .plate-foot { border-color: var(--modern-line); margin-top: 10px; }

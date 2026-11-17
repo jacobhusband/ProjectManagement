@@ -191,7 +191,11 @@ class CleanDrawingsPluginPathTests(unittest.TestCase):
             dll.parent.mkdir(parents=True)
             dll.write_bytes(b"")
 
-            with patch.dict(main_module.os.environ, {"APPDATA": temp_dir}):
+            # Exercise the installed-plugin fallback independently of a worker
+            # downloaded by a previous local installer build.
+            with patch.dict(main_module.os.environ, {"APPDATA": temp_dir}), patch.object(
+                clean_drawings, "BUNDLED_WORKER_DIR", Path(temp_dir) / "missing-worker"
+            ):
                 self.assertEqual(dll, clean_drawings.plugin_for(acad))
 
 

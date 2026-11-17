@@ -599,28 +599,6 @@ h4 {
   }
 }
 
-.header-auth-dropdown {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 2px;
-  padding: 3px 6px;
-  border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--surface) 65%, transparent);
-  border: 1px solid var(--glass-border);
-  box-shadow: var(--shadow-xs);
-  min-width: 68px;
-  flex-shrink: 0;
-  transition: var(--transition-fast);
-}
-
-.header-auth-dropdown:hover {
-  border-color: var(--glass-border-hover);
-  background: var(--surface-hover);
-}
-
 .header-discipline-switcher {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -672,218 +650,6 @@ h4 {
 .header-discipline-toggle:disabled {
   cursor: not-allowed;
   opacity: 0.34;
-}
-
-.header-auth-btn {
-  position: relative;
-  min-width: 156px;
-  height: 36px;
-  padding: 0 0.8rem 0 0.45rem;
-  gap: 0.65rem;
-  border-radius: var(--radius-pill);
-  border: 1px solid var(--glass-border);
-  background: linear-gradient(135deg, var(--bg-secondary), var(--bg-tertiary));
-  color: var(--text);
-  white-space: nowrap;
-  box-shadow: var(--shadow-xs);
-  transition: var(--transition-fast);
-}
-
-.header-auth-btn:hover {
-  border-color: var(--glass-border-hover);
-  transform: translateY(-1px);
-  box-shadow: var(--shadow-sm);
-}
-
-.header-auth-btn:disabled {
-  opacity: 0.7;
-  cursor: wait;
-  transform: none;
-  box-shadow: var(--shadow-sm);
-}
-
-.header-auth-btn[data-signed-in="true"] {
-  border-color: rgba(16, 185, 129, 0.35);
-  box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.18), var(--shadow-xs);
-}
-
-.header-auth-btn.is-compact {
-  width: 28px;
-  min-width: 28px;
-  height: 28px;
-  padding: 0;
-  gap: 0;
-  justify-content: center;
-  border-radius: 50%;
-  border-color: transparent;
-  background: transparent;
-  box-shadow: none;
-}
-
-.header-auth-btn.is-compact .header-auth-copy {
-  display: none;
-}
-
-.header-auth-btn.is-compact:hover {
-  border-color: var(--accent);
-  background: var(--hover-overlay);
-  transform: scale(1.06);
-}
-
-.header-auth-btn.is-compact:focus-visible {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-dim);
-}
-
-.header-auth-avatar {
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  flex-shrink: 0;
-  font-size: 0.72rem;
-  font-weight: 700;
-  color: #ffffff;
-  background: linear-gradient(135deg, #2563eb, #10b981);
-  background-position: center;
-  background-repeat: no-repeat;
-  background-size: cover;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-}
-
-.header-auth-btn.is-compact .header-auth-avatar {
-  width: 26px;
-  height: 26px;
-  font-size: 0.75rem;
-}
-
-.header-auth-copy {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: center;
-  gap: 1px;
-  flex: 1;
-}
-
-.header-auth-label {
-  max-width: 150px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1.1;
-  color: var(--text);
-}
-
-.header-auth-meta {
-  max-width: 150px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-size: 10px;
-  line-height: 1.1;
-  color: var(--muted);
-}
-
-.header-auth-status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  background: rgba(148, 163, 184, 0.7);
-  box-shadow: 0 0 0 3px rgba(148, 163, 184, 0.12);
-}
-
-.header-auth-btn.is-compact .header-auth-status-dot {
-  display: none;
-}
-
-.header-auth-btn[data-signed-in="true"] .header-auth-status-dot,
-.header-auth-dropdown.open .header-auth-btn.is-compact {
-  border-color: var(--accent);
-  background: var(--surface-hover);
-  box-shadow: 0 0 0 3px var(--accent-dim);
-}
-
-.header-account-popover {
-  position: absolute;
-  top: calc(100% + 0.5rem);
-  right: 0;
-  width: min(320px, calc(100vw - 2rem));
-  padding: 1rem;
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-lg);
-  background: var(--menu-bg);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  box-shadow: var(--shadow-lg), var(--glow);
-  z-index: 140;
-  animation: fadeIn 0.18s ease-out;
-}
-
-.header-account-popover[hidden] {
-  display: none;
-}
-
-.header-account-profile {
-  display: flex;
-  align-items: center;
-  gap: 0.85rem;
-}
-
-.header-account-avatar {
-  width: 44px;
-  height: 44px;
-  border-radius: 50%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  flex-shrink: 0;
-  font-size: 0.95rem;
-  font-weight: 700;
-  color: #ffffff;
-  background: linear-gradient(135deg, #2563eb, #10b981);
-  background-position: center;
-  background-repeat: no-repeat;
-  background-size: cover;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-}
-
-.header-account-copy {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
-}
-
-.header-account-name {
-  font-size: 0.95rem;
-  font-weight: 700;
-  color: var(--text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.header-account-email {
-  font-size: 0.78rem;
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.header-account-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 0.5rem;
-  margin-top: 0.95rem;
 }
 
 .version-chip {
@@ -2720,71 +2486,6 @@ input.has-field-error {
   text-decoration: none;
 }
 
-.sync-auth-card,
-.google-account-panel {
-  padding: 1rem;
-  border-radius: var(--radius);
-  border: 1px solid var(--glass-border);
-  background: linear-gradient(180deg, var(--bg-secondary), var(--bg-tertiary));
-}
-
-.sync-auth-row {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
-}
-
-.sync-auth-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-  min-width: 0;
-}
-
-.sync-auth-status {
-  font-size: 0.95rem;
-  font-weight: 600;
-  color: var(--text);
-}
-
-.google-account-profile {
-  display: flex;
-  align-items: center;
-  gap: 0.85rem;
-}
-
-.google-account-avatar {
-  width: 48px;
-  height: 48px;
-  border-radius: 50%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 1rem;
-  font-weight: 700;
-  color: #ffffff;
-  background: linear-gradient(135deg, #2563eb, #10b981);
-  background-position: center;
-  background-repeat: no-repeat;
-  background-size: cover;
-  overflow: hidden;
-  flex-shrink: 0;
-}
-
-.google-account-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
-  min-width: 0;
-}
-
-.google-account-name {
-  font-size: 1rem;
-  font-weight: 600;
-  color: var(--text);
-}
-
 /* Notes Internal Tabs Fix */
 .inner-tabs {
   display: flex;
@@ -3096,10 +2797,6 @@ textarea::placeholder {
     margin-bottom: 1rem;
   }
 
-  .sync-auth-row {
-    flex-direction: column;
-    align-items: stretch;
-  }
 }
 
 /* Tools Sections */
@@ -7072,39 +6769,6 @@ dialog::backdrop {
   }
 }
 
-@media (max-width: 1160px) {
-  .header-auth-meta {
-    display: none;
-  }
-}
-
-@media (max-width: 860px) {
-  .header-auth-btn:not(.is-compact) .header-auth-copy {
-    display: none;
-  }
-
-  .header-auth-btn:not(.is-compact) {
-    width: 36px;
-    min-width: 36px;
-    padding: 0;
-    justify-content: center;
-  }
-
-  .header-auth-btn:not(.is-compact) .header-auth-status-dot {
-    position: absolute;
-    right: -1px;
-    bottom: -1px;
-    width: 9px;
-    height: 9px;
-    box-shadow: 0 0 0 2px var(--surface);
-  }
-
-  .header-account-popover {
-    right: -0.35rem;
-    width: min(300px, calc(100vw - 1rem));
-  }
-}
-
 /* Utilities */
 .col-4 {
   grid-column: span 4;
@@ -9068,75 +8732,6 @@ dialog::backdrop {
   background: rgba(16, 185, 129, 0.15);
   color: #34d399;
   border: 1px solid rgba(16, 185, 129, 0.35);
-}
-
-/* Hard due date */
-.deliverable-due-badge.hard {
-  background: transparent;
-  color: var(--danger);
-  border: 1px solid var(--danger);
-}
-
-/* Soft / Hard tag: marks which of a deliverable's two due dates is showing.
-   Soft is a dashed outline, hard is solid, so it reads without colour. */
-.due-kind {
-  display: inline-flex;
-  align-items: center;
-  flex-shrink: 0;
-  padding: 0 5px;
-  border: 1px solid currentColor;
-  border-radius: 3px;
-  font-size: 9.5px;
-  font-weight: 700;
-  line-height: 15px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.due-kind--soft {
-  border-style: dashed;
-  color: var(--text-secondary);
-}
-
-.due-kind--hard {
-  background: var(--text);
-  border-color: var(--text);
-  color: var(--bg);
-}
-
-.deliverable-due-badge {
-  gap: 5px;
-}
-
-.deliverable-due-badge .due-kind--soft {
-  color: inherit;
-}
-
-.deliverable-due-badge .due-kind--hard {
-  background: var(--danger);
-  border-color: var(--danger);
-  color: #ffffff;
-}
-
-.deliverable-due-badge.critical .due-kind--hard {
-  background: #ffffff;
-  border-color: #ffffff;
-  color: var(--danger);
-}
-
-.deliverable-due-badge.finished .due-kind--hard {
-  background: var(--text-secondary);
-  border-color: var(--text-secondary);
-  color: var(--bg-tertiary);
-}
-
-/* Critical */
-.deliverable-due-badge.hard.critical,
-.deliverable-due-badge.critical {
-  background: var(--danger);
-  color: #ffffff;
-  border: 1px solid var(--danger);
-  box-shadow: 0 0 12px rgba(244, 63, 94, 0.4);
 }
 
 .deliverable-summary-due {
@@ -12160,54 +11755,6 @@ dialog::backdrop {
   gap: 8px;
   padding-top: 0.5rem;
   border-top: 1px solid var(--glass-border);
-}
-
-/* Soft / Hard switch on a deliverable's date picker */
-.calendar-due-kind-switch {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
-}
-
-.calendar-due-kind {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  padding: 6px 10px;
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  color: var(--text-secondary);
-  text-align: left;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.calendar-due-kind--soft {
-  border-style: dashed;
-}
-
-.calendar-due-kind:hover {
-  border-color: var(--accent);
-}
-
-.calendar-due-kind.is-active {
-  border-color: var(--accent);
-  box-shadow: inset 0 0 0 1px var(--accent);
-  color: var(--text);
-}
-
-.calendar-due-kind__label {
-  font-size: 10.5px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.calendar-due-kind__value {
-  font-size: 12.5px;
-  font-variant-numeric: tabular-nums;
 }
 
 /* ===== Input with Calendar Icon ===== */
@@ -16187,3 +15734,33 @@ button.page-crumb:hover {
 .tl-plugin-action {
   gap: 6px;
 }
+
+/* The tutorial follows the real form, then sits above the command dock. */
+.project-tutorial[hidden], .project-tutorial [hidden] { display: none; }
+.project-tutorial {
+  position: fixed;
+  right: 20px;
+  bottom: 100px;
+  z-index: 1100;
+  width: min(360px, calc(100vw - 40px));
+  padding: 16px;
+  box-sizing: border-box;
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  background: var(--bg-secondary, #202633);
+  color: var(--text);
+  box-shadow: 0 8px 30px #0004;
+}
+.project-tutorial-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.project-tutorial h3 { margin: 8px 0; font-size: 16px; }
+.project-tutorial p { margin: 8px 0; font-size: 13px; line-height: 1.5; }
+.project-tutorial-error { color: var(--danger, #ef7777); }
+#editDlg > .project-tutorial {
+  position: relative;
+  inset: auto;
+  width: auto;
+  margin: 8px 20px;
+  flex: 0 0 auto;
+  box-shadow: none;
+}
+.project-tutorial-target { outline: 2px solid var(--accent) !important; outline-offset: 3px; }

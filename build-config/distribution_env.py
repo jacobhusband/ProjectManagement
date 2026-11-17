@@ -1,4 +1,4 @@
-"""Prepare the public desktop sign-in configuration without bundling personal keys."""
+"""Prepare the public desktop configuration without bundling personal keys."""
 
 import sys
 from pathlib import Path
@@ -7,8 +7,6 @@ from dotenv import dotenv_values
 
 
 PUBLIC_CONFIG_KEYS = (
-    "GOOGLE_OAUTH_CLIENT_ID",
-    "GOOGLE_CLIENT_SECRET",  # Desktop OAuth client configuration, as in release.yml.
     "MICROSOFT_OAUTH_CLIENT_ID",
     "MICROSOFT_OAUTH_TENANT_ID",
 )

@@ -72,7 +72,7 @@ test('every help topic has matching navigation and searchable content', () => {
 test('help search finds current date and receipt instructions despite markup and whitespace', () => {
   const { context, ids, sections, buttons, search } = setup();
   context.openHelp('projects');
-  search(' HARD   due ');
+  search(' DUE   date schedule ');
   assert.deepEqual(sections.filter(section => !section.hidden).map(section => section.dataset.helpTopic), ['deliverables']);
   assert.equal(ids.helpSearchStatus.textContent, '1 help topic found.');
   assert.equal(buttons.find(button => button.dataset.helpTopic === 'deliverables').attrs['aria-pressed'], 'true');

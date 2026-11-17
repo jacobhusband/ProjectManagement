@@ -76,53 +76,6 @@ class LightingScheduleOverlayTests(unittest.TestCase):
             self.assertIsNone(missing)
 
 
-class GoogleAuthStateTests(unittest.TestCase):
-    def setUp(self):
-        self.api = Api.__new__(Api)
-        self.record = {
-            "provider": "google",
-            "email": "user@example.com",
-            "displayName": "User Example",
-            "refreshToken": "refresh-token",
-            "expiresAt": "2000-01-01T00:00:00Z",
-        }
-
-    def test_startup_read_never_renews_the_token(self):
-        with patch.object(
-            self.api, "_load_google_auth_record", return_value=self.record
-        ), patch.object(
-            self.api, "_refresh_google_auth_record_if_needed"
-        ) as refresh:
-            state = self.api.get_google_auth_state(refresh=False)
-
-        refresh.assert_not_called()
-        self.assertEqual("success", state["status"])
-        self.assertTrue(state["auth"]["signedIn"])
-        self.assertEqual("user@example.com", state["auth"]["email"])
-
-    def test_default_call_still_renews_an_expiring_token(self):
-        renewed = {**self.record, "expiresAt": "2999-01-01T00:00:00Z"}
-        with patch.object(
-            self.api, "_load_google_auth_record", return_value=self.record
-        ), patch.object(
-            self.api, "_refresh_google_auth_record_if_needed", return_value=renewed
-        ) as refresh:
-            state = self.api.get_google_auth_state()
-
-        refresh.assert_called_once_with(self.record)
-        self.assertEqual("2999-01-01T00:00:00Z", state["auth"]["expiresAt"])
-
-    def test_a_revoked_token_signs_the_user_out(self):
-        with patch.object(
-            self.api, "_load_google_auth_record", return_value=self.record
-        ), patch.object(
-            self.api, "_refresh_google_auth_record_if_needed", return_value=None
-        ):
-            state = self.api.get_google_auth_state()
-
-        self.assertFalse(state["auth"]["signedIn"])
-
-
 class LazyModuleTests(unittest.TestCase):
     def test_module_loads_once_on_first_use(self):
         calls = []
@@ -285,26 +238,14 @@ class LogoAssetTests(unittest.TestCase):
         self.assertIn("top: 0;", rule)
         self.assertIn("filter: url(#acies-logo-ink);", rule)
 
-    def test_boot_reads_google_sign_in_locally_and_renews_it_afterwards(self):
+    def test_boot_has_no_google_sign_in_or_token_renewal(self):
         init = _init_function_source()
-        self.assertIn("await loadGoogleAuthState({ silent: true, refresh: false });", init)
-        # The renewal must not be awaited, or it would hold up the first render again.
-        self.assertIn("void refreshGoogleAuthStateInBackground();", init)
-        self.assertNotIn("await refreshGoogleAuthStateInBackground", init)
-        self.assertLess(
-            init.index("showMainApp();"), init.index("void refreshGoogleAuthStateInBackground();")
-        )
+        self.assertNotIn("loadGoogleAuthState", init)
+        self.assertNotIn("refreshGoogleAuthStateInBackground", init)
+        self.assertNotIn("get_google_auth_state", SCRIPT_JS)
         show_main = SCRIPT_JS.split("function showMainApp() {", 1)[1].split("function hideMainApp()", 1)[0]
         self.assertIn("render();", show_main)
         self.assertNotIn("await ", show_main)
-        self.assertIn("api.get_google_auth_state(refresh)", SCRIPT_JS)
-
-    def test_background_renewal_keeps_the_settings_copy_in_step(self):
-        start = SCRIPT_JS.index("async function refreshGoogleAuthStateInBackground() {")
-        body = SCRIPT_JS[start : SCRIPT_JS.index("function openGoogleAccountDialog()", start)]
-        self.assertIn("await loadGoogleAuthState({ silent: true });", body)
-        self.assertIn("api.get_user_settings()", body)
-        self.assertIn("userSettings.googleAuth =", body)
 
 
 if __name__ == "__main__":

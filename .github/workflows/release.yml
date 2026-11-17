@@ -62,26 +62,11 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
 
-      # The installer is published on a public release, so anyone can unpack it and read
-      # this file. It therefore carries only the Google sign-in client, whose secret
-      # Google does not treat as confidential for desktop apps. It must never carry a
-      # Gemini API key: each user enters their own in the app (onboarding or Settings).
+      # Keep the bundled environment empty; users configure their own AI key in Settings.
       - name: Create release .env
         shell: pwsh
-        env:
-          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-          GOOGLE_OAUTH_CLIENT_ID: ${{ vars.GOOGLE_OAUTH_CLIENT_ID }}
         run: |
-          $envFile = Join-Path $PWD ".env"
-          $entries = [ordered]@{
-            GOOGLE_OAUTH_CLIENT_ID = [string]$env:GOOGLE_OAUTH_CLIENT_ID
-            GOOGLE_CLIENT_SECRET = [string]$env:GOOGLE_CLIENT_SECRET
-          }
-          $lines = foreach ($entry in $entries.GetEnumerator()) {
-            $escapedValue = ($entry.Value ?? "").Replace('"', '\"')
-            "{0}=""{1}""" -f $entry.Key, $escapedValue
-          }
-          [System.IO.File]::WriteAllLines($envFile, $lines, [System.Text.UTF8Encoding]::new($false))
+          [System.IO.File]::WriteAllText((Join-Path $PWD ".env"), "", [System.Text.UTF8Encoding]::new($false))
 
       - name: Build installer
         shell: pwsh

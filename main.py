@@ -11,7 +11,6 @@ import tempfile
 import time
 import stat as stat_module
 import sqlite3
-import http.server
 import html
 from html.parser import HTMLParser
 from pathlib import Path
@@ -19,7 +18,6 @@ from copy import copy, deepcopy
 from dotenv import load_dotenv
 import datetime
 import threading
-import secrets
 import hashlib
 import zipfile   # Added for extracting bundles
 import math
@@ -31,8 +29,9 @@ import importlib
 import collections
 import itertools
 import uuid
-from contextlib import closing, contextmanager
-from urllib.parse import parse_qs, urlencode, urlparse, unquote
+import data_transfer
+from contextlib import closing, contextmanager, ExitStack
+from urllib.parse import urlparse, unquote
 
 try:
     from apps.ProjectManagement import database as db_layer
@@ -621,15 +620,6 @@ def load_app_version():
 
 APP_VERSION = load_app_version()
 BUNDLE_RELEASE_TAG = f"v{APP_VERSION}"
-GOOGLE_OAUTH_CLIENT_ID_ENV = "GOOGLE_OAUTH_CLIENT_ID"
-GOOGLE_OAUTH_CLIENT_SECRET_ENV = "GOOGLE_CLIENT_SECRET"
-GOOGLE_OAUTH_AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
-GOOGLE_OAUTH_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
-GOOGLE_OAUTH_REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke"
-GOOGLE_OAUTH_USERINFO_ENDPOINT = "https://openidconnect.googleapis.com/v1/userinfo"
-GOOGLE_OAUTH_SCOPES = ["openid", "email", "profile"]
-GOOGLE_OAUTH_CALLBACK_PATH = "/"
-GOOGLE_OAUTH_TIMEOUT_SECONDS = 180
 OUTLOOK_SCAN_SOURCE_DESKTOP = "desktop-outlook"
 OUTLOOK_MAPI_INBOX_FOLDER_ID = 6
 OUTLOOK_MAPI_PR_INTERNET_MESSAGE_ID = "http://schemas.microsoft.com/mapi/proptag/0x1035001F"
@@ -902,7 +892,7 @@ def build_default_user_settings():
         'workflowCadDefaults': build_default_workflow_cad_defaults(),
         'workroomAutoSelectCadFiles': True,
         'enableUnderConstructionTools': False,
-        'googleAuth': None,
+        'separateDeliverableCompletionGroups': True,
         'workflows': [],
     }
 
@@ -976,11 +966,6 @@ def _merge_missing_user_settings_from_legacy(current_settings, legacy_settings):
         merged["lightingTemplates"] = deepcopy(legacy_templates)
         changed = True
 
-    for auth_key in ("googleAuth",):
-        if not isinstance(merged.get(auth_key), dict) and isinstance(legacy.get(auth_key), dict):
-            merged[auth_key] = deepcopy(legacy.get(auth_key))
-            changed = True
-
     return merged, changed
 
 
@@ -990,6 +975,10 @@ def _sanitize_user_settings_payload(settings):
 
     if "cloudSync" in normalized:
         normalized.pop("cloudSync", None)
+        changed = True
+
+    if "googleAuth" in normalized:
+        normalized.pop("googleAuth", None)
         changed = True
 
     if "microsoftAuth" in normalized:
@@ -1160,46 +1149,23 @@ def parse_due_str(s):
 
 
 def get_active_due_field(deliverable, today=None):
-    """Which stored date a deliverable shows, mirroring JS getActiveDueField.
-
-    'due' is the soft due date and 'hardDue' the hard due date. The soft date
-    shows until it passes, then the hard date takes over; a soft date on or
-    after the hard date adds nothing, so the hard date wins outright.
-    Returns 'due', 'hardDue', or ''.
-    """
+    """Read the single due date, preferring a legacy firm deadline when present."""
     if not isinstance(deliverable, dict):
         return ''
-    soft = str(deliverable.get('due') or '').strip()
-    hard = get_hard_due_str(deliverable)
-    if not soft:
-        return 'hardDue' if hard else ''
-    if not hard:
-        return 'due'
-    hard_date = parse_due_str(hard)
-    if hard_date is None:
-        return 'due'
-    soft_date = parse_due_str(soft)
-    if soft_date is None or soft_date.date() >= hard_date.date():
+    due = str(deliverable.get('due') or '').strip()
+    hard = str(deliverable.get('hardDue') or '').strip()
+    if hard and (parse_due_str(hard) is not None or parse_due_str(due) is None):
         return 'hardDue'
-    today = today or datetime.date.today()
-    return 'hardDue' if soft_date.date() < today else 'due'
+    return 'due' if due else ''
 
 
 def get_effective_due_str(deliverable, today=None):
     """The date that drives scheduling, mirroring JS getEffectiveDueStr.
 
-    The same single date the UI shows, so date-driven sweeps and exports follow
-    the soft -> hard hand-off.
+    The same stable date the UI shows, including records awaiting migration.
     """
     field = get_active_due_field(deliverable, today)
     return str(deliverable.get(field) or '').strip() if field else ''
-
-
-def get_hard_due_str(deliverable):
-    """The hard, must-finish due date. Empty when the date can be pushed."""
-    if not isinstance(deliverable, dict):
-        return ''
-    return str(deliverable.get('hardDue') or '').strip()
 
 
 def sync_status_arrays(task):
@@ -4059,8 +4025,7 @@ class Api:
             service = self._get_symbol_counter_service()
             if not output_path:
                 defaults = service.get_export_defaults(session_id)
-                window = webview.windows[0]
-                output_path = window.create_file_dialog(
+                output_path = self._create_file_dialog(
                     webview.FileDialog.SAVE,
                     directory=defaults['directory'],
                     save_filename=defaults['filename'],
@@ -4106,8 +4071,7 @@ class Api:
             name = re.sub(r'[<>:"/\\|?*]+', '_', str(default_name or 'panel schedules')).strip() or 'panel schedules'
             if not name.lower().endswith(f'.{ext}'):
                 name = f'{name}.{ext}'
-            window = webview.windows[0]
-            output_path = window.create_file_dialog(
+            output_path = self._create_file_dialog(
                 webview.FileDialog.SAVE,
                 directory=get_default_documents_dir(),
                 save_filename=name,
@@ -5164,484 +5128,97 @@ class Api:
             logging.error(f"Error loading local sync metadata: {e}")
             return {"status": "error", "message": str(e), "files": {}}
 
+    def _data_transfer_targets(self):
+        directories = {"page_assets", "page_files", CANVAS_PANEL_SCHEDULES_DIRNAME}
+        targets = {
+            "tasks.json": TASKS_FILE, "notes.json": NOTES_FILE,
+            "settings.json": SETTINGS_FILE, "timesheets.json": TIMESHEETS_FILE,
+            "templates.json": TEMPLATES_FILE, "checklists.json": CHECKLISTS_FILE,
+            "activity_history.json": ACTIVITY_HISTORY_FILE,
+            "lighting_schedules.db": LIGHTING_SCHEDULE_DB_FILE,
+            "lighting_plans.db": LIGHTING_PLAN_DB_FILE,
+            "project_checklists.db": PROJECT_CHECKLIST_DB_FILE,
+            "page_file_links.json": self._page_file_links_path(),
+            PLUGIN_DISABLED_COMMANDS_FILE: self._plugin_command_settings_path(),
+            "acies_project.db": os.environ.get("ACIES_DB_PATH") or (
+                db_layer.DEFAULT_DB_FILE if db_layer else str(Path.home() / ".acies" / "acies_project.db")
+            ),
+        }
+        targets.update({name: get_app_data_path(name) for name in directories})
+        return targets, directories
 
-    def _get_google_oauth_client_id(self):
-        return (os.getenv(GOOGLE_OAUTH_CLIENT_ID_ENV) or "").strip()
-
-    def _get_google_oauth_client_secret(self):
-        return (os.getenv(GOOGLE_OAUTH_CLIENT_SECRET_ENV) or "").strip()
-
-    def _base64url_encode(self, raw_bytes):
-        return base64.urlsafe_b64encode(raw_bytes).rstrip(b"=").decode("ascii")
-
-    def _base64url_decode(self, raw_text):
-        text = str(raw_text or "").strip()
-        if not text:
-            return b""
-        padding = "=" * ((4 - (len(text) % 4)) % 4)
-        return base64.urlsafe_b64decode(f"{text}{padding}")
-
-    def _generate_google_pkce_pair(self):
-        verifier = secrets.token_urlsafe(64)
-        challenge = self._base64url_encode(
-            hashlib.sha256(verifier.encode("ascii")).digest()
-        )
-        return verifier, challenge
-
-    def _extract_google_error_message(self, response):
+    def export_app_data(self):
+        """Save a portable snapshot using the desktop Save dialog."""
         try:
-            payload = response.json() or {}
-        except Exception:
-            payload = {}
-        message = str(
-            payload.get("error_description")
-            or payload.get("error")
-            or response.text
-            or "Google sign-in failed."
-        ).strip()
-        if "client_secret is missing" in message.lower():
-            if not self._get_google_oauth_client_secret():
-                return (
-                    "Google sign-in may require a client secret for this OAuth client. "
-                    f"Add {GOOGLE_OAUTH_CLIENT_SECRET_ENV} to .env and restart the app, "
-                    "or verify the Google OAuth client settings."
+            selection = self._create_file_dialog(
+                webview.FileDialog.SAVE,
+                save_filename=f"ACIES-data-{datetime.date.today().isoformat()}.zip",
+                file_types=("ACIES data export (*.zip)",),
+            )
+            if not selection:
+                return {"status": "cancelled"}
+            path = selection[0] if isinstance(selection, (list, tuple)) else selection
+            if not str(path).lower().endswith(".zip"):
+                path = str(path) + ".zip"
+            targets, directories = self._data_transfer_targets()
+            with ExitStack() as locks:
+                for target in sorted(targets.values()):
+                    locks.enter_context(_get_data_file_lock(target))
+                manifest = data_transfer.export_archive(
+                    path, targets, directories, APP_VERSION, get_app_data_dir(),
                 )
-            return (
-                "Google sign-in was rejected by Google OAuth. Verify that "
-                f"{GOOGLE_OAUTH_CLIENT_ID_ENV} and {GOOGLE_OAUTH_CLIENT_SECRET_ENV} "
-                "match the same Google OAuth client."
-            )
-        return message
+            return {"status": "success", "path": str(path), "fileCount": len(manifest["files"])}
+        except Exception as error:
+            logging.exception("Data export failed")
+            return {"status": "error", "message": str(error)}
 
-    def _build_google_auth_record(self, token_payload, profile_payload, existing_auth=None):
-        existing_auth = existing_auth if isinstance(existing_auth, dict) else {}
-        issued_at = datetime.datetime.now(datetime.timezone.utc)
-        expires_in = 0
+    def import_app_data(self):
+        """Validate first, ask before replacing data, and retain a recovery snapshot."""
         try:
-            expires_in = int(token_payload.get("expires_in") or 0)
-        except Exception:
-            expires_in = 0
-        expires_at = (
-            issued_at + datetime.timedelta(seconds=max(expires_in, 0))
-        ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-        refresh_token = str(token_payload.get("refresh_token") or "").strip()
-        if not refresh_token:
-            refresh_token = str(existing_auth.get("refreshToken") or "").strip()
-        id_token = str(token_payload.get("id_token") or "").strip()
-        if not id_token:
-            id_token = str(existing_auth.get("idToken") or "").strip()
-
-        return {
-            "provider": "google",
-            "subject": str(profile_payload.get("sub") or existing_auth.get("subject") or "").strip(),
-            "email": str(profile_payload.get("email") or existing_auth.get("email") or "").strip(),
-            "displayName": str(profile_payload.get("name") or existing_auth.get("displayName") or "").strip(),
-            "avatarUrl": str(profile_payload.get("picture") or existing_auth.get("avatarUrl") or "").strip(),
-            "signedInAt": str(existing_auth.get("signedInAt") or utc_now_iso()),
-            "tokenIssuedAt": utc_now_iso(),
-            "expiresAt": expires_at,
-            "idToken": id_token,
-            "accessToken": str(token_payload.get("access_token") or "").strip(),
-            "refreshToken": refresh_token,
-            "tokenType": str(token_payload.get("token_type") or "Bearer").strip() or "Bearer",
-            "scope": str(token_payload.get("scope") or " ".join(GOOGLE_OAUTH_SCOPES)).strip(),
-        }
-
-    def _sanitize_google_auth_record(self, auth_record):
-        if not isinstance(auth_record, dict):
-            return {
-                "signedIn": False,
-                "provider": "google",
-                "email": "",
-                "displayName": "",
-                "avatarUrl": "",
-                "signedInAt": "",
-                "expiresAt": "",
-                "hasRefreshToken": False,
-            }
-        return {
-            "signedIn": True,
-            "provider": str(auth_record.get("provider") or "google").strip() or "google",
-            "email": str(auth_record.get("email") or "").strip(),
-            "displayName": str(auth_record.get("displayName") or "").strip(),
-            "avatarUrl": str(auth_record.get("avatarUrl") or "").strip(),
-            "signedInAt": str(auth_record.get("signedInAt") or "").strip(),
-            "expiresAt": str(auth_record.get("expiresAt") or "").strip(),
-            "hasRefreshToken": bool(str(auth_record.get("refreshToken") or "").strip()),
-        }
-
-
-    def _load_google_auth_record(self):
-        settings = self.get_user_settings()
-        auth_record = settings.get("googleAuth")
-        return auth_record if isinstance(auth_record, dict) else None
-
-    def _persist_google_auth_record(self, auth_record):
-        settings = self.get_user_settings()
-        settings["googleAuth"] = auth_record if isinstance(auth_record, dict) and auth_record else None
-        result = self.save_user_settings(settings)
-        if result.get("status") != "success":
-            raise RuntimeError(result.get("message") or "Failed to save Google sign-in state.")
-        return settings
-
-    def _build_google_oauth_status_html(self, title, body, accent="#2563eb"):
-        safe_title = html.escape(str(title or "").strip() or "Google Sign-In")
-        safe_body = html.escape(str(body or "").strip() or "Return to the app.")
-        return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{safe_title}</title>
-  <style>
-    body {{
-      margin: 0;
-      min-height: 100vh;
-      display: grid;
-      place-items: center;
-      padding: 24px;
-      background: #0f172a;
-      color: #e2e8f0;
-      font-family: Inter, Segoe UI, sans-serif;
-    }}
-    .card {{
-      width: min(440px, 100%);
-      border-radius: 20px;
-      padding: 28px;
-      background: rgba(15, 23, 42, 0.92);
-      border: 1px solid rgba(148, 163, 184, 0.22);
-      box-shadow: 0 24px 60px rgba(2, 6, 23, 0.45);
-    }}
-    h1 {{
-      margin: 0 0 12px;
-      font-size: 1.45rem;
-      color: {accent};
-    }}
-    p {{
-      margin: 0;
-      line-height: 1.6;
-      color: #cbd5e1;
-    }}
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h1>{safe_title}</h1>
-    <p>{safe_body}</p>
-  </div>
-</body>
-</html>"""
-
-    def _start_google_oauth_callback_server(self):
-        class GoogleOAuthCallbackServer(http.server.ThreadingHTTPServer):
-            allow_reuse_address = True
-
-        class GoogleOAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
-            def log_message(self, fmt, *args):
-                return
-
-            def do_GET(self):
-                parsed = urlparse(self.path)
-                if parsed.path != GOOGLE_OAUTH_CALLBACK_PATH:
-                    self.send_response(404)
-                    self.send_header("Content-Type", "text/plain; charset=utf-8")
-                    self.end_headers()
-                    self.wfile.write(b"Not found.")
-                    return
-
-                params = parse_qs(parsed.query or "", keep_blank_values=True)
-                self.server.oauth_result = {
-                    "code": (params.get("code") or [""])[0],
-                    "state": (params.get("state") or [""])[0],
-                    "error": (params.get("error") or [""])[0],
-                    "error_description": (params.get("error_description") or [""])[0],
-                }
-
-                error_code = str(self.server.oauth_result.get("error") or "").strip().lower()
-                if error_code:
-                    title = "Google Sign-In Cancelled" if error_code == "access_denied" else "Google Sign-In Failed"
-                    body = (
-                        "You can close this window and return to the app."
-                        if error_code == "access_denied"
-                        else "There was a problem completing Google sign-in. Return to the app for details."
+            selection = self._create_file_dialog(
+                webview.FileDialog.OPEN, allow_multiple=False,
+                file_types=("ACIES data export (*.zip)",),
+            )
+            if not selection:
+                return {"status": "cancelled"}
+            path = selection[0] if isinstance(selection, (list, tuple)) else selection
+            targets, directories = self._data_transfer_targets()
+            with tempfile.TemporaryDirectory(prefix="acies-import-") as stage:
+                manifest = data_transfer.stage_archive(path, stage, targets, directories)
+                project_file = Path(stage) / "tasks.json"
+                project_count = len(json.loads(project_file.read_text(encoding="utf-8"))) if project_file.exists() else 0
+                confirmed = self._get_dialog_window().create_confirmation_dialog(
+                    "Import ACIES data",
+                    f"Import {os.path.basename(path)} ({project_count} project{'s' if project_count != 1 else ''}, {len(manifest['files'])} files)?\n\n"
+                    "This replaces the saved app data on this computer. A recovery copy will be saved first. "
+                    "The app will reload after importing. External project folders and drawings are not transferred.",
+                )
+                if not confirmed:
+                    return {"status": "cancelled"}
+                with ExitStack() as locks:
+                    for target in sorted(targets.values()):
+                        locks.enter_context(_get_data_file_lock(target))
+                    # Keep this computer's AI key; portable exports omit credentials.
+                    settings_path = Path(stage) / "settings.json"
+                    settings = json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.exists() else {}
+                    for key in data_transfer.PRIVATE_SETTINGS:
+                        settings.pop(key, None)
+                    try:
+                        settings["apiKey"] = _read_json_file_strict(SETTINGS_FILE).get("apiKey", "")
+                    except (OSError, ValueError, TypeError, AttributeError):
+                        settings["apiKey"] = ""
+                    settings, _ = _sanitize_user_settings_payload(settings)
+                    settings_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+                    recovery_path = data_transfer.restore_staged(
+                        stage, targets, directories, get_app_data_path("transfer_backups"), APP_VERSION,
                     )
-                    page = self.server.owner._build_google_oauth_status_html(
-                        title,
-                        body,
-                        "#f59e0b" if error_code == "access_denied" else "#ef4444",
-                    )
-                else:
-                    page = self.server.owner._build_google_oauth_status_html(
-                        "Google Sign-In Complete",
-                        "Return to the app. Your sign-in will finish automatically.",
-                    )
+                    for target in targets.values():
+                        _DATA_FILE_VERIFIED_SIGNATURES.pop(_data_file_key(target), None)
+                return {"status": "success", "backupPath": recovery_path, "projectCount": project_count}
+        except Exception as error:
+            logging.exception("Data import failed")
+            return {"status": "error", "message": str(error)}
 
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Cache-Control", "no-store")
-                self.end_headers()
-                self.wfile.write(page.encode("utf-8"))
-                self.server.oauth_event.set()
-                threading.Thread(target=self.server.shutdown, daemon=True).start()
-
-        server = GoogleOAuthCallbackServer(("127.0.0.1", 0), GoogleOAuthCallbackHandler)
-        server.owner = self
-        server.oauth_event = threading.Event()
-        server.oauth_result = {}
-        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-        server_thread.start()
-        return server
-
-    def _exchange_google_auth_code(self, client_id, code, code_verifier, redirect_uri):
-        data = {
-            "client_id": client_id,
-            "code": code,
-            "code_verifier": code_verifier,
-            "grant_type": "authorization_code",
-            "redirect_uri": redirect_uri,
-        }
-        client_secret = self._get_google_oauth_client_secret()
-        if client_secret:
-            data["client_secret"] = client_secret
-        response = requests.post(
-            GOOGLE_OAUTH_TOKEN_ENDPOINT,
-            data=data,
-            timeout=20,
-        )
-        if response.status_code != 200:
-            raise RuntimeError(self._extract_google_error_message(response))
-        payload = response.json() or {}
-        if not str(payload.get("access_token") or "").strip():
-            raise RuntimeError("Google sign-in completed without an access token.")
-        return payload
-
-    def _refresh_google_auth_record_if_needed(self, auth_record):
-        if not isinstance(auth_record, dict):
-            return None
-
-        refresh_token = str(auth_record.get("refreshToken") or "").strip()
-        client_id = self._get_google_oauth_client_id()
-        expires_at = parse_utc_iso(auth_record.get("expiresAt"))
-        if not refresh_token or not client_id or not expires_at:
-            return auth_record
-
-        now = datetime.datetime.now(datetime.timezone.utc)
-        if expires_at > now + datetime.timedelta(minutes=5):
-            return auth_record
-
-        try:
-            data = {
-                "client_id": client_id,
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-            }
-            client_secret = self._get_google_oauth_client_secret()
-            if client_secret:
-                data["client_secret"] = client_secret
-            response = requests.post(
-                GOOGLE_OAUTH_TOKEN_ENDPOINT,
-                data=data,
-                timeout=20,
-            )
-            if response.status_code != 200:
-                message = self._extract_google_error_message(response)
-                try:
-                    payload = response.json() or {}
-                except Exception:
-                    payload = {}
-                if str(payload.get("error") or "").strip().lower() == "invalid_grant":
-                    self._persist_google_auth_record(None)
-                    return None
-                logging.warning(f"Could not refresh Google token: {message}")
-                return auth_record
-
-            token_payload = response.json() or {}
-            refreshed_auth = self._build_google_auth_record(
-                token_payload,
-                {
-                    "sub": auth_record.get("subject"),
-                    "email": auth_record.get("email"),
-                    "name": auth_record.get("displayName"),
-                    "picture": auth_record.get("avatarUrl"),
-                },
-                existing_auth=auth_record,
-            )
-            refreshed_auth["signedInAt"] = str(auth_record.get("signedInAt") or utc_now_iso())
-            self._persist_google_auth_record(refreshed_auth)
-            return refreshed_auth
-        except Exception as exc:
-            logging.warning(f"Could not refresh Google auth state: {exc}")
-            return auth_record
-
-    def _fetch_google_user_profile(self, access_token):
-        response = requests.get(
-            GOOGLE_OAUTH_USERINFO_ENDPOINT,
-            headers={"Authorization": f"Bearer {access_token}"},
-            timeout=20,
-        )
-        if response.status_code != 200:
-            raise RuntimeError(self._extract_google_error_message(response))
-        payload = response.json() or {}
-        if not str(payload.get("email") or "").strip():
-            raise RuntimeError("Google sign-in completed without an email address.")
-        return payload
-
-    def get_google_auth_state(self, refresh=True):
-        """Returns who is signed in, renewing an expiring token first unless refresh is False.
-
-        Renewing is a network round trip, so startup reads the stored record with
-        refresh=False and renews afterwards.
-        """
-        try:
-            auth_record = self._load_google_auth_record()
-            if refresh:
-                auth_record = self._refresh_google_auth_record_if_needed(auth_record)
-            return {
-                "status": "success",
-                "auth": self._sanitize_google_auth_record(auth_record),
-            }
-        except Exception as e:
-            logging.error(f"Error loading Google auth state: {e}")
-            return {
-                "status": "error",
-                "message": str(e),
-                "auth": self._sanitize_google_auth_record(None),
-            }
-
-
-    def sign_in_with_google(self):
-        client_id = self._get_google_oauth_client_id()
-        if not client_id:
-            return {
-                "status": "error",
-                "message": (
-                    "Google sign-in is not configured. Add "
-                    f"{GOOGLE_OAUTH_CLIENT_ID_ENV} to .env and restart the app."
-                ),
-            }
-
-        existing_auth = self._load_google_auth_record()
-        callback_server = self._start_google_oauth_callback_server()
-        callback_port = callback_server.server_address[1]
-        redirect_uri = f"http://127.0.0.1:{callback_port}{GOOGLE_OAUTH_CALLBACK_PATH}"
-        code_verifier, code_challenge = self._generate_google_pkce_pair()
-        state = secrets.token_urlsafe(32)
-        auth_url = (
-            f"{GOOGLE_OAUTH_AUTH_ENDPOINT}?"
-            + urlencode(
-                {
-                    "client_id": client_id,
-                    "redirect_uri": redirect_uri,
-                    "response_type": "code",
-                    "scope": " ".join(GOOGLE_OAUTH_SCOPES),
-                    "state": state,
-                    "access_type": "offline",
-                    "prompt": "consent select_account",
-                    "code_challenge": code_challenge,
-                    "code_challenge_method": "S256",
-                }
-            )
-        )
-
-        try:
-            open_result = self.open_url(auth_url)
-            if open_result.get("status") != "success":
-                raise RuntimeError(open_result.get("message") or "Could not open the browser for Google sign-in.")
-
-            if not callback_server.oauth_event.wait(GOOGLE_OAUTH_TIMEOUT_SECONDS):
-                return {
-                    "status": "error",
-                    "message": "Google sign-in timed out. Please try again.",
-                }
-
-            result = callback_server.oauth_result or {}
-            error_code = str(result.get("error") or "").strip().lower()
-            if error_code:
-                if error_code == "access_denied":
-                    return {
-                        "status": "cancelled",
-                        "message": "Google sign-in was cancelled.",
-                    }
-                error_detail = str(result.get("error_description") or result.get("error") or "").strip()
-                return {
-                    "status": "error",
-                    "message": error_detail or "Google sign-in did not complete.",
-                }
-
-            if str(result.get("state") or "").strip() != state:
-                return {
-                    "status": "error",
-                    "message": "Google sign-in returned an invalid state token.",
-                }
-
-            code = str(result.get("code") or "").strip()
-            if not code:
-                return {
-                    "status": "error",
-                    "message": "Google sign-in finished without an authorization code.",
-                }
-
-            token_payload = self._exchange_google_auth_code(
-                client_id,
-                code,
-                code_verifier,
-                redirect_uri,
-            )
-            profile_payload = self._fetch_google_user_profile(
-                str(token_payload.get("access_token") or "").strip()
-            )
-            auth_record = self._build_google_auth_record(
-                token_payload,
-                profile_payload,
-                existing_auth=existing_auth,
-            )
-            self._persist_google_auth_record(auth_record)
-            return {
-                "status": "success",
-                "auth": self._sanitize_google_auth_record(auth_record),
-            }
-        except Exception as e:
-            logging.error(f"Error signing in with Google: {e}")
-            return {'status': 'error', 'message': str(e)}
-        finally:
-            try:
-                callback_server.shutdown()
-            except Exception:
-                pass
-            try:
-                callback_server.server_close()
-            except Exception:
-                pass
-
-    def sign_out_google(self):
-        try:
-            auth_record = self._load_google_auth_record()
-            revoke_token = ""
-            if isinstance(auth_record, dict):
-                revoke_token = str(
-                    auth_record.get("refreshToken") or auth_record.get("accessToken") or ""
-                ).strip()
-
-            if revoke_token:
-                try:
-                    requests.post(
-                        GOOGLE_OAUTH_REVOKE_ENDPOINT,
-                        data={"token": revoke_token},
-                        headers={"Content-Type": "application/x-www-form-urlencoded"},
-                        timeout=10,
-                    )
-                except Exception as revoke_exc:
-                    logging.warning(f"Google token revoke failed during sign-out: {revoke_exc}")
-
-            self._persist_google_auth_record(None)
-            return {
-                "status": "success",
-                "auth": self._sanitize_google_auth_record(None),
-            }
-        except Exception as e:
-            logging.error(f"Error signing out of Google: {e}")
-            return {'status': 'error', 'message': str(e)}
 
     def _normalize_outlook_scan_date(self, scan_date):
         raw = str(scan_date or "").strip()
@@ -6842,15 +6419,13 @@ class Api:
                 if not isinstance(raw_deliverable, dict):
                     continue
                 name = str(raw_deliverable.get("name") or "").strip()
-                due = str(raw_deliverable.get("due") or "").strip()
-                hard_due = get_hard_due_str(raw_deliverable)
+                due = get_effective_due_str(raw_deliverable)
                 status = str(raw_deliverable.get("status") or "").strip()
-                if not (name or due or hard_due or status):
+                if not (name or due or status):
                     continue
                 deliverables.append({
                     "name": name,
                     "due": due,
-                    "hardDue": hard_due,
                     "status": status,
                 })
             deliverables.sort(
@@ -6917,7 +6492,6 @@ class Api:
                     "projectPath": str(project.get("path") or "").strip(),
                     "deliverable": str(deliverable.get("name") or "").strip(),
                     "due": str(deliverable.get("due") or "").strip(),
-                    "hardDue": get_hard_due_str(deliverable),
                     "status": str(deliverable.get("status") or "").strip(),
                 })
         flat_deliverables.sort(
@@ -9375,68 +8949,50 @@ Return ONLY the JSON object.
             raise RuntimeError(f'pywebview does not provide {name} dialogs.')
         return dialog_type
 
-    def _show_open_file_dialog_sta(self, directory=None, allow_multiple=False, file_types=None):
-        """Displays an OpenFileDialog on a dedicated STA thread on Windows.
+    def _show_file_dialog_windows(self, window, dialog_type, **kwargs):
+        """Run any pywebview picker on its owner's STA UI thread.
 
-        pywebview dispatches JS API calls on background MTA threads. Calling
-        WinForms OpenFileDialog.ShowDialog(owner) from an MTA thread with an
-        owner window created on the STA GUI thread causes an inter-thread COM
-        deadlock ('python is not responding' / MoAppHang). Running on a dedicated
-        STA thread without an inter-thread owner avoids this deadlock completely.
+        JS API calls arrive on MTA worker threads. Marshal the whole dialog to
+        the owner's UI thread: passing an STA owner from an MTA worker can
+        deadlock, while an ownerless STA dialog leaves the app interactive.
+        The Windows backend supplies the owner for open, save, and folder
+        dialogs. Running it on that owner's thread keeps the dialog modal
+        without the cross-thread COM deadlock.
         """
-        if not sys.platform.startswith('win'):
-            return None
-        try:
-            import clr
-            clr.AddReference('System.Windows.Forms')
-            clr.AddReference('System.Threading')
-            import System.Windows.Forms as WinForms
-            from System.Threading import Thread, ThreadStart, ApartmentState
-        except Exception as exc:
-            logging.debug("WinForms STA dialog unavailable: %s", exc)
-            return None
+        import clr
+        clr.AddReference('System.Windows.Forms')
+        from System import Action
+        import System.Windows.Forms as WinForms
 
-        result = []
+        native_window = window.native
+        result = [None]
         exception = []
 
         def target():
             try:
-                dialog = WinForms.OpenFileDialog()
-                dialog.Multiselect = bool(allow_multiple)
-                dialog.RestoreDirectory = True
-                if directory and os.path.isdir(directory):
-                    dialog.InitialDirectory = os.path.abspath(directory)
-                if file_types:
-                    filters = []
-                    for f in file_types:
-                        try:
-                            from webview.util import parse_file_type
-                            desc, exts = parse_file_type(f)
-                            filters.append(f"{desc} ({exts})|{exts}")
-                        except Exception:
-                            filters.append(f if "|" in f else f"{f}|*.*")
-                    filters.append("All Files (*.*)|*.*")
-                    dialog.Filter = "|".join(filters)
-                else:
-                    dialog.Filter = "All Files (*.*)|*.*"
-
-                res = dialog.ShowDialog()
-                if res == WinForms.DialogResult.OK:
-                    result.extend(list(dialog.FileNames))
+                if not self._is_dialog_window_available(window):
+                    raise RuntimeError('The application window is closing or unavailable.')
+                if native_window.WindowState == WinForms.FormWindowState.Minimized:
+                    native_window.WindowState = WinForms.FormWindowState.Normal
+                native_window.BringToFront()
+                native_window.Activate()
+                result[0] = window.create_file_dialog(dialog_type, **kwargs)
             except Exception as e:
                 exception.append(e)
 
-        t = Thread(ThreadStart(target))
-        t.SetApartmentState(ApartmentState.STA)
-        t.Start()
-        t.Join()
+        if native_window.InvokeRequired:
+            native_window.Invoke(Action(target))
+        else:
+            target()
 
         if exception:
-            logging.warning("STA OpenFileDialog encountered error: %s", exception[0])
-            return None
-        return tuple(result)
+            raise exception[0]
+        if not self._is_dialog_window_available(window):
+            raise RuntimeError('The file dialog closed because the application is shutting down.')
+        return result[0]
 
     def _create_file_dialog(self, dialog_type, **kwargs):
+        """Serialize app pickers and keep every native dialog modal to the app."""
         dialog_lock = getattr(self, '_dialog_lock', None)
         if dialog_lock is None:
             dialog_lock = threading.RLock()
@@ -9444,13 +9000,19 @@ Return ONLY the JSON object.
 
         with dialog_lock:
             window = self._get_dialog_window()
-            restore = getattr(window, 'restore', None)
-            if callable(restore):
-                restore()
             if not self._is_dialog_window_available(window):
                 raise RuntimeError('The application window is closing or unavailable.')
 
-            result = window.create_file_dialog(dialog_type, **kwargs)
+            # pywebview expects a sequence even when a caller has no filters.
+            if kwargs.get('file_types') is None:
+                kwargs['file_types'] = ()
+            if sys.platform.startswith('win') and getattr(window, 'native', None) is not None:
+                result = self._show_file_dialog_windows(window, dialog_type, **kwargs)
+            else:
+                restore = getattr(window, 'restore', None)
+                if callable(restore):
+                    restore()
+                result = window.create_file_dialog(dialog_type, **kwargs)
             if not self._is_dialog_window_available(window):
                 raise RuntimeError('The file dialog closed because the application is shutting down.')
             return result
@@ -9514,7 +9076,6 @@ Return ONLY the JSON object.
     def select_template_save_location(self, default_dir=None, default_name=None, file_type=None):
         """Shows a save dialog for template output."""
         try:
-            window = webview.windows[0]
             directory = str(default_dir or '').strip() or get_default_documents_dir()
             save_filename = str(default_name or 'Template').strip() or 'Template'
 
@@ -9533,7 +9094,7 @@ Return ONLY the JSON object.
             if ext and ext in file_type_map:
                 file_types = (file_type_map[ext],)
 
-            file_path = window.create_file_dialog(
+            file_path = self._create_file_dialog(
                 webview.FileDialog.SAVE,
                 directory=directory,
                 save_filename=save_filename,
@@ -9551,14 +9112,13 @@ Return ONLY the JSON object.
     def select_template_file(self):
         """Shows file dialog for selecting template files."""
         try:
-            window = webview.windows[0]
             file_types = (
                 'Document Files (*.doc;*.docx)',
                 'AutoCAD Files (*.dwg)',
                 'Excel Files (*.xlsx;*.xls)',
                 'All Supported (*.doc;*.docx;*.dwg;*.xlsx;*.xls)'
             )
-            file_paths = window.create_file_dialog(
+            file_paths = self._create_file_dialog(
                 webview.OPEN_DIALOG,
                 allow_multiple=False,
                 file_types=file_types
@@ -10103,8 +9663,7 @@ Return ONLY the JSON object.
             if not file_path:
                 default_dir = get_default_documents_dir()
                 default_name = build_timesheet_filename(user_name, week_key)
-                window = webview.windows[0]
-                file_path = window.create_file_dialog(
+                file_path = self._create_file_dialog(
                     webview.FileDialog.SAVE,
                     directory=default_dir,
                     save_filename=default_name,
@@ -10253,13 +9812,12 @@ Return ONLY the JSON object.
     def select_expense_images(self):
         """Shows file dialog for selecting expense receipt images."""
         try:
-            window = webview.windows[0]
             file_types = (
                 'Image Files (*.jpg;*.jpeg;*.png;*.gif;*.bmp;*.heic;*.heif)',
                 'PDF Files (*.pdf)',
                 'All Files (*.*)'
             )
-            file_paths = window.create_file_dialog(
+            file_paths = self._create_file_dialog(
                 webview.OPEN_DIALOG,
                 allow_multiple=True,
                 file_types=file_types
@@ -11034,8 +10592,7 @@ Return ONLY the JSON object.
                 safe_title = self._sanitize_template_filename_stem(
                     title, "Project Page"
                 )
-                window = webview.windows[0]
-                output_path = window.create_file_dialog(
+                output_path = self._create_file_dialog(
                     webview.FileDialog.SAVE,
                     directory=default_directory,
                     save_filename=f"{safe_title}.pdf",
@@ -21083,7 +20640,6 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
         with dialog_lock:
             try:
                 options = options or {}
-                window = webview.windows[0] if (getattr(webview, 'windows', None) and len(webview.windows) > 0) else None
                 default_directory = options.get('default_directory')
                 if default_directory in (None, ''):
                     default_directory = options.get('default_dir')
@@ -21093,48 +20649,22 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
                 allow_multiple = options.get('allow_multiple', False)
                 file_types = tuple(options.get('file_types', ()))
 
-                # In real GUI on Windows (where window.native is a WinForms Form),
-                # run on dedicated STA thread to prevent MTA cross-thread message loop deadlock
-                if window is not None and getattr(window, 'native', None) is not None:
-                    file_paths = self._show_open_file_dialog_sta(
+                try:
+                    file_paths = self._create_file_dialog(
+                        self._get_file_dialog_type('OPEN'),
                         directory=directory,
                         allow_multiple=allow_multiple,
                         file_types=file_types,
                     )
-                    if file_paths is not None:
-                        if not file_paths:
-                            return {'status': 'cancelled', 'paths': []}
-                        return {'status': 'success', 'paths': list(file_paths)}
-
-                # Standard pywebview window.create_file_dialog (used in tests or non-Windows)
-                if window is None:
-                    return {'status': 'error', 'message': 'No window available'}
-
-                file_paths = window.create_file_dialog(
-                    webview.FileDialog.OPEN,
-                    allow_multiple=allow_multiple,
-                    file_types=file_types,
-                    directory=directory,
-                )
+                except TypeError:
+                    file_paths = self._create_file_dialog(
+                        self._get_file_dialog_type('OPEN'),
+                        allow_multiple=allow_multiple,
+                        file_types=file_types,
+                    )
                 if not file_paths:
                     return {'status': 'cancelled', 'paths': []}
                 return {'status': 'success', 'paths': list(file_paths)}
-            except TypeError:
-                try:
-                    window = webview.windows[0] if (getattr(webview, 'windows', None) and len(webview.windows) > 0) else None
-                    if window is None:
-                        return {'status': 'error', 'message': 'No window available'}
-                    file_paths = window.create_file_dialog(
-                        webview.FileDialog.OPEN,
-                        allow_multiple=options.get('allow_multiple', False),
-                        file_types=tuple(options.get('file_types', ()))
-                    )
-                    if not file_paths:
-                        return {'status': 'cancelled', 'paths': []}
-                    return {'status': 'success', 'paths': list(file_paths)}
-                except Exception as e:
-                    logging.error(f"Error in file dialog fallback: {e}")
-                    return {'status': 'error', 'message': str(e)}
             except Exception as e:
                 logging.error(f"Error in file dialog: {e}")
                 return {'status': 'error', 'message': str(e)}
@@ -21148,8 +20678,7 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
     def import_and_process_csv(self):
         """Handles CSV file import dialog."""
         try:
-            window = webview.windows[0]
-            file_paths = window.create_file_dialog(
+            file_paths = self._create_file_dialog(
                 webview.FileDialog.OPEN,  # DEPRECATION FIX
                 allow_multiple=False,
                 file_types=('CSV Files (*.csv)',)

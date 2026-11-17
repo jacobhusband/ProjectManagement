@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    # Include only desktop sign-in configuration; users enter their own AI API keys.
+    # Include only public configuration; users enter their own AI API keys.
     [switch]$ForDistribution
 )
 
@@ -145,7 +145,7 @@ try {
             & $venvPython (Join-Path $PSScriptRoot "distribution_env.py") $envPath $distributionEnvPath
         }
         $env:ACIES_BUILD_ENV_FILE = $distributionEnvPath
-        Write-Host "Distribution build: personal API keys are excluded; desktop sign-in configuration is included." -ForegroundColor Gray
+        Write-Host "Distribution build: personal API keys are excluded; public configuration is included." -ForegroundColor Gray
     } else {
         $env:ACIES_BUILD_ENV_FILE = $envPath
     }

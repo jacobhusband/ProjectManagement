@@ -205,26 +205,5 @@ class LocalSettingsHelperTests(unittest.TestCase):
         self.assertEqual([], sanitized["manageLayersOptions"]["freezePatterns"])
         self.assertEqual([], sanitized["manageLayersOptions"]["thawPatterns"])
 
-    def test_build_google_auth_record_preserves_id_token(self):
-        existing_auth = {"idToken": "existing-id-token", "refreshToken": "refresh-token"}
-        token_payload = {
-            "access_token": "access-token",
-            "expires_in": 3600,
-        }
-        profile_payload = {"sub": "subject-1", "email": "user@example.com"}
-
-        record = self.api._build_google_auth_record(
-            token_payload, profile_payload, existing_auth=existing_auth
-        )
-
-        self.assertEqual("existing-id-token", record["idToken"])
-        self.assertEqual("refresh-token", record["refreshToken"])
-        self.assertEqual("access-token", record["accessToken"])
-
-
-
-
-
-
 if __name__ == "__main__":
     unittest.main()

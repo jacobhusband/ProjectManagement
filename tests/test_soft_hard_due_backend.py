@@ -1,4 +1,4 @@
-"""Soft / hard due dates on the backend: the one shown date drives date sweeps."""
+"""Merged due dates on the backend, including legacy records awaiting migration."""
 import datetime
 import json
 import tempfile
@@ -12,18 +12,19 @@ from test_data_file_storage import Api, _read_json, main_module
 class ActiveDueFieldTests(unittest.TestCase):
     TODAY = datetime.date(2026, 9, 4)
 
-    def test_soft_date_shows_until_it_passes_then_the_hard_date(self):
+    def test_due_date_is_stable_and_prefers_legacy_firm_deadlines(self):
         cases = [
             ({}, "", ""),
+            ({"due": "", "legacyDueDates": {"hardDue": "2026-09-20"}}, "", ""),
             ({"due": "2026-09-10"}, "due", "2026-09-10"),
             ({"hardDue": "2026-09-20"}, "hardDue", "2026-09-20"),
-            ({"due": "2026-09-10", "hardDue": "2026-09-20"}, "due", "2026-09-10"),
-            # The soft date's own day still shows it; the day after hands over.
-            ({"due": "09/04/2026", "hardDue": "2026-09-20"}, "due", "09/04/2026"),
+            ({"due": "2026-09-10", "hardDue": "2026-09-20"}, "hardDue", "2026-09-20"),
+            # Firm deadlines win even before the previous soft date passes.
+            ({"due": "09/04/2026", "hardDue": "2026-09-20"}, "hardDue", "2026-09-20"),
             ({"due": "2026-09-03", "hardDue": "2026-09-20"}, "hardDue", "2026-09-20"),
-            # A passed soft date with no hard date keeps showing (as overdue).
+            # A soft-only legacy record retains its date.
             ({"due": "2026-09-01"}, "due", "2026-09-01"),
-            # A soft date on or after the hard date is ignored.
+            # Firm deadlines win regardless of the old date ordering.
             ({"due": "2026-09-20", "hardDue": "2026-09-20"}, "hardDue", "2026-09-20"),
             ({"due": "2026-09-25", "hardDue": "2026-09-20"}, "hardDue", "2026-09-20"),
             # An unreadable date never beats a readable one.
