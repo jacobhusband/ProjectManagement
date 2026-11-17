@@ -428,7 +428,12 @@ class PowerShellCadWrapperTests(unittest.TestCase):
         text = (REPO_ROOT / "scripts" / "PlotDWGs.ps1").read_text(encoding="utf-8")
 
         self.assertNotIn('(command "QUIT" "N")', text)
-        self.assertIn('(load "$lispPathForScript")\nPlotAllLayouts\n_Y\n"@', text)
+        self.assertIn(
+            '@(Get-AcadTrustedLoadScriptLines -LoadLines @(\n'
+            '      "(load `"$lispPathForScript`")"\n'
+            "    )) + @('PlotAllLayouts', '_Y')",
+            text,
+        )
 
     def test_publish_excel_ole_refresh_setting_is_bound_in_both_uis(self):
         script = SCRIPT_JS_PATH.read_text(encoding="utf-8")

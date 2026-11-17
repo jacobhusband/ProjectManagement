@@ -4,6 +4,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot 'AutoCadDiscovery.ps1')
 
 if (-not (Test-Path -LiteralPath $AcadCore)) {
   Write-Host "PROGRESS: ERROR: AutoCAD Core Console not found at $AcadCore"
@@ -62,9 +63,8 @@ try {
   # Scripts already use command-line file prompts. Leave registry-backed FILEDIA alone.
   # Core Console treats an opened drawing as changed and resaves it unless QUIT
   # is answered on its own line, so "_Y" discards.
-  $scriptLines = @(
-    "CMDECHO 0",
-    "(load `"$lispPathForAcad`")",
+  $loadLines = Get-AcadTrustedLoadScriptLines -LoadLines @("(load `"$lispPathForAcad`")")
+  $scriptLines = @("CMDECHO 0") + $loadLines + @(
     "LISTXREFS",
     "_.QUIT",
     "_Y"

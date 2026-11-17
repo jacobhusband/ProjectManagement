@@ -1214,12 +1214,11 @@ function Invoke-CorePlotAttempt {
     # want to discard all changes?" An answer passed inside LISP is ignored and
     # the prompt's <N> default resaves the DWG, which would make it look newer
     # than its Excel workbook. Answering Y on its own script line discards.
-    $scriptContent = @"
-(load "$lispPathForScript")
-PlotAllLayouts
-_Y
-"@
-    Set-Content -Encoding ASCII -LiteralPath $scriptFile -Value $scriptContent
+    # The generated LISP lives outside AutoCAD's trusted paths on a default profile.
+    $scriptLines = @(Get-AcadTrustedLoadScriptLines -LoadLines @(
+      "(load `"$lispPathForScript`")"
+    )) + @('PlotAllLayouts', '_Y')
+    Set-Content -Encoding ASCII -LiteralPath $scriptFile -Value $scriptLines
 
     $plotOutput = & $acadCore /i "$DwgPath" /s "$scriptFile" 2>&1 | Tee-Object -FilePath $LogFile -Append
     return [pscustomobject]@{

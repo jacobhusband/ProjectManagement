@@ -976,10 +976,16 @@ class CleanXrefsSelectBeforeQueueTests(unittest.TestCase):
             command = commands[0]
             self.assertEqual(str(project / "Arch"), command[command.index("-DefaultDirectory") + 1])
 
-    def test_xref_scan_reads_copies_and_discards_on_quit(self):
+    def test_xref_scan_loads_its_helper_then_reads_copies_and_discards_on_quit(self):
         text = (Path(__file__).resolve().parents[1] / "scripts" / "ListDwgXrefs.ps1").read_text(
             encoding="utf-8")
 
+        self.assertIn(". (Join-Path $PSScriptRoot 'AutoCadDiscovery.ps1')", text)
+        self.assertIn(
+            '$loadLines = Get-AcadTrustedLoadScriptLines -LoadLines @("(load `"$lispPathForAcad`")")',
+            text,
+        )
+        self.assertRegex(text, r'\+ \$loadLines \+ @\(\s*"LISTXREFS"')
         self.assertIn("Copy-Item -LiteralPath $dwg -Destination $scanCopy", text)
         self.assertIn('& $AcadCore /i "$scanCopy"', text)
         self.assertNotIn('/i "$dwg"', text)
