@@ -10702,6 +10702,20 @@ dialog::backdrop {
   background: var(--surface-hover);
 }
 
+#timesheetProjectList {
+  margin-top: 0;
+}
+
+#timesheetProjectList .ts-project-option {
+  flex: 0 0 auto;
+  color: var(--text);
+  text-align: left;
+}
+
+#timesheetProjectMore[hidden] {
+  display: none;
+}
+
 .ai-no-match-project-list {
   margin-top: 0.5rem;
 }

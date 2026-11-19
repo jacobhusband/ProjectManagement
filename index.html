@@ -17,7 +17,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" media="print" data-async-stylesheet>
     <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;700&family=Barlow+Condensed:wght@400;500;600&display=swap" rel="stylesheet" media="print" data-async-stylesheet>
     <script src="app-bootstrap.js?v=20260929-fast-start"></script>
-    <link rel="stylesheet" href="styles.css?v=20261112-help-guides" />
+    <link rel="stylesheet" href="styles.css?v=20261118-timesheet-project-picker" />
     <link rel="stylesheet" href="symbol_counter.css?v=20260818-delete-actions" />
     <link rel="stylesheet" href="panel_schedule_export.css?v=20261009-initial" />
     <link rel="stylesheet" href="industry.css?v=20260930-work-locally" />
@@ -1148,9 +1148,9 @@
     <button id="projectsBackToTopBtn" class="projects-back-to-top" type="button" aria-label="Back to top"
         title="Back to top">Top</button>
     <!-- Timesheet Project Selection Dialog -->
-    <dialog id="timesheetProjectDlg">
+    <dialog id="timesheetProjectDlg" aria-labelledby="timesheetProjectTitle">
         <div class="modal-header">
-            <div class="title">Add Project to Timesheet</div>
+            <div class="title" id="timesheetProjectTitle">Add Project to Timesheet</div>
             <button class="btn ghost" data-close-dialog="timesheetProjectDlg">Cancel</button>
         </div>
         <div class="modal-body stack">
@@ -1160,9 +1160,12 @@
                     <circle cx="11" cy="11" r="8"></circle>
                     <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
                 </svg>
-                <input id="timesheetProjectSearch" type="search" placeholder="Search projects..." />
+                <input id="timesheetProjectSearch" type="search" placeholder="Search by project number, name, or nickname"
+                    aria-label="Search by project number, name, or nickname" />
             </div>
             <div id="timesheetProjectList" class="timesheet-project-list"></div>
+            <div id="timesheetProjectResultsStatus" class="tiny muted" role="status"></div>
+            <button id="timesheetProjectMore" class="btn ghost" type="button" hidden>Show more projects</button>
         </div>
     </dialog>
     <!-- Expense Project Selection Dialog -->
@@ -2629,7 +2632,7 @@
                     <h3>Log hours</h3>
                     <ol>
                         <li>Use the week arrows to choose a week, or <strong>Today</strong> to return to the current week.</li>
-                        <li>Choose <strong>+ Add Project Entry</strong> for a tracked job, or <strong>+ Add Manual Entry</strong> for other work.</li>
+                        <li>Choose <strong>+ Add Project Entry</strong> and search by project number, name, or nickname. Use <strong>+ Add Manual Entry</strong> for other work.</li>
                         <li>Complete the entry details and edit the daily hour cells. Row, daily, and weekly totals update automatically.</li>
                     </ol>
                     <h3>Expenses and receipts</h3>
@@ -3850,7 +3853,7 @@
     </section>
     <div id="updateCheckIndicator" class="corner-status" hidden>Checking for updates...</div>
     <script src="project-pages-editor/dist/project-pages-editor.js?v=20261019-outlook-email-drop"></script>
-    <script src="script.js?v=20261112-help-guides"></script>
+    <script src="script.js?v=20261118-timesheet-project-picker"></script>
     <script src="industry-projects.js?v=20261112-project-filters"></script>
     <script src="industry-shell.js?v=20261112-header-actions"></script>
     <script src="symbol_counter_ui.js?v=20260818-delete-actions"></script>

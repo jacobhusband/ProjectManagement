@@ -5592,52 +5592,6 @@ function addProjectDeliverablesToTimesheet(project, deliverables) {
   toast("Added timesheet entry.");
 }
 
-function addProjectToTimesheet(project, deliverable) {
-  const weekKey = formatWeekKey(currentTimesheetWeek);
-  const entries = getWeekEntries(weekKey);
-  const projectId = project.id || "";
-  const deliverableId = deliverable?.id || "";
-  const existingEntries = entries.filter(
-    (e) => e.projectId === projectId && e.deliverableId === deliverableId
-  );
-
-  const referenceEntry = existingEntries[0];
-  const baseDescription = referenceEntry
-    ? stripWfhSuffix(
-      getTimesheetEntryDescription(referenceEntry, deliverable?.name || "")
-    )
-    : deliverable?.name || "";
-  const serviceDescription = baseDescription;
-  const formattedProjectName = formatTimesheetProjectName(project);
-  const projectName = formattedProjectName || referenceEntry?.projectName || "";
-  const deliverableName =
-    deliverable?.name || referenceEntry?.deliverableName || "";
-  const pmInitials = referenceEntry?.pmInitials || getDefaultPmInitials();
-  const functionName = referenceEntry?.function || getDisciplineFunction();
-  const taskNumber = getTimesheetTaskNumberForDeliverable(
-    deliverableName || baseDescription
-  );
-
-  const entry = {
-    id: createTimesheetEntryId(),
-    projectId,
-    projectName,
-    deliverableId,
-    deliverableName,
-    pmInitials,
-    serviceDescription,
-    function: functionName,
-    hours: { sun: 0, mon: 0, tue: 0, wed: 0, thu: 0, fri: 0, sat: 0 },
-    taskNumber,
-  };
-
-  entries.push(entry);
-  setWeekEntries(weekKey, entries);
-  toast("Added timesheet entry.");
-  saveTimesheets();
-  renderTimesheets();
-}
-
 async function addDeliverableHoursToTimesheet(project, deliverable, hours, date = new Date()) {
   const projectKey = getTimesheetProjectMatchKey(project);
   if (!projectKey || !deliverable) throw new Error("Please select a deliverable with a project.");
@@ -5695,14 +5649,14 @@ async function addDeliverableHoursToTimesheet(project, deliverable, hours, date 
   return { weekKey, day, hours: amount };
 }
 
-function addManualTimesheetEntry() {
+function addTimesheetEntry(project = null) {
   const weekKey = formatWeekKey(currentTimesheetWeek);
   const entries = getWeekEntries(weekKey);
 
   const entry = {
     id: createTimesheetEntryId(),
-    projectId: "",
-    projectName: "",
+    projectId: project?.id || "",
+    projectName: formatTimesheetProjectName(project),
     deliverableId: "",
     deliverableName: "",
     pmInitials: getDefaultPmInitials(),
@@ -5714,7 +5668,7 @@ function addManualTimesheetEntry() {
 
   entries.push(entry);
   setWeekEntries(weekKey, entries);
-  toast("Added manual timesheet entry.");
+  toast(project ? "Added timesheet entry." : "Added manual timesheet entry.");
   saveTimesheets();
   renderTimesheets();
 }
@@ -5728,55 +5682,92 @@ function removeTimesheetEntry(index) {
   renderTimesheets();
 }
 
+function searchTimesheetProjects(projects, query) {
+  const normalize = (value) => String(value ?? "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+  const phrase = normalize(query);
+  const compactQuery = phrase.replaceAll(" ", "");
+  const tokens = phrase.split(" ");
+
+  return projects.map((project) => {
+    const id = normalize(project.id).replaceAll(" ", "");
+    const names = [normalize(project.name), normalize(project.nick)];
+    const fields = [id, ...names];
+    let score = Infinity;
+    if (!phrase || id === compactQuery) score = 0;
+    else if (names.includes(phrase)) score = 1;
+    else if (id.startsWith(compactQuery) || names.some((name) => name.startsWith(phrase))) score = 2;
+    else if (names.some((name) => name.includes(phrase))) score = 3;
+    else if (tokens.every((token) => fields.some((field) => field.includes(token)))) score = 4;
+    return { project, score, name: names[0] || names[1], id };
+  })
+    .filter(({ score }) => Number.isFinite(score))
+    .sort((a, b) => a.score - b.score || a.name.localeCompare(b.name) ||
+      a.id.localeCompare(b.id, undefined, { numeric: true }))
+    .map(({ project }) => project);
+}
+
 function openAddTimesheetProjectDialog() {
   const dlg = document.getElementById("timesheetProjectDlg");
   const list = document.getElementById("timesheetProjectList");
   const search = document.getElementById("timesheetProjectSearch");
+  const status = document.getElementById("timesheetProjectResultsStatus");
+  const more = document.getElementById("timesheetProjectMore");
 
-  if (!dlg || !list) return;
+  if (!dlg || !list || !search || !status || !more) return;
 
-  const renderProjects = (query = "") => {
+  const pageSize = 10;
+  let limit = pageSize;
+  let projects = [];
+  const renderProjects = () => {
     list.innerHTML = "";
-    const q = query.toLowerCase();
-
-    db.filter((p) => {
-      const name = (p.name || "").toLowerCase();
-      const id = (p.id || "").toLowerCase();
-      const nick = (p.nick || "").toLowerCase();
-      return !q || name.includes(q) || id.includes(q) || nick.includes(q);
-    }).forEach((project) => {
-      const deliverables = getProjectDeliverables(project);
-      deliverables.forEach((deliverable) => {
-        const option = el("div", { className: "ts-project-option" });
-        option.innerHTML = `
-          <div><strong>${escapeHtml(project.id || "--")}</strong> - ${escapeHtml(project.nick || project.name || "Unnamed")
-          }</div>
-          <div class="muted tiny">${escapeHtml(deliverable.name || "Deliverable")} - Due: ${escapeHtml(humanDate(getEffectiveDueStr(deliverable)) || "No date")
-          }</div>
-        `;
-        option.onclick = () => {
-          addProjectToTimesheet(project, deliverable);
-          closeDlg("timesheetProjectDlg");
-        };
-        list.appendChild(option);
+    projects.slice(0, limit).forEach((project) => {
+      const name = formatTimesheetProjectName(project);
+      const option = el("button", {
+        className: "ts-project-option",
+        type: "button",
+        textContent: [project.id, name].filter(Boolean).join(" · ") || "Unnamed project",
       });
+      option.onclick = () => {
+        closeDlg("timesheetProjectDlg");
+        addTimesheetEntry(project);
+      };
+      list.appendChild(option);
     });
 
-    if (list.children.length === 0) {
-      list.innerHTML = '<p class="muted" style="padding: 1rem; text-align: center;">No projects found</p>';
-    }
+    more.hidden = projects.length <= limit;
+    const count = projects.length;
+    status.textContent = count
+      ? `Showing ${Math.min(limit, count)} of ${count} ${count === 1 ? "project" : "projects"}`
+      : "No projects found.";
   };
 
-  renderProjects();
-  if (search) {
-    search.value = "";
-    search.oninput = () => renderProjects(search.value);
-  }
+  search.value = "";
+  search.oninput = () => {
+    limit = pageSize;
+    projects = searchTimesheetProjects(db, search.value);
+    renderProjects();
+    list.scrollTop = 0;
+  };
+  search.onkeydown = (event) => {
+    if (event.key === "Enter" && !event.isComposing && projects.length === 1) {
+      event.preventDefault();
+      list.firstElementChild?.click();
+    }
+  };
+  more.onclick = () => {
+    const firstNewIndex = limit;
+    limit += pageSize;
+    renderProjects();
+    list.children[firstNewIndex]?.focus();
+  };
 
-  showDialog(dlg);
-
-  if (search) {
-    // Focus the search field once the dialog is open so the user can type immediately.
+  search.oninput();
+  if (showDialog(dlg)) {
     requestAnimationFrame(() => search.focus());
   }
 }
@@ -38108,7 +38099,7 @@ function initEventListeners() {
   document.getElementById("addTimesheetEntryBtn").onclick = () =>
     openAddTimesheetProjectDialog();
   document.getElementById("addManualTimesheetEntryBtn").onclick = () =>
-    addManualTimesheetEntry();
+    addTimesheetEntry();
   document.getElementById("exportTimesheetBtn").onclick = () =>
     exportTimesheetToExcel();
 

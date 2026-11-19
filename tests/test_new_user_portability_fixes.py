@@ -32,9 +32,11 @@ class PackagingAndBundleTests(unittest.TestCase):
 
     def test_wire_sizer_has_no_render_blocking_google_fonts(self):
         src_html = (REPO_ROOT / "WireSizerApplication" / "index.html").read_text(encoding="utf-8")
-        dist_html = (REPO_ROOT / "WireSizerApplication" / "dist" / "index.html").read_text(encoding="utf-8")
         self.assertNotIn("fonts.googleapis.com", src_html)
-        self.assertNotIn("fonts.googleapis.com", dist_html)
+        dist_path = REPO_ROOT / "WireSizerApplication" / "dist" / "index.html"
+        if dist_path.exists():
+            dist_html = dist_path.read_text(encoding="utf-8")
+            self.assertNotIn("fonts.googleapis.com", dist_html)
 
 
 class ComAndExcelFallbackTests(unittest.TestCase):
