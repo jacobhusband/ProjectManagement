@@ -69,7 +69,8 @@ def get_project_root(dwg_path):
             else:
                 project_root = '\\'.join(root_parts)
 
-            return project_root
+            if os.path.isdir(project_root) and find_pdf_folders(project_root):
+                return project_root
     except (ValueError, IndexError):
         pass
 

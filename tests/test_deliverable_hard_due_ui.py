@@ -1,4 +1,5 @@
 """The deliverable UI exposes one due date across forms and calendars."""
+import re
 import unittest
 from pathlib import Path
 
@@ -26,9 +27,9 @@ class DeliverableDueUiTests(unittest.TestCase):
 
     def test_register_shows_one_due_column(self):
         html = (ROOT / "index.html").read_text(encoding="utf-8")
-        self.assertIn('<th class="reg-th">Due</th>', html)
-        self.assertNotIn('<th class="reg-th">Internal</th>', html)
-        self.assertNotIn('<th class="reg-th">External</th>', html)
+        self.assertRegex(html, r'<th class="reg-th"[^>]*>Due</th>')
+        self.assertNotIn(">Internal</th>", html)
+        self.assertNotIn(">External</th>", html)
 
 
 if __name__ == "__main__":

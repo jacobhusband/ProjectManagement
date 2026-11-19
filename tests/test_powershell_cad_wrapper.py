@@ -193,7 +193,7 @@ class PowerShellCadWrapperTests(unittest.TestCase):
                     self.assertIn('@("-RefreshExcelOleLinks", $RefreshExcelOleLinks)', text)
                     self.assertIn('Write-Host "PROGRESS: ERROR: \'strip_pdf_layers.py\' not found."', text)
                     self.assertIn('Write-Host "PROGRESS: Removing PDF layers from combined PDF..."', text)
-                    self.assertIn('"PDF layer cleanup completed." | Out-File $logFile -Append', text)
+                    self.assertIn('"PDF layer cleanup completed." | Out-File -LiteralPath $logFile -Append', text)
                     self.assertIn('Write-Host "PROGRESS: ERROR: PDF layer cleanup failed."', text)
                     self.assertIn('Write-Host "PROGRESS: ERROR: Publish failed because PDF layer cleanup did not complete."', text)
                     self.assertIn('$pdfMergeFailed = $false', text)
@@ -508,7 +508,7 @@ class PowerShellCadWrapperTests(unittest.TestCase):
             "$maxFileNameLength = Get-MaxPdfFileNameLengthForDirectory -OutputDirectory $OutputDirectory -MaxFullPathLength $MaxFullPathLength",
             "-PreserveSuffix $parentDir.Name",
             "$combinedPdfName = Resolve-CombinedPdfName -DwgPath ([string]$files[0]) -OutputDirectory $batchOutputDir -MaxFullPathLength $MaxCombinedPdfFullPathLength",
-            '"Combined PDF Name: $combinedPdfName" | Out-File $logFile -Append',
+            '"Combined PDF Name: $combinedPdfName" | Out-File -LiteralPath $logFile -Append',
             '$pythonArgs = @($combinedPdfPath) + @($allGeneratedPdfs | ForEach-Object { [string]$_ })',
             '$mergeOutput = & $pythonExecutable $pythonScriptPath @pythonArgs 2>&1',
             '$stripOutput = & $pythonExecutable $stripPdfLayersScriptPath $combinedPdfPath 2>&1',
@@ -520,7 +520,7 @@ class PowerShellCadWrapperTests(unittest.TestCase):
         self.assertNotIn('`"$shrunkPath`"', text)
         self.assertNotIn('$shrunkName = "combined-shrunk-$shrinkPercentInt-percent.pdf"', text)
         self.assertIn(
-            '$shrunkName = "$combinedPdfBaseName-shrunk-$shrinkPercentInt-percent.tmp.pdf"',
+            '$shrunkName = "_shrink_$([guid]::NewGuid().ToString(\'N\').Substring(0, 8)).pdf"',
             text,
         )
         self.assertIn(
@@ -538,7 +538,7 @@ class PowerShellCadWrapperTests(unittest.TestCase):
             "$MaxUpdateAttemptsPerFile = 2",
             'Write-Host "PROGRESS: Processing $fileIndex of $($files.Count): $([IO.Path]::GetFileName($dwgFile)) (attempt $attempt of $MaxUpdateAttemptsPerFile)"',
             'Write-Host "PROGRESS: Verification failed for $([IO.Path]::GetFileName($dwgFile)) on attempt $attempt of ${MaxUpdateAttemptsPerFile}: $attemptReason"',
-            '"DONE (verified on attempt $attempt, exit code $displayExitCode): $dwgFile" | Out-File $logFile -Append',
+            '"DONE (verified on attempt $attempt, exit code $displayExitCode): $dwgFile" | Out-File -LiteralPath $logFile -Append',
             '$failureSummary = "$($failedFiles.Count) of $($files.Count) file(s) failed to verify layer updates."',
             '$failureSummary = "$failureSummary First failure: $firstFailureName :: $firstFailureReason"',
             'Write-Host "PROGRESS: ERROR: $failureSummary"',

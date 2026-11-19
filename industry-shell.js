@@ -311,9 +311,15 @@ function buildPluginTable(bundles) {
     if (status) name.appendChild(status);
     name.appendChild(el("span", { textContent: nameText, title: nameText }));
 
+    const isInstalled =
+      bundle?.state === "installed" || bundle?.state === "update_available";
+    const localVer =
+      isInstalled && bundle?.local_version && bundle.local_version !== "unknown"
+        ? String(bundle.local_version)
+        : "—";
     const installed = el("div", {
       className: "reg-val tl-plugin-installed",
-      textContent: bundle?.local_version ? String(bundle.local_version) : "—",
+      textContent: localVer,
     });
 
     const hasUpdate = bundle?.state === "update_available";

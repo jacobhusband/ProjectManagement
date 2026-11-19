@@ -225,7 +225,7 @@ class RepairXrefPathsToolTests(unittest.TestCase):
         self.assertNotIn("vlax-get-acad-object", text)
         # entmod returns nil for XREF block definitions, so it never changed a path.
         self.assertNotIn("(entmod changedRecord)", text)
-        self.assertIn('"_.QUIT", "_N"', text)
+        self.assertIn('"_.QUIT", "_Y"', text)
         # Windows PowerShell 5.1 throws "Argument types do not match" when a
         # generic List[object] is wrapped directly in @(...).
         self.assertNotRegex(text, r"@\(\$(occurrences|xrefRows|targets|scanFailures)\)")

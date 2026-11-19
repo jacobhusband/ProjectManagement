@@ -466,6 +466,13 @@ function decorateProjectRegisterRow(tr, project, deliverable) {
     const idBadge = idCell?.querySelector(".id-badge");
     if (idBadge) meta.appendChild(idBadge);
     if (clientText) meta.appendChild(el("span", { textContent: `${idBadge ? " · " : ""}${clientText}` }));
+    if (typeof isProjectWorkLocally === "function" && isProjectWorkLocally(project)) {
+      meta.appendChild(el("span", {
+        className: "work-locally-badge",
+        textContent: "LOCAL",
+        title: `Working on local copy${project?.localProjectPath ? `: ${project.localProjectPath}` : ""}`,
+      }));
+    }
     main.appendChild(meta);
   }
 
@@ -547,16 +554,17 @@ function createPlateRuleCell(label, value, { muted = false, filled = false, stro
 // Foot button: opens the project folder; right-click still offers the
 // server/local/edit/delete menu the project name used to carry.
 function createPlateFolderButton(project) {
+  const localMode = typeof isProjectWorkLocally === "function" && isProjectWorkLocally(project);
   const button = el("button", {
     type: "button",
     className: "reg-ico plate-folder",
-    title: "Open project folder",
-    "aria-label": "Open project folder",
+    title: localMode ? "Open local project folder" : "Open project folder",
+    "aria-label": localMode ? "Open local project folder" : "Open project folder",
   });
-  const path = String(project?.path || "").trim();
+  const path = String(localMode ? getProjectLocalFolderPath(project) : project?.path || "").trim();
   if (path) {
-    button.title = `Open: ${path}`;
-    button.setAttribute("aria-label", `Open project folder ${path}`);
+    button.title = localMode ? `Open local copy: ${path}` : `Open: ${path}`;
+    button.setAttribute("aria-label", `${localMode ? "Open local project folder" : "Open project folder"} ${path}`);
   }
   button.innerHTML =
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">' +
@@ -590,7 +598,16 @@ function renderDeliverablePlateCard(deliverable, project) {
   const head = el("div", { className: "plate-head" });
   const identity = el("div", { className: "plate-identity" });
   const kickParts = [String(project?.id || "").trim(), getProjectClientLabel(project)].filter(Boolean);
-  identity.appendChild(el("div", { className: "reg-kick plate-kick", textContent: kickParts.join(" · ") || "—" }));
+  const kickEl = el("div", { className: "reg-kick plate-kick", textContent: kickParts.join(" · ") || "—" });
+  if (typeof isProjectWorkLocally === "function" && isProjectWorkLocally(project)) {
+    kickEl.appendChild(document.createTextNode(" "));
+    kickEl.appendChild(el("span", {
+      className: "work-locally-badge",
+      textContent: "LOCAL",
+      title: `Working on local copy${project?.localProjectPath ? `: ${project.localProjectPath}` : ""}`,
+    }));
+  }
+  identity.appendChild(kickEl);
   const title = el("div", { className: "plate-title", textContent: deliverable.name || "Deliverable" });
   attachDeliverableRename(title, deliverable);
   identity.appendChild(title);
@@ -933,6 +950,8 @@ async function toggleCommandDockWorkLocally(enabled) {
   try {
     if (!(await setProjectWorkLocally(project, enabled))) {
       toast(WORK_LOCALLY_MISSING_COPY_MESSAGE, 6000);
+    } else if (typeof renderProjectsPreservingExpandedDeliverables === "function") {
+      renderProjectsPreservingExpandedDeliverables();
     }
   } catch (error) {
     console.warn("Failed to change Work locally:", error);
@@ -1155,8 +1174,8 @@ function buildCommandDockGroups(
     shortcut: index === 0 ? "Enter" : "",
     run: (target) => action.run(target.project, target.deliverable),
   }));
-  const allTools = toolEntries
-    .map((entry) => ({
+  const allTools = toolEntries.flatMap((entry) => {
+    const item = {
       key: `tool:${entry.id}`,
       label: entry.menuLabel || entry.label,
       tag: true,
@@ -1166,7 +1185,23 @@ function buildCommandDockGroups(
           entry.id,
           buildProjectsTabToolLaunchContext(target.project, target.deliverable)
         ),
-    }));
+    };
+    if (entry.id !== "toolPublishDwgs") return [item];
+    return [
+      item,
+      {
+        key: "tool:toolPublishPartial",
+        label: "Partial Print",
+        search: "partial print publish selected sheets",
+        tag: true,
+        run: (target) =>
+          launchSharedToolCard("toolPublishDwgs", {
+            ...buildProjectsTabToolLaunchContext(target.project, target.deliverable),
+            publishMode: "partial",
+          }),
+      },
+    ];
+  });
 
   const targetGroup = buildCommandDockTargetGroup(deliverable, project);
   const projectSearchGroup = project ? buildCommandDockTargetGroup(null, null) : null;

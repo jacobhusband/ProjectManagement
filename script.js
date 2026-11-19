@@ -2176,9 +2176,18 @@ function normalizeChecklistsDb(rawDb) {
   };
 }
 
+let checklistsDataLoadError = "";
+
 async function loadChecklists() {
+  checklistsDataLoadError = "";
   try {
     const rawData = await window.pywebview.api.get_checklists();
+    if (rawData?.status === "error" && rawData?.code === "data_file_unreadable") {
+      checklistsDataLoadError = rawData.message || "Checklists data could not be loaded.";
+      console.warn("Failed to load checklists:", checklistsDataLoadError);
+      checklistsDb = { checklists: [], templateOverrides: {}, lastModified: null };
+      return checklistsDb;
+    }
     const normalized = normalizeChecklistsDb(rawData || {});
     checklistsDb = normalized.data;
     if (normalized.changed) {
@@ -2187,6 +2196,7 @@ async function loadChecklists() {
     return checklistsDb;
   } catch (e) {
     console.warn("Failed to load checklists:", e);
+    checklistsDataLoadError = e?.message || "Checklists data could not be loaded.";
     checklistsDb = { checklists: [], templateOverrides: {}, lastModified: null };
     return checklistsDb;
   }
@@ -2197,6 +2207,13 @@ async function saveChecklists({
   timestamp = new Date().toISOString(),
   silent = false,
 } = {}) {
+  if (typeof checklistsDataLoadError === "string" && checklistsDataLoadError) {
+    console.warn("Checklists save skipped because checklists data did not load:", checklistsDataLoadError);
+    if (!silent) {
+      toast("⚠️ Saving checklists is paused because checklists data could not be loaded. Restart the app.", 6000);
+    }
+    return false;
+  }
   const resolvedTimestamp =
     normalizeIsoTimestamp(timestamp) || new Date().toISOString();
   if (saveTimestamp) {
@@ -3191,9 +3208,21 @@ function clearTimesheetDragStyles() {
 
 // ===================== TIMESHEET I/O =====================
 
+let timesheetsDataLoadError = "";
+let timesheetSaveInFlight = null;
+let timesheetSaveFollowUp = null;
+let timesheetSaveTimeout = null;
+
 async function loadTimesheets() {
+  timesheetsDataLoadError = "";
   try {
     const data = await window.pywebview.api.get_timesheets();
+    if (data?.status === "error" && data?.code === "data_file_unreadable") {
+      timesheetsDataLoadError = data.message || "Timesheet data could not be loaded.";
+      console.warn("Failed to load timesheets:", timesheetsDataLoadError);
+      timesheetDb = { weeks: {}, expenses: {}, lastModified: null };
+      return timesheetDb;
+    }
     timesheetDb = data || { weeks: {}, expenses: {}, lastModified: null };
     if (!timesheetDb.expenses || typeof timesheetDb.expenses !== "object") {
       timesheetDb.expenses = {};
@@ -3201,8 +3230,34 @@ async function loadTimesheets() {
     return timesheetDb;
   } catch (e) {
     console.warn("Failed to load timesheets:", e);
+    timesheetsDataLoadError = e?.message || "Timesheet data could not be loaded.";
     return { weeks: {}, expenses: {}, lastModified: null };
   }
+}
+
+function queueTimesheetSave() {
+  if (!timesheetSaveInFlight) {
+    timesheetSaveInFlight = window.pywebview.api
+      .save_timesheets(timesheetDb)
+      .then((response) => {
+        if (response?.status !== "success") {
+          throw new Error(response?.message || "Save failed.");
+        }
+      })
+      .finally(() => {
+        timesheetSaveInFlight = null;
+      });
+    return timesheetSaveInFlight;
+  }
+  if (!timesheetSaveFollowUp) {
+    timesheetSaveFollowUp = timesheetSaveInFlight
+      .catch(() => {})
+      .then(() => {
+        timesheetSaveFollowUp = null;
+        return queueTimesheetSave();
+      });
+  }
+  return timesheetSaveFollowUp;
 }
 
 async function saveTimesheets({
@@ -3210,14 +3265,29 @@ async function saveTimesheets({
   timestamp = new Date().toISOString(),
   silent = false,
 } = {}) {
+  if (typeof timesheetsDataLoadError === "string" && timesheetsDataLoadError) {
+    console.warn("Timesheet save skipped because timesheet data did not load:", timesheetsDataLoadError);
+    if (!silent) {
+      toast("⚠️ Saving timesheets is paused because timesheet data could not be loaded. Restart the app.", 6000);
+    }
+    return false;
+  }
+  if (typeof timesheetSaveTimeout !== "undefined" && timesheetSaveTimeout) {
+    clearTimeout(timesheetSaveTimeout);
+    timesheetSaveTimeout = null;
+  }
   const resolvedTimestamp =
     normalizeIsoTimestamp(timestamp) || new Date().toISOString();
   if (saveTimestamp) {
     timesheetDb.lastModified = resolvedTimestamp;
   }
   try {
-    const response = await window.pywebview.api.save_timesheets(timesheetDb);
-    if (response.status !== "success") throw new Error(response.message);
+    if (typeof queueTimesheetSave === "function") {
+      await queueTimesheetSave();
+    } else {
+      const response = await window.pywebview.api.save_timesheets(timesheetDb);
+      if (response.status !== "success") throw new Error(response.message);
+    }
     return true;
   } catch (e) {
     console.warn("Failed to save timesheets:", e);
@@ -3226,6 +3296,31 @@ async function saveTimesheets({
     }
     return false;
   }
+}
+
+function debouncedSaveTimesheets(delayMs = 400) {
+  if (timesheetSaveTimeout) clearTimeout(timesheetSaveTimeout);
+  timesheetSaveTimeout = setTimeout(() => {
+    timesheetSaveTimeout = null;
+    void saveTimesheets();
+  }, delayMs);
+}
+
+async function flushPendingTimesheetSave() {
+  if (timesheetSaveTimeout) {
+    clearTimeout(timesheetSaveTimeout);
+    timesheetSaveTimeout = null;
+    return saveTimesheets();
+  }
+  const pending = timesheetSaveFollowUp || timesheetSaveInFlight;
+  if (pending) {
+    try {
+      await pending;
+    } catch (e) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // ===================== TEMPLATES I/O =====================
@@ -4299,12 +4394,14 @@ async function resolveCadFilesBeforeLaunch(launchContext = null, toolId = "") {
   // project is selected; there is no setting for it.
   const automaticDisciplineRepairXrefs = toolId === "toolRepairXrefPaths";
 
-  // Workroom launches resolve the discipline folder in the backend. Every
-  // other launch selects files in the app so a hidden PowerShell child never
-  // owns the picker and leaves it behind the main window.
+  // Workroom launches resolve the discipline folder in the backend. Partial Print
+  // presents its own sheet picker dialog. Every other launch selects files in the
+  // app so a hidden PowerShell child never owns the picker and leaves it behind
+  // the main window.
   if (
     source === "workroom" ||
     existingFiles.length ||
+    (toolId === "toolPublishDwgs" && context.publishMode === "partial") ||
     ((automaticDisciplineSelection || automaticDisciplineRepairXrefs) &&
       hasLaunchContextProjectPath(context))
   ) {
@@ -4902,7 +4999,7 @@ function createTimesheetRow(entry, index) {
     updateTimesheetsDuplicateIndicator(
       getWeekEntries(formatWeekKey(currentTimesheetWeek))
     );
-    saveTimesheets();
+    debouncedSaveTimesheets();
   };
   projectIdCell.appendChild(projectIdInput);
   row.appendChild(projectIdCell);
@@ -4915,7 +5012,7 @@ function createTimesheetRow(entry, index) {
   });
   taskInput.oninput = (e) => {
     entry.taskNumber = e.target.value;
-    saveTimesheets();
+    debouncedSaveTimesheets();
   };
   taskCell.appendChild(taskInput);
   row.appendChild(taskCell);
@@ -4930,7 +5027,7 @@ function createTimesheetRow(entry, index) {
   nameInput.oninput = (e) => {
     entry.projectName = e.target.value;
     nameInput.title = e.target.value;
-    saveTimesheets();
+    debouncedSaveTimesheets();
   };
   nameCell.appendChild(nameInput);
   row.appendChild(nameCell);
@@ -4943,7 +5040,7 @@ function createTimesheetRow(entry, index) {
   });
   funcInput.oninput = (e) => {
     entry.function = e.target.value.toUpperCase();
-    saveTimesheets();
+    debouncedSaveTimesheets();
   };
   funcCell.appendChild(funcInput);
   row.appendChild(funcCell);
@@ -4957,7 +5054,7 @@ function createTimesheetRow(entry, index) {
   });
   pmInput.oninput = (e) => {
     entry.pmInitials = e.target.value.toUpperCase();
-    saveTimesheets();
+    debouncedSaveTimesheets();
   };
   pmCell.appendChild(pmInput);
   row.appendChild(pmCell);
@@ -4972,7 +5069,7 @@ function createTimesheetRow(entry, index) {
   descInput.oninput = (e) => {
     entry.serviceDescription = e.target.value;
     descInput.title = e.target.value;
-    saveTimesheets();
+    debouncedSaveTimesheets();
   };
   descCell.appendChild(descInput);
   row.appendChild(descCell);
@@ -5122,7 +5219,7 @@ function createHourInput(entry, day, hours, row) {
       entry.hours[day] = 0;
       refreshTimesheetRowTotal(row, entry);
       updateTimesheetTotals(getWeekEntries(formatWeekKey(currentTimesheetWeek)));
-      saveTimesheets();
+      debouncedSaveTimesheets();
       return;
     }
 
@@ -5134,7 +5231,7 @@ function createHourInput(entry, day, hours, row) {
     entry.hours[day] = newHours;
     refreshTimesheetRowTotal(row, entry);
     updateTimesheetTotals(getWeekEntries(formatWeekKey(currentTimesheetWeek)));
-    saveTimesheets();
+    debouncedSaveTimesheets();
   };
 
   input.onblur = (e) => {
@@ -5685,6 +5782,7 @@ function openAddTimesheetProjectDialog() {
 }
 
 function navigateTimesheetWeek(direction) {
+  void flushPendingTimesheetSave();
   const newDate = new Date(currentTimesheetWeek);
   newDate.setDate(newDate.getDate() + direction * 7);
   currentTimesheetWeek = newDate;
@@ -5692,6 +5790,7 @@ function navigateTimesheetWeek(direction) {
 }
 
 function goToCurrentWeek() {
+  void flushPendingTimesheetSave();
   currentTimesheetWeek = getWeekStartDate(new Date());
   renderTimesheets();
 }
@@ -5710,6 +5809,7 @@ function calculateWeekTotals(entries) {
 }
 
 async function exportTimesheetToExcel() {
+  await flushPendingTimesheetSave();
   const weekKey = formatWeekKey(currentTimesheetWeek);
   const entries = getWeekEntries(weekKey);
   const expenseProjects = getWeekExpenses(weekKey);
@@ -5999,7 +6099,7 @@ function createExpenseRow(entry, projectIndex, entryIndex) {
   });
   dateInput.oninput = (e) => {
     entry.date = e.target.value;
-    saveTimesheets();
+    debouncedSaveTimesheets();
   };
   dateCell.appendChild(dateInput);
   row.appendChild(dateCell);
@@ -6012,7 +6112,7 @@ function createExpenseRow(entry, projectIndex, entryIndex) {
   });
   descInput.oninput = (e) => {
     entry.description = e.target.value;
-    saveTimesheets();
+    debouncedSaveTimesheets();
   };
   descCell.appendChild(descInput);
   row.appendChild(descCell);
@@ -6027,7 +6127,7 @@ function createExpenseRow(entry, projectIndex, entryIndex) {
   });
   mileageInput.oninput = (e) => {
     entry.mileage = parseFloat(e.target.value) || 0;
-    saveTimesheets();
+    debouncedSaveTimesheets();
     updateAllExpenseTotals(projectIndex);
   };
   mileageCell.appendChild(mileageInput);
@@ -6044,7 +6144,7 @@ function createExpenseRow(entry, projectIndex, entryIndex) {
   });
   amountInput.oninput = (e) => {
     entry.expense = parseFloat(e.target.value) || 0;
-    saveTimesheets();
+    debouncedSaveTimesheets();
     updateAllExpenseTotals(projectIndex);
   };
   amountCell.appendChild(amountInput);
@@ -9023,11 +9123,12 @@ function openExternalUrl(url) {
 }
 
 function convertPath(raw) {
-  if (raw.startsWith("\\\\acies.lan\\cachedrive\\projects2\\"))
-    return raw.replace("\\\\acies.lan\\cachedrive\\projects2\\", "M:\\");
-  if (raw.startsWith("\\\\acies.lan\\cachedrive\\projects\\"))
-    return raw.replace("\\\\acies.lan\\cachedrive\\projects\\", "P:\\");
-  return raw;
+  const value = String(raw || "");
+  if (value.startsWith("\\\\acies.lan\\cachedrive\\projects2\\"))
+    return value.replace("\\\\acies.lan\\cachedrive\\projects2\\", "M:\\");
+  if (value.startsWith("\\\\acies.lan\\cachedrive\\projects\\"))
+    return value.replace("\\\\acies.lan\\cachedrive\\projects\\", "P:\\");
+  return value;
 }
 
 function normalizeWindowsPath(rawPath) {
@@ -9140,11 +9241,19 @@ function toast(msg, duration = 2500) {
   const existing = document.querySelector(".toast-notification");
   if (existing) existing.remove();
 
+  const bottomOffset =
+    document.body?.dataset?.activeTab === "projects"
+      ? "calc(var(--modern-command-height, 56px) + 16px)"
+      : "24px";
+
   const t = el("div", {
+    className: "toast-notification",
+    role: "status",
+    "aria-live": "polite",
     textContent: msg,
     style: `
             position: fixed;
-            inset: auto auto 24px 50%;
+            inset: auto auto ${bottomOffset} 50%;
             margin: 0;
             transform: translateX(-50%);
             background: var(--surface);
@@ -9159,6 +9268,7 @@ function toast(msg, duration = 2500) {
             display: flex;
             align-items: center;
             gap: 8px;
+            pointer-events: none;
             animation: slideUp 0.3s ease-out forwards;
         `,
   });
@@ -13305,6 +13415,9 @@ function applyTheme(theme) {
     // Ignore storage errors (private mode, etc.)
   }
   userSettings.theme = resolved;
+  if (typeof syncWireSizerTheme === "function") {
+    syncWireSizerTheme(resolved);
+  }
   return resolved;
 }
 
@@ -13424,10 +13537,18 @@ async function save({ silent = false } = {}) {
 }
 
 function showProjectDataLoadError() {
+  const failures = [
+    projectDataLoadError && ["tasks.json (projects)", projectDataLoadError],
+    notesDataLoadError && ["notes.json (pages & scratchpad)", notesDataLoadError],
+    timesheetsDataLoadError && ["timesheets.json (timesheets & expenses)", timesheetsDataLoadError],
+    checklistsDataLoadError && ["checklists.json (checklists)", checklistsDataLoadError],
+  ].filter(Boolean);
+  if (!failures.length) return;
+  const details = failures.map(([file, msg]) => `• ${file}: ${msg}`).join("\n");
   alert(
-    "ACIES could not read your project data, so saving projects is paused to protect it.\n\n" +
-      `${projectDataLoadError}\n\n` +
-      "Nothing has been overwritten. Close the app and check tasks.json and its backups " +
+    "ACIES could not read some saved data, so saving for those files is paused to protect them.\n\n" +
+      `${details}\n\n` +
+      "Nothing has been overwritten. Close the app and check your data files and backups " +
       "in Documents\\ProjectManagementApp before continuing."
   );
 }
@@ -13597,15 +13718,28 @@ function buildGlobalPagesData() {
   };
 }
 
+let notesDataLoadError = "";
+
 async function loadGlobalPages() {
+  notesDataLoadError = "";
   try {
     const data = (await window.pywebview.api.get_notes()) || {};
+    if (data?.status === "error" && data?.code === "data_file_unreadable") {
+      notesDataLoadError = data.message || "Pages data could not be loaded.";
+      console.warn("Failed to load pages:", notesDataLoadError);
+      globalPages = [];
+      globalPageTrash = [];
+      scratchpadHtml = "";
+      activeGlobalPageId = null;
+      return [];
+    }
     globalPages = readGlobalPagesData(data);
     globalPageTrash = (Array.isArray(data.trash) ? data.trash : []).filter((entry) => entry && Array.isArray(entry.pages));
     scratchpadHtml = typeof data.scratchpad === "string" ? data.scratchpad : "";
     activeGlobalPageId = globalPages[0]?.id || null;
     return globalPages;
   } catch (e) {
+    notesDataLoadError = e?.message || "Pages data could not be loaded.";
     globalPages = [];
     globalPageTrash = [];
     scratchpadHtml = "";
@@ -13615,6 +13749,13 @@ async function loadGlobalPages() {
 }
 
 async function saveGlobalPages({ silent = false } = {}) {
+  if (typeof notesDataLoadError === "string" && notesDataLoadError) {
+    console.warn("Pages save skipped because pages data did not load:", notesDataLoadError);
+    if (!silent) {
+      toast("⚠️ Saving pages is paused because notes data could not be loaded. Restart the app.", 6000);
+    }
+    return false;
+  }
   try {
     const dataToSave = buildGlobalPagesData();
     const response = await window.pywebview.api.save_notes(dataToSave);
@@ -16487,6 +16628,11 @@ async function openCopyProjectLocallyDialog(preview, launchContext = null) {
   });
 
   return new Promise((resolve) => {
+    const handleCancel = (e) => {
+      if (copyProjectLocallyDialogState.loading) {
+        e.preventDefault();
+      }
+    };
     const handleClose = () => {
       const action = String(dialog.dataset.localProjectManagerAction || "").trim();
       let result = null;
@@ -16510,16 +16656,16 @@ async function openCopyProjectLocallyDialog(preview, launchContext = null) {
       dialog.dataset.localProjectManagerAction = "";
       resetCopyProjectLocallyDialogState();
       dialog.removeEventListener("close", handleClose);
+      dialog.removeEventListener("cancel", handleCancel);
       resolve(result);
     };
 
     dialog.dataset.localProjectManagerAction = "";
     dialog.addEventListener("close", handleClose);
-    dialog.addEventListener("cancel", (e) => {
-      e.preventDefault();
-    });
+    dialog.addEventListener("cancel", handleCancel);
     if (!showDialog(dialog)) {
       dialog.removeEventListener("close", handleClose);
+      dialog.removeEventListener("cancel", handleCancel);
       dialog.dataset.localProjectManagerAction = "";
       resetCopyProjectLocallyDialogState();
       resolve(null);
@@ -23836,6 +23982,12 @@ function scanAndMergeSimilarProjects() {
   toast(`Merged ${mergedCount} group${mergedCount === 1 ? "" : "s"} (${removedCount} removed).`);
 }
 
+function getDeliverableStatusSortRank(deliverable) {
+  if (!deliverable) return STATUS_PRIORITY.length + 1;
+  const idx = STATUS_PRIORITY.findIndex((status) => hasStatus(deliverable, status));
+  return idx >= 0 ? idx : STATUS_PRIORITY.length;
+}
+
 function sortProjectsByCurrent(items, projectListContextMap = null) {
   items.sort((a, b) => {
     const dir = currentSort.dir === "asc" ? 1 : -1;
@@ -23848,6 +24000,17 @@ function sortProjectsByCurrent(items, projectListContextMap = null) {
       if (!da) return 1;
       if (!dbb) return -1;
       return (da - dbb) * dir;
+    }
+    if (currentSort.key === "deliverable") {
+      const da = String(getOverviewDeliverables(a)?.[0]?.name || "");
+      const dbName = String(getOverviewDeliverables(b)?.[0]?.name || "");
+      return da.localeCompare(dbName, undefined, { numeric: true, sensitivity: "base" }) * dir;
+    }
+    if (currentSort.key === "status") {
+      const ra = getDeliverableStatusSortRank(getOverviewDeliverables(a)?.[0]);
+      const rb = getDeliverableStatusSortRank(getOverviewDeliverables(b)?.[0]);
+      if (ra !== rb) return (ra - rb) * dir;
+      return String(a?.name || "").localeCompare(String(b?.name || ""), undefined, { numeric: true }) * dir;
     }
     const valA = a[currentSort.key];
     const valB = b[currentSort.key];
@@ -24033,6 +24196,27 @@ function compareProjectDeliverableRows(a, b) {
   if (aPinned !== bPinned) return aPinned ? -1 : 1;
 
   const dir = currentSort.dir === "asc" ? 1 : -1;
+  if (currentSort.key === "deliverable") {
+    const delivDiff =
+      String(a?.deliverable?.name || "").localeCompare(
+        String(b?.deliverable?.name || ""),
+        undefined,
+        {
+          numeric: true,
+          sensitivity: "base",
+        }
+      ) * dir;
+    if (delivDiff) return delivDiff;
+    return compareProjectDeliverableRowIdentity(a, b);
+  }
+  if (currentSort.key === "status") {
+    const statusDiff =
+      (getDeliverableStatusSortRank(a?.deliverable) -
+        getDeliverableStatusSortRank(b?.deliverable)) *
+      dir;
+    if (statusDiff) return statusDiff;
+    return compareProjectDeliverableRowIdentity(a, b);
+  }
   if (currentSort.key !== "due") {
     const projectFieldDiff =
       String(a?.project?.[currentSort.key] || "").localeCompare(
@@ -24423,9 +24607,30 @@ function attachProjectDirectoryContextMenu(target, project) {
   return target;
 }
 
-// Opens the project's saved folder. Shared by the card project name and by the
-// folder button on the deliverable plate card.
+// Opens the project's saved folder (or local copy when Work locally is active).
+// Shared by the list row project name, card project name, and card folder button.
 async function openProjectPathFolder(project) {
+  if (typeof isProjectWorkLocally === "function" && isProjectWorkLocally(project)) {
+    if (typeof openProjectDirectory === "function") {
+      await openProjectDirectory(project, "local");
+      return;
+    }
+    const localPath = getProjectLocalFolderPath(project);
+    if (!localPath) {
+      toast(WORK_LOCALLY_MISSING_COPY_MESSAGE, 6000);
+      return;
+    }
+    try {
+      const result = await window.pywebview.api.open_path(convertPath(localPath));
+      if (result?.status && result.status !== "success") {
+        throw new Error(result.message || "Unable to open local folder.");
+      }
+      toast("Opening local folder...");
+    } catch (error) {
+      toast(error?.message || "Failed to open local folder.");
+    }
+    return;
+  }
   const path = String(project?.path || "").trim();
   if (!path) {
     toast("No project path saved.");
@@ -24451,9 +24656,10 @@ function attachCardProjectPathOpen(target, project) {
   target.dataset.projectPathOpen = "true";
   target.setAttribute("role", "button");
   target.setAttribute("tabindex", "0");
-  const path = String(project?.path || "").trim();
+  const localMode = typeof isProjectWorkLocally === "function" && isProjectWorkLocally(project);
+  const path = String(localMode ? getProjectLocalFolderPath(project) : project?.path || "").trim();
   if (path) {
-    target.title = `Open: ${path}`;
+    target.title = localMode ? `Open local copy: ${path}` : `Open: ${path}`;
   }
   const openPath = (event) => {
     event.preventDefault();
@@ -24488,19 +24694,20 @@ function buildProjectTableRow(project, projectIndex, rowTemplate) {
       className: "project-details-main",
     });
 
-    if (project?.path) {
+    const localMode = typeof isProjectWorkLocally === "function" && isProjectWorkLocally(project);
+    const activeFolderPath = String(localMode ? getProjectLocalFolderPath(project) : project?.path || "").trim();
+    if (project?.path || activeFolderPath) {
       const link = el("button", {
         className: "path-link",
         textContent: project?.name || "--",
-        title: `Open: ${project.path}`,
+        title: activeFolderPath
+          ? `${localMode ? "Open local copy" : "Open"}: ${activeFolderPath}`
+          : localMode
+            ? "Open local project folder"
+            : "Open project folder",
       });
-      link.onclick = async () => {
-        try {
-          await window.pywebview.api.open_path(convertPath(project.path));
-          toast("Opening folder...");
-        } catch (e) {
-          toast("Failed to open path.");
-        }
+      link.onclick = () => {
+        void openProjectPathFolder(project);
       };
       attachProjectDirectoryContextMenu(link, project);
       projectDetailsMain.appendChild(link);
@@ -25838,8 +26045,12 @@ function matches(q, p) {
 function updateSortHeaders() {
   document.querySelectorAll("th[data-sort]").forEach((th) => {
     th.classList.remove("sort-asc", "sort-desc");
-    if (th.dataset.sort === currentSort.key)
+    if (th.dataset.sort === currentSort.key) {
       th.classList.add(`sort-${currentSort.dir}`);
+      th.setAttribute("aria-sort", currentSort.dir === "asc" ? "ascending" : "descending");
+    } else {
+      th.setAttribute("aria-sort", "none");
+    }
   });
 }
 
@@ -28660,11 +28871,20 @@ async function fetchDescriptionForBundle(bundleName) {
   // Check Cache
   if (DESCRIPTION_CACHE[coreName]) return DESCRIPTION_CACHE[coreName];
 
+  // Skip network fetch when local override replaces the remote JSON completely.
+  if (PLUGIN_DOC_OVERRIDES[coreName]?.replace) {
+    const resolvedDescription = applyPluginDocOverrides(coreName, null);
+    DESCRIPTION_CACHE[coreName] = resolvedDescription;
+    return resolvedDescription;
+  }
+
   // Construct RAW URL. Pattern: AutoCADCommands/<CoreName>/<CoreName>_descriptions.json
   const url = `https://raw.githubusercontent.com/jacobhusband/ElectricalCommands/main/AutoCADCommands/${coreName}/${coreName}_descriptions.json`;
 
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timeoutId = controller ? setTimeout(() => controller.abort(), 4000) : null;
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, controller ? { signal: controller.signal } : undefined);
     if (!res.ok) throw new Error("Not found");
     const json = await res.json();
     const resolvedDescription = applyPluginDocOverrides(coreName, json);
@@ -28678,6 +28898,8 @@ async function fetchDescriptionForBundle(bundleName) {
       return fallbackDescription;
     }
     return null;
+  } finally {
+    if (timeoutId !== null) clearTimeout(timeoutId);
   }
 }
 
@@ -29251,9 +29473,22 @@ window.updateToolStatus = function (toolId, message) {
       abortBtn.style.display = "inline-block";
       abortBtn.disabled = false;
       abortBtn.onclick = async () => {
-        await window.pywebview.api.abort_clean_dwgs();
-        toast("Aborting...");
         abortBtn.disabled = true;
+        try {
+          if (typeof window.pywebview?.api?.abort_clean_dwgs === "function") {
+            await window.pywebview.api.abort_clean_dwgs();
+          } else {
+            const activeId = activeToolActivityIds.get(String(toolId || "").trim());
+            if (activeId && typeof window.pywebview?.api?.cancel_activity === "function") {
+              await window.pywebview.api.cancel_activity(activeId);
+            }
+          }
+          toast("Aborting...");
+        } catch (err) {
+          console.error("Failed to abort CAD tool:", err);
+          toast("⚠️ Could not cancel the running tool.");
+          abortBtn.disabled = false;
+        }
       };
     } else {
       abortBtn.style.display = "none";
@@ -29295,16 +29530,46 @@ function setWireSizerMessage(message) {
   }
 }
 
+let wireSizerLoadedUrl = "";
+
+function getActiveAppTheme() {
+  const attr = document.documentElement?.getAttribute("data-theme");
+  if (attr === "light" || attr === "dark") return attr;
+  return userSettings.theme === "light" ? "light" : "dark";
+}
+
+function syncWireSizerTheme(theme = getActiveAppTheme()) {
+  const frame = document.getElementById("wireSizerFrame");
+  if (!frame?.contentWindow || !wireSizerLoadedUrl) return;
+  try {
+    frame.contentWindow.postMessage({ type: "acies-theme", theme }, "*");
+  } catch (e) {
+    // Ignore cross-origin or unloaded iframe messaging errors.
+  }
+}
+
+function buildWireSizerEmbedUrl(rawUrl, theme = getActiveAppTheme()) {
+  const separator = String(rawUrl).includes("?") ? "&" : "?";
+  return `${rawUrl}${separator}embedded=1&theme=${encodeURIComponent(theme)}`;
+}
+
 async function openWireSizer() {
   resolveCadLaunchContextForTool();
   const dlg = document.getElementById("wireSizerDlg");
   const frame = document.getElementById("wireSizerFrame");
   if (!dlg || !frame) return;
 
-  setWireSizerMessage("Loading Wire Sizer...");
-  frame.src = "about:blank";
-
+  const theme = getActiveAppTheme();
   if (!dlg.open) dlg.showModal();
+
+  // Keep the Wire Sizer iframe warm across close/reopen so entered loads & distances survive.
+  if (wireSizerLoadedUrl && frame.src && !frame.src.startsWith("about:")) {
+    setWireSizerMessage("");
+    syncWireSizerTheme(theme);
+    return;
+  }
+
+  setWireSizerMessage("Loading Wire Sizer...");
 
   if (window.pywebview?.api?.get_wire_sizer_url) {
     try {
@@ -29318,16 +29583,19 @@ async function openWireSizer() {
         frame.onload = () => {
           clearTimeout(loadTimeout);
           if (frame.src && !frame.src.startsWith("about:")) {
+            wireSizerLoadedUrl = res.url;
             setWireSizerMessage("");
+            syncWireSizerTheme();
           }
         };
         frame.onerror = () => {
           clearTimeout(loadTimeout);
+          wireSizerLoadedUrl = "";
           setWireSizerMessage(
             "Wire Sizer failed to load. Rebuild the tool and try again."
           );
         };
-        frame.src = res.url;
+        frame.src = buildWireSizerEmbedUrl(res.url, theme);
         return;
       }
       setWireSizerMessage(res.message || "Wire Sizer is unavailable.");
@@ -29343,9 +29611,7 @@ async function openWireSizer() {
 
 function closeWireSizer() {
   const dlg = document.getElementById("wireSizerDlg");
-  const frame = document.getElementById("wireSizerFrame");
   if (dlg?.open) dlg.close();
-  if (frame) frame.src = "about:blank";
 }
 
 // --- Project Panel Schedule Manager ---
@@ -35173,9 +35439,20 @@ function queueScratchpadSave(editor) {
   setScratchpadStatus("Saving...");
   if (scratchpadSaveTimer) clearTimeout(scratchpadSaveTimer);
   scratchpadSaveTimer = setTimeout(async () => {
+    scratchpadSaveTimer = null;
     const ok = await saveGlobalPages();
     setScratchpadStatus(ok ? "Saved OK" : "Save failed");
   }, 800);
+}
+function flushPendingScratchpadSave() {
+  if (!scratchpadSaveTimer) return Promise.resolve(true);
+  clearTimeout(scratchpadSaveTimer);
+  scratchpadSaveTimer = null;
+  const editor = document.getElementById("scratchpadEditor");
+  if (editor) {
+    scratchpadHtml = getScratchpadSerializedHtml(editor);
+  }
+  return saveGlobalPages({ silent: true });
 }
 function getScratchpadImageWidthPercent(img, editor) {
   if (!img || !editor) return SCRATCHPAD_IMAGE_DEFAULT_WIDTH_PERCENT;
@@ -37874,6 +38151,26 @@ function initEventListeners() {
     render();
     document.getElementById("search")?.focus();
   });
+  document.querySelectorAll("#projects-panel .projects-table th[data-sort]").forEach((th) => {
+    const activateSort = () => {
+      const sortKey = th.dataset.sort;
+      if (!sortKey) return;
+      if (currentSort.key === sortKey) {
+        currentSort.dir = currentSort.dir === "asc" ? "desc" : "asc";
+      } else {
+        currentSort.key = sortKey;
+        currentSort.dir = "asc";
+      }
+      resetProjectsListPagination();
+      render();
+    };
+    th.addEventListener("click", activateSort);
+    th.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      activateSort();
+    });
+  });
   const scratchpadBtn = document.getElementById("scratchpadBtn");
   if (scratchpadBtn) scratchpadBtn.onclick = () => toggleScratchpad();
   initActivityHistory();
@@ -38130,7 +38427,16 @@ function initEventListeners() {
       }
       console.debug("CAD launch context (publish):", launchContext);
       let publishParams = null;
-      if (userSettings.publishDwgOptions?.refreshExcelOleLinks !== false) {
+      if (launchContext?.publishMode === "partial") {
+        const partial = await askPublishPartialPrint(launchContext);
+        if (!partial) return;
+        launchContext = {
+          ...launchContext,
+          cadFilePaths: partial.files,
+          workflowPreselectedDwgFiles: true,
+        };
+        publishParams = { refreshExcelOleLinks: partial.refresh };
+      } else if (userSettings.publishDwgOptions?.refreshExcelOleLinks !== false) {
         const excelChoice = await askPublishExcelRefresh(launchContext);
         if (!excelChoice) return;
         publishParams = { refreshExcelOleLinks: excelChoice === "refresh" };
@@ -39302,38 +39608,48 @@ function initEventListeners() {
   document
     .getElementById("btnBrowseAutocad")
     .addEventListener("click", async () => {
-      const res = await window.pywebview.api.select_files({
-        allow_multiple: false,
-        file_types: ["Executable Files (*.exe)"],
-        directory: "C:\\Program Files\\Autodesk",
-      });
-      if (res.status === "success" && res.paths.length) {
-        document.getElementById("settings_autocadPath").value = res.paths[0];
-        userSettings.autocadPath = res.paths[0];
-        settingsAutocadPathExplicitlyChanged = true;
-        // Keep detected versions selected when the chosen executable matches.
-        document
-          .querySelectorAll('input[name="autocad_version_radio"]')
-          .forEach((radio) => (radio.checked = radio.value === res.paths[0]));
-        debouncedSaveUserSettings();
+      try {
+        const res = await window.pywebview.api.select_files({
+          allow_multiple: false,
+          file_types: ["Executable Files (*.exe)"],
+          default_directory: "C:\\Program Files\\Autodesk",
+        });
+        if (res?.status === "success" && Array.isArray(res.paths) && res.paths.length) {
+          document.getElementById("settings_autocadPath").value = res.paths[0];
+          userSettings.autocadPath = res.paths[0];
+          settingsAutocadPathExplicitlyChanged = true;
+          // Keep detected versions selected when the chosen executable matches.
+          document
+            .querySelectorAll('input[name="autocad_version_radio"]')
+            .forEach((radio) => (radio.checked = radio.value === res.paths[0]));
+          debouncedSaveUserSettings();
+        }
+      } catch (e) {
+        console.error("Failed to browse for AutoCAD executable:", e);
+        toast("⚠️ Could not open file browser.");
       }
     });
 
   document
     .getElementById("btnBrowseAutocadSelect")
     .addEventListener("click", async () => {
-      const res = await window.pywebview.api.select_files({
-        allow_multiple: false,
-        file_types: ["Executable Files (*.exe)"],
-        directory: "C:\\Program Files\\Autodesk",
-      });
-      if (res.status === "success" && res.paths.length) {
-        document.getElementById("autocad_select_custom").value = res.paths[0];
-        settingsAutocadPathExplicitlyChanged = true;
-        // Uncheck radio buttons
-        document
-          .querySelectorAll('input[name="autocad_select_radio"]')
-          .forEach((radio) => (radio.checked = false));
+      try {
+        const res = await window.pywebview.api.select_files({
+          allow_multiple: false,
+          file_types: ["Executable Files (*.exe)"],
+          default_directory: "C:\\Program Files\\Autodesk",
+        });
+        if (res?.status === "success" && Array.isArray(res.paths) && res.paths.length) {
+          document.getElementById("autocad_select_custom").value = res.paths[0];
+          settingsAutocadPathExplicitlyChanged = true;
+          // Uncheck radio buttons
+          document
+            .querySelectorAll('input[name="autocad_select_radio"]')
+            .forEach((radio) => (radio.checked = false));
+        }
+      } catch (e) {
+        console.error("Failed to browse for AutoCAD executable:", e);
+        toast("⚠️ Could not open file browser.");
       }
     });
 
@@ -39343,13 +39659,14 @@ function initEventListeners() {
       const selectedRadio = document.querySelector(
         'input[name="autocad_select_radio"]:checked'
       );
-      if (selectedRadio) {
-        userSettings.autocadPath = selectedRadio.value;
-      } else {
-        userSettings.autocadPath = document
-          .getElementById("autocad_select_custom")
-          .value.trim();
+      const chosenPath = selectedRadio
+        ? String(selectedRadio.value || "").trim()
+        : String(document.getElementById("autocad_select_custom")?.value || "").trim();
+      if (!chosenPath) {
+        toast("⚠️ Select an AutoCAD version or browse to accoreconsole.exe first.");
+        return;
       }
+      userSettings.autocadPath = chosenPath;
       const settingsAutocadInput = document.getElementById("settings_autocadPath");
       if (settingsAutocadInput) {
         settingsAutocadInput.value = userSettings.autocadPath || "";
@@ -39800,16 +40117,22 @@ function initEventListeners() {
     spinner.style.display = "block";
     try {
       const all = await window.pywebview.api.get_bundle_statuses();
+      const bundles = all?.status === "success" && Array.isArray(all.data) ? all.data : [];
       // Releases after v0.3.0 ship CleanCADCommands inside the combined plugin.
       const bundle =
-        all.data.find((b) => b.bundle_name === COMBINED_PLUGIN_BUNDLE) ||
-        all.data.find((b) => b.name.includes("CleanCADCommands"));
-      if (bundle) {
-        await window.pywebview.api.install_single_bundle(bundle.asset);
-        toast("Installed!");
-        closeDlg("installPrereqDlg");
-        updateCleanDwgToolState();
-        ensureBundlesRendered({ force: true });
+        bundles.find((b) => b.bundle_name === COMBINED_PLUGIN_BUNDLE) ||
+        bundles.find((b) => String(b.name || "").includes("CleanCADCommands"));
+      if (!bundle || !bundle.asset) {
+        toast(all?.notice || "Plugin download is unavailable right now. Check your internet connection and try again.");
+      } else {
+        const res = await window.pywebview.api.install_single_bundle(bundle.asset);
+        if (res?.status !== "success") {
+          toast(res?.message || "Installation failed.");
+        } else {
+          toast("Installed!");
+          closeDlg("installPrereqDlg");
+          ensureBundlesRendered({ force: true });
+        }
       }
     } catch (e) {
       toast("Installation failed.");
@@ -39822,14 +40145,22 @@ async function init() {
   showAppLoader();
   window.addEventListener("pagehide", () => {
     if (dataTransferReloadPending) return;
+    void flushPendingProjectSave();
+    void flushPendingTimesheetSave();
+    void flushPendingScratchpadSave();
+    if (typeof flushPageSave === "function") {
+      void flushPageSave();
+    }
     if (typeof debouncedSaveUserSettings?.flush === "function") {
       debouncedSaveUserSettings.flush();
     }
     debouncedSaveActivityHistory.flush();
   });
   try {
-    if (!window.pywebview)
-      await new Promise((r) => window.addEventListener("pywebviewready", r));
+    // Wait until pywebview has actually populated window.pywebview.api, not just created the stub object.
+    if (typeof window.pywebview?.api?.get_user_settings !== "function") {
+      await new Promise((r) => window.addEventListener("pywebviewready", r, { once: true }));
+    }
     initializeDataTransferWriteTracking();
     startCspViolationReporting();
     void loadActivityHistory();
@@ -39899,7 +40230,7 @@ async function init() {
     } catch (error) {
       console.warn("Could not read the import notice:", error);
     }
-    if (projectDataLoadError) {
+    if (projectDataLoadError || notesDataLoadError || timesheetsDataLoadError || checklistsDataLoadError) {
       // Let the loader close first so the warning is not hidden behind it.
       setTimeout(showProjectDataLoadError, 300);
     }

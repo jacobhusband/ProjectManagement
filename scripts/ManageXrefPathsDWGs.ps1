@@ -488,13 +488,13 @@ try {
 )
 (princ)
 '@
-  Set-Content -LiteralPath $scanLspPath -Value $scanLisp -Encoding ASCII
+  Set-Content -LiteralPath $scanLspPath -Value $scanLisp -Encoding Default
   # Core Console shows no dialogs, so profile-backed FILEDIA/CMDDIA/PROXYNOTICE are left alone.
   $scanScript = @(Get-AcadTrustedLoadScriptLines -LoadLines @("(load `"$scanLspForAcad`")")) + @(
     "ACIESXREFSCAN",
-    "_.QUIT", "_N"
+    "_.QUIT", "_Y"
   )
-  Set-Content -LiteralPath $scanScrPath -Value ($scanScript -join "`r`n") -Encoding ASCII
+  Set-Content -LiteralPath $scanScrPath -Value ($scanScript -join "`r`n") -Encoding Default
 
   $occurrences = New-Object 'System.Collections.Generic.List[object]'
   $scanFailures = New-Object 'System.Collections.Generic.List[string]'
@@ -538,7 +538,7 @@ try {
       continue
     }
 
-    foreach ($line in @(Get-Content -LiteralPath $scanOutput -Encoding ASCII)) {
+    foreach ($line in @(Get-Content -LiteralPath $scanOutput -Encoding Default)) {
       if ([string]::IsNullOrWhiteSpace($line)) { continue }
       $parts = @($line -split "`t", 7)
       while ($parts.Count -lt 7) { $parts += "" }
@@ -602,12 +602,31 @@ try {
     else {
       "No XREF definitions were found in the selected drawings."
     }
-    [System.Windows.Forms.MessageBox]::Show(
-      $message,
-      "XREF",
-      [System.Windows.Forms.MessageBoxButtons]::OK,
-      [System.Windows.Forms.MessageBoxIcon]::Information
-    ) | Out-Null
+    if ($env:ACIES_NONINTERACTIVE -ne '1') {
+      $msgOwner = New-Object System.Windows.Forms.Form
+      $msgOwner.TopMost = $true
+      $msgOwner.ShowInTaskbar = $false
+      $msgOwner.FormBorderStyle = 'FixedToolWindow'
+      $msgOwner.StartPosition = 'Manual'
+      $msgOwner.Location = New-Object System.Drawing.Point(-32000, -32000)
+      $msgOwner.Size = New-Object System.Drawing.Size(1, 1)
+      $msgOwner.Opacity = 0
+      try {
+        Show-FormWindow $msgOwner
+        $msgOwner.Activate()
+        [System.Windows.Forms.MessageBox]::Show(
+          $msgOwner,
+          $message,
+          "XREF",
+          [System.Windows.Forms.MessageBoxButtons]::OK,
+          [System.Windows.Forms.MessageBoxIcon]::Information
+        ) | Out-Null
+      }
+      finally {
+        $msgOwner.Close()
+        $msgOwner.Dispose()
+      }
+    }
     if ($scanFailures.Count -gt 0) {
       Write-Host "PROGRESS: ERROR: $message"
       exit 1
@@ -1186,12 +1205,12 @@ try {
 )
 (princ)
 '@
-  Set-Content -LiteralPath $updateLspPath -Value $updateLisp -Encoding ASCII
+  Set-Content -LiteralPath $updateLspPath -Value $updateLisp -Encoding Default
   $updateScript = @(Get-AcadTrustedLoadScriptLines -LoadLines @("(load `"$updateLspForAcad`")")) + @(
     "ACIESXREFUPDATE",
-    "_.QUIT", "_N"
+    "_.QUIT", "_Y"
   )
-  Set-Content -LiteralPath $updateScrPath -Value ($updateScript -join "`r`n") -Encoding ASCII
+  Set-Content -LiteralPath $updateScrPath -Value ($updateScript -join "`r`n") -Encoding Default
 
   $plans = @($plansByDwg.Values | Sort-Object SourceDwg)
   $updatedCount = 0
@@ -1203,7 +1222,7 @@ try {
     $planPath = Join-Path $tempRoot ("plan-" + [guid]::NewGuid().ToString("N") + ".tsv")
     $reportPath = Join-Path $tempRoot ("update-" + [guid]::NewGuid().ToString("N") + ".tsv")
     @($plan.Updates | ForEach-Object { "$($_.Name)`t$($_.NewPath)" }) |
-      Set-Content -LiteralPath $planPath -Encoding ASCII
+      Set-Content -LiteralPath $planPath -Encoding Default
     $env:ACIES_XREF_UPDATE_PLAN = $planPath
     $env:ACIES_XREF_UPDATE_OUT = $reportPath
     $outLog = Join-Path $tempRoot "update.out.txt"
@@ -1215,7 +1234,7 @@ try {
     $rows = @()
     if (Test-Path -LiteralPath $reportPath -PathType Leaf) {
       $rows = @(
-        Get-Content -LiteralPath $reportPath -Encoding ASCII |
+        Get-Content -LiteralPath $reportPath -Encoding Default |
           Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
           ForEach-Object {
             $parts = @($_ -split "`t", 3)

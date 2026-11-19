@@ -153,6 +153,10 @@ class PanelScheduleSyncError(RuntimeError):
     """Raised for workbook or session errors that can be shown to the user."""
 
 
+class ExcelUnavailableError(PanelScheduleSyncError):
+    """Raised when Microsoft Excel COM automation cannot be started on this PC."""
+
+
 def clean_cell_str(val: Any) -> str:
     """Return a compact display string without losing formula text."""
     if val is None:
@@ -1025,13 +1029,18 @@ def _write_with_excel(path: str, writes: List[Dict[str, Any]]) -> None:
     try:
         import win32com.client
     except Exception as exc:  # pragma: no cover - depends on Windows runtime
-        raise PanelScheduleSyncError(
+        raise ExcelUnavailableError(
             "Editing panel schedules requires Microsoft Excel and pywin32."
         ) from exc
     excel = workbook = None
     with _com_initialized():
         try:
-            excel = win32com.client.DispatchEx("Excel.Application")
+            try:
+                excel = win32com.client.DispatchEx("Excel.Application")
+            except Exception as exc:
+                raise ExcelUnavailableError(
+                    f"Microsoft Excel could not be started: {exc}"
+                ) from exc
             excel.Visible = False
             excel.DisplayAlerts = False
             excel.AskToUpdateLinks = False
@@ -1111,9 +1120,15 @@ def _write_workbook(path: str, writes: List[Dict[str, Any]], prefer_com: bool) -
     if not writes:
         return
     extension = Path(path).suffix.lower()
-    if extension == ".xls" or (prefer_com and os.name == "nt"):
+    if extension == ".xls":
         _write_with_excel(path, writes)
         return
+    if prefer_com and os.name == "nt":
+        try:
+            _write_with_excel(path, writes)
+            return
+        except ExcelUnavailableError:
+            pass
     _write_with_openpyxl(path, writes)
 
 
@@ -1230,11 +1245,16 @@ def _highlight_with_excel(path: str, changes: List[Dict[str, Any]]) -> None:
     try:
         import win32com.client
     except Exception as exc:  # pragma: no cover
-        raise PanelScheduleSyncError("Highlighting .xls conflicts requires Microsoft Excel.") from exc
+        raise ExcelUnavailableError("Highlighting .xls conflicts requires Microsoft Excel.") from exc
     excel = workbook = None
     with _com_initialized():
         try:
-            excel = win32com.client.DispatchEx("Excel.Application")
+            try:
+                excel = win32com.client.DispatchEx("Excel.Application")
+            except Exception as exc:
+                raise ExcelUnavailableError(
+                    f"Microsoft Excel could not be started: {exc}"
+                ) from exc
             excel.Visible = False
             excel.DisplayAlerts = False
             excel.AskToUpdateLinks = False
@@ -1259,6 +1279,10 @@ def _highlight_with_excel(path: str, changes: List[Dict[str, Any]]) -> None:
                     _release_com_object(cell)
                     _release_com_object(worksheet)
             workbook.Save()
+        except PanelScheduleSyncError:
+            raise
+        except Exception as exc:
+            raise PanelScheduleSyncError(f"Could not highlight panel schedule conflict copy: {exc}") from exc
         finally:
             if workbook is not None:
                 try:
@@ -1283,8 +1307,13 @@ def create_highlighted_conflict_copy(
     conflict_path = _unique_conflict_path(workbook_path)
     shutil.copy2(workbook_path, conflict_path)
     extension = Path(conflict_path).suffix.lower()
-    if extension == ".xls" or (prefer_com and os.name == "nt"):
+    if extension == ".xls":
         _highlight_with_excel(conflict_path, changes)
+    elif prefer_com and os.name == "nt":
+        try:
+            _highlight_with_excel(conflict_path, changes)
+        except ExcelUnavailableError:
+            _highlight_with_openpyxl(conflict_path, changes)
     else:
         _highlight_with_openpyxl(conflict_path, changes)
     return conflict_path

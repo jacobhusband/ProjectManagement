@@ -269,6 +269,7 @@ try {
         (Join-Path $bundleInternal "modern-workspace.css"),
         (Join-Path $bundleInternal "deliverables-workspace.css"),
         (Join-Path $bundleInternal "assets\acies-modern-logo.png"),
+        (Join-Path $bundleInternal "assets\title24\energycodeace.indoor.page1.options.json"),
         (Join-Path $bundleInternal "industry-projects.js"),
         (Join-Path $bundleInternal "industry-shell.js"),
         (Join-Path $bundleInternal "script.js"),

@@ -74,18 +74,68 @@ namespace Acies.PrepareXrefs
             Path.GetFullPath(candidate).StartsWith(Path.GetFullPath(searchRoot).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar,
                 StringComparison.OrdinalIgnoreCase));
 
+        private static IEnumerable<string> SafeEnumerateMatchingFiles(string rootDir, string fileName)
+        {
+            var pending = new Stack<string>();
+            pending.Push(rootDir);
+            while (pending.Count > 0)
+            {
+                var current = pending.Pop();
+                IEnumerable<string> files;
+                try { files = Directory.EnumerateFiles(current); }
+                catch (UnauthorizedAccessException) { continue; }
+                catch (PathTooLongException) { continue; }
+                catch (IOException) { continue; }
+                foreach (var file in files)
+                {
+                    if (string.Equals(Path.GetFileName(file), fileName, StringComparison.OrdinalIgnoreCase))
+                        yield return file;
+                }
+                IEnumerable<string> subdirs;
+                try { subdirs = Directory.EnumerateDirectories(current); }
+                catch (UnauthorizedAccessException) { continue; }
+                catch (PathTooLongException) { continue; }
+                catch (IOException) { continue; }
+                foreach (var subdir in subdirs)
+                {
+                    try
+                    {
+                        if ((File.GetAttributes(subdir) & FileAttributes.ReparsePoint) != 0)
+                            continue;
+                    }
+                    catch (System.Exception) { continue; }
+                    pending.Push(subdir);
+                }
+            }
+        }
+
         private string Resolve(string owner, string reference)
         {
-            var relative = reference.Replace('/', Path.DirectorySeparatorChar);
-            var candidate = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(owner), relative));
-            if (Available(candidate)) return candidate;
-            candidate = Path.Combine(Path.GetDirectoryName(owner), Path.GetFileName(relative));
-            if (Available(candidate)) return candidate;
-            // Old architect absolute paths are common in ZIPs. Only accept an unambiguous match.
-            if (!string.IsNullOrEmpty(searchRoot))
+            if (string.IsNullOrWhiteSpace(reference)) return null;
+            var relative = reference.Trim().Replace('/', Path.DirectorySeparatorChar);
+            var ownerDir = Path.GetDirectoryName(owner) ?? "";
+            string fileName = null;
+            try { fileName = Path.GetFileName(relative); }
+            catch (ArgumentException) { return null; }
+            try
             {
-                var matches = Directory.EnumerateFiles(searchRoot, "*", SearchOption.AllDirectories)
-                    .Where(p => string.Equals(Path.GetFileName(p), Path.GetFileName(relative), StringComparison.OrdinalIgnoreCase)).Take(2).ToArray();
+                var candidate = Path.GetFullPath(Path.Combine(ownerDir, relative));
+                if (Available(candidate)) return candidate;
+            }
+            catch (System.Exception) { }
+            if (!string.IsNullOrEmpty(fileName))
+            {
+                try
+                {
+                    var candidate = Path.Combine(ownerDir, fileName);
+                    if (Available(candidate)) return candidate;
+                }
+                catch (System.Exception) { }
+            }
+            // Old architect absolute paths are common in ZIPs. Only accept an unambiguous match.
+            if (!string.IsNullOrEmpty(searchRoot) && !string.IsNullOrEmpty(fileName) && Directory.Exists(searchRoot))
+            {
+                var matches = SafeEnumerateMatchingFiles(searchRoot, fileName).Take(2).ToArray();
                 if (matches.Length == 1) return matches[0];
                 if (matches.Length > 1) throw new InvalidOperationException("Ambiguous reference '" + reference + "' in " + owner);
             }

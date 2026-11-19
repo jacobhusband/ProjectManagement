@@ -262,7 +262,8 @@ class SymbolCounterService:
     """Manages short-lived PDF sessions and performs deterministic template matching."""
 
     def __init__(self, cache_dir: str | os.PathLike[str] | None = None, render_dpi: int = DEFAULT_RENDER_DPI):
-        self.cache_dir = Path(cache_dir or (Path.cwd() / ".symbol-counter-cache"))
+        import tempfile
+        self.cache_dir = Path(cache_dir or (Path(tempfile.gettempdir()) / "acies-symbol-counter-cache"))
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.render_dpi = max(72, min(200, int(render_dpi)))
         self._sessions: dict[str, _Session] = {}

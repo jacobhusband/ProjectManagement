@@ -22,7 +22,7 @@ Write-Host "PROGRESS: Initializing script..."
 
 # --- AUTOCAD VERSION DETECTION ---
 . (Join-Path $PSScriptRoot 'AutoCadDiscovery.ps1')
-if ($AcadCore -and (Test-Path -Path $AcadCore)) {
+if ($AcadCore -and (Test-Path -LiteralPath $AcadCore -PathType Leaf)) {
   $acadCore = $AcadCore
   Write-Host "PROGRESS: Using specified AutoCAD Core Console: $AcadCore"
 }
@@ -37,17 +37,22 @@ else {
 }
 
 $scriptRoot = $PSScriptRoot
-$dll = Join-Path $scriptRoot "StripRefPaths.dll"
 
 # Validation
-if ([string]::IsNullOrEmpty($acadCore) -or -not (Test-Path $acadCore)) {
+if ([string]::IsNullOrEmpty($acadCore) -or -not (Test-Path -LiteralPath $acadCore -PathType Leaf)) {
   Write-Host "PROGRESS: ERROR: AutoCAD Core Console (2020 or newer) was not found."
   Write-Host "Choose your AutoCAD installation in the app's Settings."
   exit 1
 }
 
-if ($StripXrefs -and -not (Test-Path $dll)) {
-  Write-Host "PROGRESS: ERROR: Required component 'StripRefPaths.dll' not found at $dll"
+$acadFramework = if ([Diagnostics.FileVersionInfo]::GetVersionInfo($acadCore).FileMajorPart -ge 25) { 'net8.0-windows' } else { 'net48' }
+$dll = Join-Path $scriptRoot "PrepareXrefs-bin\$acadFramework\PrepareXrefs.dll"
+if (-not (Test-Path -LiteralPath $dll -PathType Leaf) -and $acadFramework -eq 'net8.0-windows') {
+  $dll = Join-Path $scriptRoot "StripRefPaths.dll"
+}
+
+if ($StripXrefs -and -not (Test-Path -LiteralPath $dll -PathType Leaf)) {
+  Write-Host "PROGRESS: ERROR: Required component 'PrepareXrefs.dll' ($acadFramework) not found at $dll"
   exit 1
 }
 
@@ -73,6 +78,7 @@ if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
 }
 
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
 
 # The desktop app starts this script with SW_HIDE to keep the console out of
 # sight, and Windows applies that to the first window the script shows as well.
@@ -211,7 +217,23 @@ function Show-DwgFileDialog {
     $dlg.InitialDirectory = $InitialDirectory
   }
 
-  $result = $dlg.ShowDialog()
+  $owner = New-Object System.Windows.Forms.Form
+  $owner.TopMost = $true
+  $owner.ShowInTaskbar = $false
+  $owner.FormBorderStyle = 'FixedToolWindow'
+  $owner.StartPosition = 'Manual'
+  $owner.Location = New-Object System.Drawing.Point(-32000, -32000)
+  $owner.Size = New-Object System.Drawing.Size(1, 1)
+  $owner.Opacity = 0
+  try {
+    Show-FormWindow $owner
+    $owner.Activate()
+    $result = $dlg.ShowDialog($owner)
+  }
+  finally {
+    $owner.Close()
+    $owner.Dispose()
+  }
   if ($result -eq [System.Windows.Forms.DialogResult]::OK -and $dlg.FileNames.Count -gt 0) {
     return [string[]]$dlg.FileNames
   }
@@ -733,7 +755,7 @@ $setByLayerBlock$hatchBlock$purgeBlock$auditBlock
   (princ)
 )
 "@
-Set-Content -Encoding ASCII -Path $lisp -Value $lispContent
+[IO.File]::WriteAllText($lisp, $lispContent, [Text.Encoding]::Default)
 
 # Make .scr that runs the requested steps
 $script = Join-Path $env:TEMP "run_STRIP.scr"
@@ -742,17 +764,18 @@ $lispPathForScript = ($lisp -replace '\\', '/')
 # Both tool files load first, so SECURELOAD is the user's again before any drawing work.
 $runCleanup = $SetByLayer -or $Purge -or $Audit -or $HatchColor
 $loadLines = @()
-if ($StripXrefs) { $loadLines += @("NETLOAD", "`"$dll`"") }
+if ($StripXrefs) { $loadLines += @("_.NETLOAD", "`"$dll`"") }
 if ($runCleanup) { $loadLines += "(load `"$lispPathForScript`")" }
 $scriptLines = @("CMDECHO 1")
 if ($loadLines.Count -gt 0) { $scriptLines += Get-AcadTrustedLoadScriptLines -LoadLines $loadLines }
 if ($StripXrefs) { $scriptLines += "STRIPREFPATHS" }
 if ($runCleanup) { $scriptLines += "CLEANUP" }
 
-$scriptLines += "QSAVE"
-$scriptLines += "QUIT"
-$scriptContent = $scriptLines -join "`r`n"
-Set-Content -Encoding ASCII -Path $script -Value $scriptContent
+$scriptLines += "_.QSAVE"
+$scriptLines += "_.QUIT"
+$scriptLines += "_Y"
+$scriptContent = ($scriptLines -join "`r`n") + "`r`n"
+[IO.File]::WriteAllText($script, $scriptContent, [Text.Encoding]::Default)
 
 # Audit-only script used to verify each processed drawing reopens cleanly.
 # "N" answers "Fix any errors detected?" so verification never mutates the file.
@@ -760,14 +783,14 @@ Set-Content -Encoding ASCII -Path $script -Value $scriptContent
 # so QUIT must be followed by "_Y" to answer the "Really want to discard all
 # changes?" prompt; without it accoreconsole waits on that prompt forever.
 $verifyScript = Join-Path $env:TEMP "verify_AUDIT.scr"
-$verifyContent = @(
+$verifyContent = (@(
   "CMDECHO 1",
   "_.AUDIT",
   "N",
   "_.QUIT",
   "_Y"
-) -join "`r`n"
-Set-Content -Encoding ASCII -Path $verifyScript -Value $verifyContent
+) -join "`r`n") + "`r`n"
+[IO.File]::WriteAllText($verifyScript, $verifyContent, [Text.Encoding]::Default)
 
 # Resolve files: prefer workflow source manifest, then preselected list, otherwise open the DWG picker.
 $sourceItems = @()
@@ -786,7 +809,7 @@ elseif (-not [string]::IsNullOrWhiteSpace($SourceManifestPath)) {
 
 if (($sourceItems.Count -eq 0) -and -not [string]::IsNullOrWhiteSpace($FilesListPath) -and (Test-Path -LiteralPath $FilesListPath)) {
   $filesFromList = @(
-    Get-Content -Path $FilesListPath -Encoding UTF8 |
+    Get-Content -LiteralPath $FilesListPath -Encoding UTF8 |
       Where-Object {
         $_ -and
         $_.Trim() -and
@@ -938,8 +961,11 @@ try {
         $prepareOutput = Join-Path $prepareDir 'prepared.dwg'
         Copy-Item -LiteralPath $sourcePath -Destination $prepareInput
         $prepareScript = Join-Path $prepareDir 'prepare.scr'
-        (@(Get-AcadTrustedLoadScriptLines -LoadLines @('_.NETLOAD', ('"' + $prepareDll + '"'))) +
-          @('ACIESPREPAREXREFS', '_.QUIT', '_Y')) | Set-Content -LiteralPath $prepareScript -Encoding UTF8
+        # Write without a UTF-8 BOM: AutoCAD Core Console treats a leading BOM as part of
+        # line 1, causing (setq aciesSavedSecureLoad ...) to fail and leaving SECURELOAD at 0.
+        $prepareLines = @(Get-AcadTrustedLoadScriptLines -LoadLines @('_.NETLOAD', ('"' + $prepareDll + '"'))) +
+          @('ACIESPREPAREXREFS', '_.QUIT', '_Y')
+        [IO.File]::WriteAllText($prepareScript, ($prepareLines -join "`r`n") + "`r`n", [Text.Encoding]::Default)
         Write-Host "PROGRESS: Binding and exploding modelspace Xrefs in $name..."
         $prepareRun = Invoke-AcadCoreScript -AcadCorePath $acadCore -DwgPath $prepareInput -ScriptPath $prepareScript -Environment @{
           ACIES_XREF_SOURCE = $sourcePath

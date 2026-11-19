@@ -1459,35 +1459,85 @@ def _remove_to_section_word(doc):
         idx += 1
 
 
-def _update_word_file_via_com(file_path, replacements, remove_to_section=False):
-    import win32com.client
-
-    # Launch an isolated Word instance so closing the template document does not
-    # shut down any Word windows the user already has open.
-    word = win32com.client.DispatchEx("Word.Application")
-    word.Visible = False
-    word.DisplayAlerts = 0
-    doc = None
+@contextmanager
+def _com_initialized():
+    """Initialize COM on the current worker thread and uninitialize on exit."""
+    pythoncom = None
+    initialized = False
     try:
-        doc = word.Documents.Open(file_path)
-        for find_text, replace_text in replacements.items():
-            if not find_text:
-                continue
-            rng = doc.Range()
-            rng.Find.ClearFormatting()
-            rng.Find.Replacement.ClearFormatting()
-            rng.Find.Execute(
-                FindText=find_text,
-                ReplaceWith=replace_text,
-                Replace=2,  # wdReplaceAll
-            )
-        if remove_to_section:
-            _remove_to_section_word(doc)
-        doc.Save()
+        import pythoncom as _pythoncom
+
+        pythoncom = _pythoncom
+        pythoncom.CoInitialize()
+        initialized = True
+    except Exception:
+        pythoncom = None
+    try:
+        yield
     finally:
-        if doc is not None:
-            doc.Close(False)
-        word.Quit()
+        if initialized and pythoncom is not None:
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
+
+
+def _clear_readonly_attr(file_path):
+    """Ensure copied template files are writable even if bundled sources were read-only."""
+    try:
+        os.chmod(file_path, stat_module.S_IREAD | stat_module.S_IWRITE)
+    except OSError:
+        pass
+
+
+def _update_word_file_via_com(file_path, replacements, remove_to_section=False):
+    try:
+        import win32com.client
+    except Exception as exc:
+        raise RuntimeError(
+            "Editing .doc templates requires Microsoft Word and pywin32."
+        ) from exc
+
+    word = None
+    doc = None
+    with _com_initialized():
+        try:
+            # Launch an isolated Word instance so closing the template document does not
+            # shut down any Word windows the user already has open.
+            try:
+                word = win32com.client.DispatchEx("Word.Application")
+            except Exception as exc:
+                raise RuntimeError(
+                    "Editing .doc templates requires Microsoft Word to be installed on this computer."
+                ) from exc
+            word.Visible = False
+            word.DisplayAlerts = 0
+            doc = word.Documents.Open(os.path.abspath(str(file_path)))
+            for find_text, replace_text in replacements.items():
+                if not find_text:
+                    continue
+                rng = doc.Range()
+                rng.Find.ClearFormatting()
+                rng.Find.Replacement.ClearFormatting()
+                rng.Find.Execute(
+                    FindText=find_text,
+                    ReplaceWith=replace_text,
+                    Replace=2,  # wdReplaceAll
+                )
+            if remove_to_section:
+                _remove_to_section_word(doc)
+            doc.Save()
+        finally:
+            if doc is not None:
+                try:
+                    doc.Close(False)
+                except Exception:
+                    pass
+            if word is not None:
+                try:
+                    word.Quit()
+                except Exception:
+                    pass
 
 
 def _apply_template_context(file_path, context=None, options=None):
@@ -3941,11 +3991,18 @@ class Api:
 
         appdata_path = os.getenv('APPDATA')
         if not appdata_path:
-            raise EnvironmentError(
-                "CRITICAL: Could not determine the APPDATA directory.")
+            user_profile = os.getenv('USERPROFILE') or os.path.expanduser('~')
+            appdata_path = os.path.join(user_profile, 'AppData', 'Roaming')
         self.app_plugins_folder = os.path.join(
             appdata_path, 'Autodesk', 'ApplicationPlugins')
-        os.makedirs(self.app_plugins_folder, exist_ok=True)
+        try:
+            os.makedirs(self.app_plugins_folder, exist_ok=True)
+        except OSError as exc:
+            logging.warning(
+                "Could not create Autodesk ApplicationPlugins folder %s: %s",
+                self.app_plugins_folder,
+                exc,
+            )
 
         test_mode_raw = str(os.getenv('ACIES_TEST_MODE', '')).strip().lower()
         self.test_mode = test_mode_raw in ('1', 'true', 'yes', 'on')
@@ -4312,8 +4369,11 @@ class Api:
                 target.unlink(missing_ok=True)
                 return {'status': 'error', 'message': 'The downloaded installer did not match the published release, so it was not run.'}
 
-            # Prepare the restart command separately to avoid f-string backslash syntax error
-            restart_cmd = f'Start-Process -FilePath "{app_path}"' if app_path else ""
+            # Escape single quotes for PowerShell single-quoted literals so paths
+            # containing $, backticks, or spaces are never interpreted as variables.
+            ps_target = str(target).replace("'", "''")
+            ps_app_path = str(app_path).replace("'", "''") if app_path else ""
+            restart_cmd = f"Start-Process -FilePath '{ps_app_path}'" if ps_app_path else ""
 
             # Use a small helper process to show a message, run installer (visible), and relaunch app after completion
             ps_script = (
@@ -4321,8 +4381,8 @@ class Api:
                 'Installer will run and the app will reopen automatically." ; '
                 'Add-Type -AssemblyName PresentationFramework; '
                 '[System.Windows.MessageBox]::Show($msg, "Updating", "OK", "Information") | Out-Null; '
-                f'Start-Process -FilePath "{target}" '
-                f'-ArgumentList \'/SILENT /NORESTART /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS\' -Wait; '
+                f"Start-Process -FilePath '{ps_target}' "
+                f"-ArgumentList '/SILENT /NORESTART /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS' -Wait; "
                 'Start-Sleep -Seconds 2; '
                 f'{restart_cmd}'
             )
@@ -4870,6 +4930,7 @@ class Api:
 
                 process = subprocess.Popen(
                     command,
+                    cwd=tempfile.gettempdir(),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -7416,10 +7477,17 @@ CURRENT_DELIVERABLES_IN_PERIOD:
     def _resolve_google_ai_api_key(self, api_key):
         final_api_key = (api_key or "").strip()
         if not final_api_key:
-            final_api_key = (os.getenv("GOOGLE_API_KEY") or "").strip()
+            try:
+                settings = self.get_user_settings()
+                if isinstance(settings, dict):
+                    final_api_key = str(settings.get("apiKey") or "").strip()
+            except Exception:
+                final_api_key = ""
+        if not final_api_key:
+            final_api_key = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
         if not final_api_key:
             raise RuntimeError(
-                "AI API key is not configured. Please provide it in the app settings or set GOOGLE_API_KEY in your .env file."
+                "AI API key is not configured. Please add your Google Gemini API key in Settings."
             )
         return final_api_key
 
@@ -8326,14 +8394,23 @@ Return ONLY the JSON object.
             return {"status": "error", "message": str(e)}
 
     def get_notes(self):
-        """Reads and returns the content of notes.json."""
+        """Reads and returns the content of notes.json.
+
+        An unreadable file reports an error payload rather than an empty object
+        so the UI never mistakes unreadable data for an empty workspace and saves over it.
+        """
         try:
             return _read_data_file_with_recovery(NOTES_FILE)
         except FileNotFoundError:
             return {}
         except Exception as e:
             logging.error(f"Error loading notes from {NOTES_FILE}: {e}")
-            return {}
+            return {
+                'status': 'error',
+                'code': 'data_file_unreadable',
+                'message': str(e),
+                'path': NOTES_FILE,
+            }
 
     def save_notes(self, data):
         """Saves notes data to notes.json, keeping the previous version as a backup."""
@@ -8345,14 +8422,23 @@ Return ONLY the JSON object.
             return {'status': 'error', 'message': str(e)}
 
     def get_timesheets(self):
-        """Reads and returns the content of timesheets.json."""
+        """Reads and returns the content of timesheets.json.
+
+        An unreadable file reports an error payload rather than empty weeks/expenses
+        so the UI never saves over damaged or temporarily locked data.
+        """
         try:
             data = _read_data_file_with_recovery(TIMESHEETS_FILE)
         except FileNotFoundError:
             return {'weeks': {}, 'expenses': {}, 'lastModified': None}
         except Exception as e:
             logging.error(f"Error loading timesheets from {TIMESHEETS_FILE}: {e}")
-            return {'weeks': {}, 'expenses': {}, 'lastModified': None}
+            return {
+                'status': 'error',
+                'code': 'data_file_unreadable',
+                'message': str(e),
+                'path': TIMESHEETS_FILE,
+            }
         if isinstance(data, dict) and not isinstance(data.get('expenses'), dict):
             data['expenses'] = {}
         return data
@@ -8672,6 +8758,7 @@ Return ONLY the JSON object.
                 return {'status': 'error', 'message': 'File already exists at destination'}
 
             shutil.copy2(source, dest_path)
+            _clear_readonly_attr(dest_path)
             if context_payload or options_payload:
                 template_options = dict(options_payload)
                 if normalized_key and 'templateKey' not in template_options:
@@ -8729,6 +8816,7 @@ Return ONLY the JSON object.
                 return {'status': 'error', 'message': 'File already exists at destination'}
 
             shutil.copy2(source, dest_path)
+            _clear_readonly_attr(dest_path)
             if context or options:
                 _apply_template_context(dest_path, context=context, options=options)
             return {
@@ -8843,6 +8931,7 @@ Return ONLY the JSON object.
             options_payload = {'templateKey': normalized_key}
 
             shutil.copy2(source_path, destination_path)
+            _clear_readonly_attr(destination_path)
             _apply_template_context(
                 destination_path, context=context_payload, options=options_payload)
 
@@ -9145,7 +9234,10 @@ Return ONLY the JSON object.
     # ===================== CHECKLISTS API =====================
 
     def get_checklists(self):
-        """Reads and returns checklists data."""
+        """Reads and returns checklists data.
+
+        An unreadable file reports an error payload so the UI never saves over it.
+        """
         try:
             return _read_data_file_with_recovery(CHECKLISTS_FILE)
         except FileNotFoundError:
@@ -9153,7 +9245,12 @@ Return ONLY the JSON object.
             return {'checklists': [], 'lastModified': None}
         except Exception as e:
             logging.error(f"Error loading checklists from {CHECKLISTS_FILE}: {e}")
-            return {'checklists': [], 'lastModified': None}
+            return {
+                'status': 'error',
+                'code': 'data_file_unreadable',
+                'message': str(e),
+                'path': CHECKLISTS_FILE,
+            }
 
     def save_checklists(self, data):
         """Saves checklists data with backup."""
@@ -9649,8 +9746,6 @@ Return ONLY the JSON object.
     def export_timesheet_excel(self, data):
         """Exports timesheet data to an Excel file using a template."""
         try:
-            import openpyxl
-
             template_path = get_bundled_template_path("Template_Timesheet.xlsx")
 
             if not template_path.exists():
@@ -9680,6 +9775,7 @@ Return ONLY the JSON object.
 
             # Copy template to output location
             shutil.copy2(str(template_path), file_path)
+            _clear_readonly_attr(file_path)
 
             # Open the copied file and modify the "time log" sheet
             wb = openpyxl.load_workbook(file_path)
@@ -9799,7 +9895,10 @@ Return ONLY the JSON object.
 
             # Open file on Windows
             if sys.platform == "win32":
-                os.startfile(file_path)
+                try:
+                    os.startfile(file_path)
+                except OSError as open_err:
+                    logging.warning(f"Timesheet exported to {file_path}, but could not be opened automatically: {open_err}")
 
             return {'status': 'success', 'path': file_path}
 
@@ -10776,8 +10875,6 @@ Return ONLY the JSON object.
     def export_expense_sheet_excel(self, data):
         """Exports expense sheet data to an Excel file with images."""
         try:
-            import openpyxl
-
             template_path = get_bundled_template_path("Template_Timesheet.xlsx")
 
             if not template_path.exists():
@@ -10786,10 +10883,12 @@ Return ONLY the JSON object.
             # Determine output path
             week_key = data.get('weekKey', 'expense')
             user_docs = os.path.join(os.path.expanduser('~'), 'Documents')
+            os.makedirs(user_docs, exist_ok=True)
             file_path = os.path.join(user_docs, f"Expense_Sheet_{week_key}.xlsx")
 
             # Copy template to output location
             shutil.copy2(str(template_path), file_path)
+            _clear_readonly_attr(file_path)
 
             # Open the copied file
             wb = openpyxl.load_workbook(file_path)
@@ -10823,7 +10922,10 @@ Return ONLY the JSON object.
 
             # Open file on Windows
             if sys.platform == "win32":
-                os.startfile(file_path)
+                try:
+                    os.startfile(file_path)
+                except OSError as open_err:
+                    logging.warning(f"Expense sheet exported to {file_path}, but could not be opened automatically: {open_err}")
 
             return {'status': 'success', 'path': file_path}
 
@@ -16528,29 +16630,30 @@ Return ONLY the JSON object.
         workbook = None
         file_format = 56 if target_extension == ".xls" else 51
 
-        try:
-            excel = win32com.client.DispatchEx("Excel.Application")
-            excel.Visible = False
-            excel.DisplayAlerts = False
+        with _com_initialized():
+            try:
+                excel = win32com.client.DispatchEx("Excel.Application")
+                excel.Visible = False
+                excel.DisplayAlerts = False
 
-            workbook = excel.Workbooks.Open(source_abs)
-            workbook.SaveAs(dest_abs, FileFormat=file_format)
-        except Exception as exc:
-            raise RuntimeError(
-                f"{self._panel_schedule_excel_requirement_message()} "
-                f"Excel conversion failed: {exc}"
-            ) from exc
-        finally:
-            if workbook is not None:
-                try:
-                    workbook.Close(False)
-                except Exception:
-                    pass
-            if excel is not None:
-                try:
-                    excel.Quit()
-                except Exception:
-                    pass
+                workbook = excel.Workbooks.Open(source_abs)
+                workbook.SaveAs(dest_abs, FileFormat=file_format)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"{self._panel_schedule_excel_requirement_message()} "
+                    f"Excel conversion failed: {exc}"
+                ) from exc
+            finally:
+                if workbook is not None:
+                    try:
+                        workbook.Close(False)
+                    except Exception:
+                        pass
+                if excel is not None:
+                    try:
+                        excel.Quit()
+                    except Exception:
+                        pass
 
     def _update_panel_schedule_workbook(self, panel_data, output_path, use_extracted_kva=False):
         output_extension = self._normalize_panel_schedule_extension(
@@ -17293,6 +17396,7 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
                 os.makedirs(dest_dir, exist_ok=True)
             if output_extension == ".xlsx":
                 shutil.copy2(str(CB_TEMPLATE_PATH), output_path)
+                _clear_readonly_attr(output_path)
             else:
                 self._convert_excel_workbook(str(CB_TEMPLATE_PATH), output_path, ".xls")
             created_workbook = True
@@ -17937,14 +18041,17 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
             )
             timeout = max(60, min(600, len(dwg_paths) * 45))
             if notify is None:
-                result = subprocess.run(
-                    command,
-                    capture_output=True,
-                    text=True,
-                    encoding='utf-8',
-                    errors='replace',
-                    timeout=timeout,
-                )
+                run_kwargs = {
+                    'cwd': tempfile.gettempdir(),
+                    'capture_output': True,
+                    'text': True,
+                    'encoding': 'utf-8',
+                    'errors': 'replace',
+                    'timeout': timeout,
+                }
+                if sys.platform == "win32":
+                    run_kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+                result = subprocess.run(command, **run_kwargs)
                 output = (result.stdout or '') + '\n' + (result.stderr or '')
             else:
                 result, output = self._run_xref_scan_with_progress(
@@ -17982,6 +18089,7 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
             startupinfo.wShowWindow = subprocess.SW_HIDE
         process = subprocess.Popen(
             command,
+            cwd=tempfile.gettempdir(),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -19833,8 +19941,21 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
             project = context.get('project_path')
             if not project:
                 raise ValueError('Select a project in the Workroom first.')
+            acad_path = settings.get('autocadPath', '')
+            plot_style_problem = self._plot_style_problem(acad_path)
+            if plot_style_problem:
+                self._notify_tool_status(
+                    'toolCleanDrawings',
+                    f"ERROR: {plot_style_problem}",
+                    activity_id=activity_id,
+                )
+                return {
+                    'status': 'error',
+                    'message': plot_style_problem,
+                    'activityId': str(activity_id or '').strip(),
+                }
             return clean_drawings.run(
-                project, selection, settings.get('autocadPath', ''),
+                project, selection, acad_path,
                 notify=lambda message: self._notify_tool_status(
                     'toolCleanDrawings', message, activity_id=activity_id))
         except Exception as exc:
@@ -20079,6 +20200,7 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
             startupinfo.wShowWindow = subprocess.SW_HIDE
         process = subprocess.Popen(
             command,
+            cwd=tempfile.gettempdir(),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,

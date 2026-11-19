@@ -4,6 +4,7 @@
 import os
 import shutil
 import sys
+import tempfile
 try:
     import pymupdf as fitz  # PyMuPDF
 except ImportError:  # PyMuPDF older than 1.24.3
@@ -40,10 +41,14 @@ def shrink_pdf(input_path, output_path, percent):
         new_page = dst.new_page(width=rect.width, height=rect.height)
         new_page.insert_image(rect, pixmap=pix)
 
-    tmp_output = output_path + ".tmp"
-    dst.save(tmp_output, garbage=4, deflate=True, clean=True)
-    dst.close()
-    src.close()
+    output_dir = os.path.dirname(os.path.abspath(output_path)) or "."
+    fd, tmp_output = tempfile.mkstemp(prefix=".s-", suffix=".pdf", dir=output_dir)
+    os.close(fd)
+    try:
+        dst.save(tmp_output, garbage=4, deflate=True, clean=True)
+    finally:
+        dst.close()
+        src.close()
 
     # If the rasterized output is larger, keep the original to avoid bloat.
     try:
@@ -56,11 +61,17 @@ def shrink_pdf(input_path, output_path, percent):
         else:
             os.replace(tmp_output, output_path)
     except OSError:
-        # Fall back to the tmp output if size checks fail.
+        # Fall back to replacing with the tmp output if size comparison failed,
+        # but do not swallow a failure to write output_path.
         try:
             os.replace(tmp_output, output_path)
         except OSError:
-            pass
+            if os.path.exists(tmp_output):
+                try:
+                    os.remove(tmp_output)
+                except OSError:
+                    pass
+            raise
 
 
 def main():

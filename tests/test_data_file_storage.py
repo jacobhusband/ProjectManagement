@@ -233,6 +233,19 @@ class DataFileApiTests(unittest.TestCase):
         self.assertEqual("error", self.api.mark_overdue_projects_complete()["status"])
         self.assertEqual("{not json", Path(self.paths["TASKS_FILE"]).read_text(encoding="utf-8"))
 
+    def test_get_notes_timesheets_and_checklists_report_unreadable_data_instead_of_empty_defaults(self):
+        for constant, method_name in (
+            ("NOTES_FILE", "get_notes"),
+            ("TIMESHEETS_FILE", "get_timesheets"),
+            ("CHECKLISTS_FILE", "get_checklists"),
+        ):
+            Path(self.paths[constant]).write_text("{not json", encoding="utf-8")
+            result = getattr(self.api, method_name)()
+            self.assertIsInstance(result, dict, method_name)
+            self.assertEqual("error", result["status"], method_name)
+            self.assertEqual("data_file_unreadable", result["code"], method_name)
+            self.assertEqual("{not json", Path(self.paths[constant]).read_text(encoding="utf-8"))
+
     def test_get_tasks_restores_a_damaged_file_and_reports_it_once(self):
         Path(self.paths["TASKS_FILE"] + ".bak").write_text(
             json.dumps([{"id": "240001", "name": "Recovered"}]), encoding="utf-8"

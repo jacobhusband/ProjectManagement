@@ -356,11 +356,11 @@
                     <thead>
                         <tr class="reg-head">
                             <th class="reg-th reg-th--rail" aria-hidden="true"></th>
-                            <th class="reg-th" data-sort="id">ID</th>
-                            <th class="reg-th" data-sort="name">Project</th>
-                            <th class="reg-th deliverables-header" data-sort="due">Deliverable</th>
-                            <th class="reg-th">Due</th>
-                            <th class="reg-th">Status</th>
+                            <th class="reg-th" data-sort="id" tabindex="0">ID</th>
+                            <th class="reg-th" data-sort="name" tabindex="0">Project</th>
+                            <th class="reg-th deliverables-header" data-sort="deliverable" tabindex="0">Deliverable</th>
+                            <th class="reg-th" data-sort="due" tabindex="0">Due</th>
+                            <th class="reg-th" data-sort="status" tabindex="0">Status</th>
                             <th class="reg-th reg-th--right">Notes</th>
                         </tr>
                     </thead>
@@ -1632,15 +1632,20 @@
                     <div class="tiny muted" style="margin-top: 0.35rem;">Opens the folder with timesheets.json.</div>
                 </div>
                 <div class="col-12">
-                    <label class="label">Timesheets file path</label>
-                    <div class="inline" style="gap: 0.5rem;">
-                        <input id="settings_timesheetsPath" readonly />
-                        <button type="button" class="btn tiny" id="settings_refreshTimesheetsInfo">Refresh</button>
-                        <button type="button" class="btn tiny" id="settings_forceSaveTimesheets">Force save</button>
-                        <button type="button" class="btn tiny" id="settings_writeTimesheetsTest">Write test
-                            file</button>
-                    </div>
-                    <div id="settings_timesheetsInfo" class="tiny muted" style="margin-top: 0.35rem;"></div>
+                    <details class="settings-diagnostics">
+                        <summary class="label" style="cursor: pointer;">Storage diagnostics</summary>
+                        <div style="margin-top: 0.5rem;">
+                            <label class="label" for="settings_timesheetsPath">Timesheets file path</label>
+                            <div class="inline" style="gap: 0.5rem;">
+                                <input id="settings_timesheetsPath" readonly />
+                                <button type="button" class="btn tiny" id="settings_refreshTimesheetsInfo">Refresh</button>
+                                <button type="button" class="btn tiny" id="settings_forceSaveTimesheets">Force save</button>
+                                <button type="button" class="btn tiny" id="settings_writeTimesheetsTest">Write test
+                                    file</button>
+                            </div>
+                            <div id="settings_timesheetsInfo" class="tiny muted" style="margin-top: 0.35rem;"></div>
+                        </div>
+                    </details>
                 </div>
             </div>
 
@@ -1730,19 +1735,30 @@
                         <label class="radio-label"><input type="checkbox" id="settings_manageLayers_scanAllLayers"> Scan all
                             selected DWG layers</label>
                     </div>
+                    <div class="modal-grid" style="margin-top: 0.5rem; gap: 0.5rem;">
+                        <div class="col-6">
+                            <label class="tiny muted" for="settings_manageLayers_freezePatterns">Default freeze patterns</label>
+                            <input type="text" id="settings_manageLayers_freezePatterns"
+                                placeholder="e.g. *cloud*, *rev*" autocomplete="off" />
+                        </div>
+                        <div class="col-6">
+                            <label class="tiny muted" for="settings_manageLayers_thawPatterns">Default thaw patterns</label>
+                            <input type="text" id="settings_manageLayers_thawPatterns"
+                                placeholder="e.g. *visible*" autocomplete="off" />
+                        </div>
+                    </div>
                     <div class="tiny muted" style="margin-top: 0.35rem;">Automatic selection uses every base-level DWG
-                        in the active Electrical, Mechanical, or Plumbing folder. If the folder or DWGs cannot be found,
-                        the tool asks for a manual selection. If layer scanning is unchecked, only the first selected DWG
-                        is scanned for layers.</div>
+                        in the active Electrical, Mechanical, or Plumbing folder. Wildcards (* and ?) separated by commas
+                        or semicolons skip the manual layer dialog when set; leave blank to pick layers interactively.</div>
                 </div>
                 <div class="col-12" style="margin-top: 0.6rem;">
                     <label class="label">CAD File Auto-Select Routing</label>
                     <div class="stack" style="gap: 0.35rem;">
                         <label class="radio-label"><input type="checkbox" id="settings_workroomAutoSelectCadFiles">
-                            Auto-select DWGs when compatible tools are launched from a Workroom</label>
+                            Auto-select DWGs when compatible tools are launched from a project</label>
                     </div>
                     <div class="tiny muted" style="margin-top: 0.35rem;">On: Publish and Freeze / Thaw launched from a
-                        project Workroom auto-select base-level DWGs from the active discipline folder. New Backgrounds always finds
+                        project auto-select base-level DWGs from the active discipline folder. New Backgrounds always finds
                         its own drawings: the newest Arch versions of the XREFs the discipline's DWGs use, or the
                         Arch folder for manual selection when it finds none.
                     </div>
@@ -2570,7 +2586,7 @@
                         <li><strong>Delete:</strong> use the page card's Delete page control and review the confirmation before deleting.</li>
                     </ul>
                     <h3>Scratchpad</h3>
-                    <p>The pencil icon in the app header opens a scratchpad for quick, unsorted notes. It saves automatically and is separate from your document pages.</p>
+                    <p>The scratchpad icon in the app header opens a scratchpad for quick, unsorted notes. It saves automatically and is separate from your document pages.</p>
                 </section>
                 <section class="help-topic" id="help-tools" data-help-topic="tools" hidden>
                     <h2>Tools &amp; plugins</h2>
@@ -2637,7 +2653,7 @@
                         <li><strong>Timesheets:</strong> set default PM initials and open the timesheet storage folder.</li>
                         <li><strong>Maintenance:</strong> find cleanup actions, including merging similar projects.</li>
                     </ul>
-                    <p>Settings changes save automatically. The theme control in the header switches between light and dark mode.</p>
+                    <p>Settings changes save automatically. Switch between light and dark mode in <strong>Settings &gt; General</strong>.</p>
                     <h3>Common problems</h3>
                     <ul>
                         <li><strong>Missing project or deliverable:</strong> clear search and filters and turn off Needs attention. Check the List page controls.</li>
@@ -2645,7 +2661,7 @@
                         <li><strong>AI is unavailable:</strong> check the Gemini key in Account &amp; AI and use the Help button beside it.</li>
                         <li><strong>AI key rejected, quota, or connection error:</strong> copy the full key again, check the project's usage in Google AI Studio for rate limits, or check your internet connection. Retry after resolving the reported issue.</li>
                         <li><strong>Tool failed or output is missing:</strong> open Activity History to check the error and available output links.</li>
-                        <li><strong>Updates:</strong> use the refresh control beside the version in the header to check. An Update button appears when an app update is available.</li>
+                        <li><strong>Updates:</strong> the app checks for updates automatically and shows an Update button beside the version chip in the header when a newer version is available.</li>
                     </ul>
                 </section>
             </article>

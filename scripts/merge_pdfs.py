@@ -43,11 +43,11 @@ def merge_pdfs(output_path, input_paths):
             # Save the combined PDF to the specified output path
             result_pdf.save(output_path)
             print(f"\nSuccessfully merged {len(input_paths)} PDF(s) into: {output_path}")
+            result_pdf.close()
         else:
+            result_pdf.close()
             print("No pages were successfully merged. Output file not created.", file=sys.stderr)
-
-        # Close the final PDF document object
-        result_pdf.close()
+            sys.exit(1)
 
     except Exception as e:
         print(f"A critical error occurred during the PDF merging process: {e}", file=sys.stderr)

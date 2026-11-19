@@ -17,7 +17,7 @@ if (-not (Test-Path -LiteralPath $FilesListPath)) {
 }
 
 $dwgFiles = @(
-  Get-Content -Path $FilesListPath -Encoding UTF8 |
+  Get-Content -LiteralPath $FilesListPath -Encoding UTF8 |
     ForEach-Object { $_.ToString().Trim() } |
     Where-Object {
       $_ -and
@@ -42,23 +42,27 @@ try {
   (if outPath
     (progn
       (setq out (open outPath "a"))
-      (setq blk (tblnext "BLOCK" T))
-      (while blk
-        (setq flags (cdr (assoc 70 blk)))
-        (setq name (cdr (assoc 2 blk)))
-        (setq refPath (cdr (assoc 1 blk)))
-        (if (and flags name refPath (/= refPath "") (/= 0 (logand flags 12)))
-          (write-line (strcat name "\t" refPath) out)
+      (if out
+        (progn
+          (setq blk (tblnext "BLOCK" T))
+          (while blk
+            (setq flags (cdr (assoc 70 blk)))
+            (setq name (cdr (assoc 2 blk)))
+            (setq refPath (cdr (assoc 1 blk)))
+            (if (and flags name refPath (/= refPath "") (/= 0 (logand flags 12)))
+              (write-line (strcat name "\t" refPath) out)
+            )
+            (setq blk (tblnext "BLOCK"))
+          )
+          (close out)
         )
-        (setq blk (tblnext "BLOCK"))
       )
-      (close out)
     )
   )
   (princ)
 )
 '@
-  Set-Content -Path $lispPath -Value $lisp -Encoding ASCII
+  Set-Content -LiteralPath $lispPath -Value $lisp -Encoding Default
 
   # Scripts already use command-line file prompts. Leave registry-backed FILEDIA alone.
   # Core Console treats an opened drawing as changed and resaves it unless QUIT
@@ -69,7 +73,7 @@ try {
     "_.QUIT",
     "_Y"
   )
-  Set-Content -Path $scrPath -Value ($scriptLines -join "`r`n") -Encoding ASCII
+  Set-Content -LiteralPath $scrPath -Value ($scriptLines -join "`r`n") -Encoding Default
 
   $results = @()
   $index = 0
@@ -94,7 +98,7 @@ try {
     $refs = @()
     if (Test-Path -LiteralPath $outPath) {
       $refs = @(
-        Get-Content -Path $outPath -Encoding UTF8 |
+        Get-Content -LiteralPath $outPath -Encoding Default |
           ForEach-Object {
             $line = $_.ToString()
             if (-not $line.Trim()) { return }

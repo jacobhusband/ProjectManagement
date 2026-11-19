@@ -89,16 +89,66 @@ def discover(project, notify=lambda message: None):
             'titleblocks': [str(p.relative_to(root)) for p in candidates], 'sizes': sizes}
 
 
+def _pe_major_version(path):
+    """Read the PE FileVersion major number (e.g. 25 for AutoCAD 2025) on Windows."""
+    if os.name != 'nt':
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _VSFixedFileInfo(ctypes.Structure):
+            _fields_ = [
+                ('dwSignature', wintypes.DWORD),
+                ('dwStrucVersion', wintypes.DWORD),
+                ('dwFileVersionMS', wintypes.DWORD),
+                ('dwFileVersionLS', wintypes.DWORD),
+                ('dwProductVersionMS', wintypes.DWORD),
+                ('dwProductVersionLS', wintypes.DWORD),
+                ('dwFileFlagsMask', wintypes.DWORD),
+                ('dwFileFlags', wintypes.DWORD),
+                ('dwFileOS', wintypes.DWORD),
+                ('dwFileType', wintypes.DWORD),
+                ('dwFileSubtype', wintypes.DWORD),
+                ('dwFileDateMS', wintypes.DWORD),
+                ('dwFileDateLS', wintypes.DWORD),
+            ]
+
+        version = ctypes.windll.version
+        file_str = str(path)
+        size = version.GetFileVersionInfoSizeW(file_str, None)
+        if not size:
+            return None
+        buf = ctypes.create_string_buffer(size)
+        if not version.GetFileVersionInfoW(file_str, 0, size, buf):
+            return None
+        ptr = ctypes.c_void_p()
+        length = wintypes.UINT()
+        if not version.VerQueryValueW(buf, '\\', ctypes.byref(ptr), ctypes.byref(length)):
+            return None
+        if not ptr.value or length.value < ctypes.sizeof(_VSFixedFileInfo):
+            return None
+        info = _VSFixedFileInfo.from_address(ptr.value)
+        if info.dwSignature != 0xFEEF04BD:
+            return None
+        return int(info.dwFileVersionMS >> 16)
+    except Exception:
+        return None
+
+
 def plugin_for(acad):
     acad = Path(acad)
     if acad.name.lower() != 'accoreconsole.exe' or not acad.is_file():
         raise ValueError('Select an installed AutoCAD Core Console in settings.')
-    # AutoCAD 2025+ uses .NET 8; earlier supported releases use .NET Framework.
-    import re
-    match = re.search(r'20\d{2}', str(acad.parent))
-    if not match:
-        raise ValueError('Cannot determine the AutoCAD release from its installation path.')
-    framework = 'net8.0-windows' if int(match.group()) >= 2025 else 'net48'
+    # AutoCAD 2025+ (file version 25.x) uses .NET 8; earlier supported releases use .NET Framework.
+    major = _pe_major_version(acad)
+    if major is not None and major > 0:
+        framework = 'net8.0-windows' if major >= 25 else 'net48'
+    else:
+        match = re.search(r'20\d{2}', acad.parent.name) or re.search(r'20\d{2}', str(acad.parent))
+        if not match:
+            raise ValueError('Cannot determine the AutoCAD release from its installation path.')
+        framework = 'net8.0-windows' if int(match.group()) >= 2025 else 'net48'
     # The app ships its own copy of the worker (build-config/fetch_clean_cad_worker.py),
     # so the AutoCAD plugin does not have to be installed. Source checkouts without that
     # copy fall back to an installed plugin.
@@ -126,6 +176,7 @@ def preview(project, acad, notify=lambda message: None):
     try:
         seed = workspace / 'seed.dwg'
         shutil.copy2(root / result['drawings'][0], seed)
+        seed.chmod(stat.S_IREAD | stat.S_IWRITE)
         notify(f'Inspecting paper-space titleblock references in {len(result["drawings"])} drawing(s)…')
         scan = run_worker(acad, plugin_for(acad), seed,
                           {'Operation': 'scan', 'Files': [str(root / p) for p in result['drawings']],
@@ -155,13 +206,14 @@ def run_worker(acad, dll, drawing, job, workspace, timeout=300, notify=lambda me
     # Paths are SCR arguments, not shell code. Reject line/quote injection.
     if any(c in str(dll) for c in '\r\n"'):
         raise ValueError('Invalid plugin path.')
+    script_encoding = 'mbcs' if os.name == 'nt' else 'utf-8'
     script.write_text('(setq aciesCleanSecure (getvar "SECURELOAD"))\n'
                       '(setvar "SECURELOAD" 0)\n_.NETLOAD\n"' + str(dll) + '"\n'
                       '(setvar "SECURELOAD" aciesCleanSecure)\n'
-                      'ACIESCLEANJOB\n_.QUIT\n_Y\n', encoding='utf-8')
+                      'ACIESCLEANJOB\n_.QUIT\n_Y\n', encoding=script_encoding)
     env = dict(os.environ, ACIES_CLEAN_JOB=str(request))
     with (folder / 'worker.log').open('wb') as log:
-        process = subprocess.Popen([str(acad), '/i', str(drawing), '/s', str(script), '/l', 'en-US'],
+        process = subprocess.Popen([str(acad), '/i', str(drawing), '/s', str(script)],
                                    cwd=str(folder), env=env, stdout=log, stderr=subprocess.STDOUT,
                                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         started = time.monotonic()

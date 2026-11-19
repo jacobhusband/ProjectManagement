@@ -353,10 +353,21 @@ else {
 
 # Interpreter for the PDF helper scripts. The app sets ACIES_PDF_PYTHON to its own
 # Python (source runs) or to the bundled acies-pdf-tools.exe (installed app), so the
-# helpers do not need a Python on the user's PATH. Without it, fall back to "python".
+# helpers do not need a Python on the user's PATH. When unset (e.g. standalone run),
+# probe the bundled acies-pdf-tools.exe beside the app before falling back to "python".
 $pythonExecutable = "python"
-if (-not [string]::IsNullOrWhiteSpace($env:ACIES_PDF_PYTHON) -and (Test-Path -LiteralPath $env:ACIES_PDF_PYTHON -PathType Leaf)) {
-  $pythonExecutable = $env:ACIES_PDF_PYTHON
+$envPdfPython = ([string]$env:ACIES_PDF_PYTHON).Trim().Trim('"')
+if ($envPdfPython -and (Test-Path -LiteralPath $envPdfPython -PathType Leaf)) {
+  $pythonExecutable = $envPdfPython
+}
+elseif (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+  $appParent = Split-Path -Path (Split-Path -Path $PSScriptRoot -Parent) -Parent
+  if ($appParent) {
+    $bundledHelper = Join-Path $appParent "acies-pdf-tools.exe"
+    if (Test-Path -LiteralPath $bundledHelper -PathType Leaf) {
+      $pythonExecutable = $bundledHelper
+    }
+  }
 }
 $MaxCombinedPdfFullPathLength = 240
 
@@ -376,17 +387,30 @@ $detectSizeScriptPath = Join-Path $scriptRoot "detect_pdf_size.py"
 $shrinkScriptPath = Join-Path $scriptRoot "shrink_pdf.py"
 $stripPdfLayersScriptPath = Join-Path $scriptRoot "strip_pdf_layers.py"
 # Check if the Python script exists
-if (-not (Test-Path $pythonScriptPath)) {
+if (-not (Test-Path -LiteralPath $pythonScriptPath -PathType Leaf)) {
   Write-Host "PROGRESS: ERROR: 'merge_pdfs.py' not found."
   exit 1
 }
-if ($StripPdfLayers -and -not (Test-Path $stripPdfLayersScriptPath)) {
+if ($StripPdfLayers -and -not (Test-Path -LiteralPath $stripPdfLayersScriptPath -PathType Leaf)) {
   Write-Host "PROGRESS: ERROR: 'strip_pdf_layers.py' not found."
   exit 1
 }
-# Check if Python is available in the system's PATH
-$pythonCheck = Get-Command $pythonExecutable -ErrorAction SilentlyContinue
-if (-not $pythonCheck) {
+# Verify the interpreter: avoid Get-Command wildcard issues on verified file paths,
+# and reject the Windows Store python.exe alias stub on machines without Python.
+$pythonAvailable = $false
+if (Test-Path -LiteralPath $pythonExecutable -PathType Leaf) {
+  $pythonAvailable = $true
+}
+else {
+  $pythonCheck = Get-Command $pythonExecutable -CommandType Application -ErrorAction SilentlyContinue |
+    Where-Object { $_.Source -and $_.Source -notlike '*\Microsoft\WindowsApps\*' } |
+    Select-Object -First 1
+  if ($pythonCheck) {
+    $pythonExecutable = $pythonCheck.Source
+    $pythonAvailable = $true
+  }
+}
+if (-not $pythonAvailable) {
   Write-Host "PROGRESS: ERROR: Python executable ('$pythonExecutable') not found in PATH. Reinstall ACIES Scheduler, which includes the PDF tools this step needs."
   exit 1
 }
@@ -627,14 +651,14 @@ function Invoke-FullAutoCadOleRefresh {
 (setq aciesLinkedOle (ssget "_X" '((0 . "OLE2FRAME") (71 . 1))))
 (if aciesLinkedOle (progn (command "_.DELAY" $refreshWaitMilliseconds) (command "_.REGENALL") (command "_.DELAY" 2000) (command "_.QSAVE")))
 (progn (setq aciesOleRefreshMarker (open "$refreshCompleteMarkerForLisp" "w")) (if aciesOleRefreshMarker (progn (write-line "ACIES_OLE_REFRESH:COMPLETE" aciesOleRefreshMarker) (write-line (strcat "LINKED=" (itoa (if aciesLinkedOle (sslength aciesLinkedOle) 0))) aciesOleRefreshMarker) (close aciesOleRefreshMarker))))
-(command "_.QUIT")
+(if (/= 0 (getvar "DBMOD")) (command "_.QUIT" "_Y") (command "_.QUIT"))
 "@
 
   try {
-    Set-Content -Encoding ASCII -LiteralPath $refreshScript -Value $scriptContent
+    Set-Content -Encoding Default -LiteralPath $refreshScript -Value $scriptContent
     $argumentLine = ('"{0}" /nologo /nohardware /nossm /b "{1}"' -f $DwgPath, $refreshScript)
-    "OLE_REFRESH_COMMAND: $AcadExe $argumentLine" | Out-File $LogFile -Append
-    "OLE_REFRESH_WAIT_SECONDS: $RefreshWaitSeconds" | Out-File $LogFile -Append
+    "OLE_REFRESH_COMMAND: $AcadExe $argumentLine" | Out-File -LiteralPath $LogFile -Append
+    "OLE_REFRESH_WAIT_SECONDS: $RefreshWaitSeconds" | Out-File -LiteralPath $LogFile -Append
 
     $process = Start-Process -FilePath $AcadExe `
       -ArgumentList $argumentLine `
@@ -704,11 +728,11 @@ Write-Host "PROGRESS: TRACE files_list_param_bound=$([int]$filesListWasProvided)
 if ($filesListWasProvided) {
   if ($hasFilesListPath) {
     Write-Host "PROGRESS: Received auto-selected files list: $FilesListPath"
-    if (Test-Path $FilesListPath) {
+    if (Test-Path -LiteralPath $FilesListPath -PathType Leaf) {
       Write-Host "PROGRESS: TRACE files_list_path_exists=1"
       $files = @(
-        Get-Content -Path $FilesListPath -Encoding UTF8 |
-          Where-Object { $_ -and $_.Trim() -and (Test-Path $_.Trim()) } |
+        Get-Content -LiteralPath $FilesListPath -Encoding UTF8 |
+          Where-Object { $_ -and $_.Trim() -and (Test-Path -LiteralPath $_.Trim() -PathType Leaf) } |
           ForEach-Object { $_.Trim() }
       )
       Write-Host "PROGRESS: TRACE files_list_valid_count=$($files.Count)"
@@ -944,23 +968,33 @@ Write-Host "PROGRESS: Preparing to plot $($files.Count) file(s)..."
 $basePlotDir = Join-Path -Path ([Environment]::GetFolderPath("MyDocuments")) -ChildPath "AutoCAD Plots"
 $timestamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 $firstDwgItem = Get-Item -LiteralPath ([string]$files[0])
-$firstFileParentDirName = $firstDwgItem.Directory.Parent.Name
+$candidateParentDir = if ($firstDwgItem.Directory -and $firstDwgItem.Directory.Parent -and $firstDwgItem.Directory.Parent.Parent) {
+  $firstDwgItem.Directory.Parent.Name
+} elseif ($firstDwgItem.Directory -and $firstDwgItem.Directory.Parent) {
+  $firstDwgItem.Directory.Name
+} else {
+  "Plots"
+}
+$firstFileParentDirName = ($candidateParentDir -replace '[<>:"/\\|?*]', '_').Trim().TrimEnd('.')
+if ([string]::IsNullOrWhiteSpace($firstFileParentDirName)) {
+  $firstFileParentDirName = "Plots"
+}
 $batchOutputDir = Join-Path -Path (Join-Path -Path $basePlotDir -ChildPath $firstFileParentDirName) -ChildPath $timestamp
 New-Item -ItemType Directory -Force -Path $batchOutputDir | Out-Null
 $combinedPdfName = Resolve-CombinedPdfName -DwgPath ([string]$files[0]) -OutputDirectory $batchOutputDir -MaxFullPathLength $MaxCombinedPdfFullPathLength
 
 # --- SINGLE LOG FILE SETUP ---
 $logFile = Join-Path $batchOutputDir "_BatchPlotLog.txt"
-"===== Batch Plot Started: $(Get-Date -f 'yyyy-MM-dd HH:mm:ss') =====" | Out-File $logFile
-"Selected Paper Size: $selectedPaperSize" | Out-File $logFile -Append
-"AutoCAD Core Used: $acadCore" | Out-File $logFile -Append
-"ARCALIGNEDTEXT module candidates: $($arcAlignedTextSupportCandidates -join '; ')" | Out-File $logFile -Append
-"Strip PDF Layers: $StripPdfLayers" | Out-File $logFile -Append
-"Refresh Excel OLE Links: $RefreshExcelOleLinks" | Out-File $logFile -Append
-"Full AutoCAD Executable: $fullAcadExe" | Out-File $logFile -Append
-"Output Folder: $batchOutputDir" | Out-File $logFile -Append
-"Combined PDF Name: $combinedPdfName" | Out-File $logFile -Append
-"Processing $($files.Count) files..." | Out-File $logFile -Append
+"===== Batch Plot Started: $(Get-Date -f 'yyyy-MM-dd HH:mm:ss') =====" | Out-File -LiteralPath $logFile
+"Selected Paper Size: $selectedPaperSize" | Out-File -LiteralPath $logFile -Append
+"AutoCAD Core Used: $acadCore" | Out-File -LiteralPath $logFile -Append
+"ARCALIGNEDTEXT module candidates: $($arcAlignedTextSupportCandidates -join '; ')" | Out-File -LiteralPath $logFile -Append
+"Strip PDF Layers: $StripPdfLayers" | Out-File -LiteralPath $logFile -Append
+"Refresh Excel OLE Links: $RefreshExcelOleLinks" | Out-File -LiteralPath $logFile -Append
+"Full AutoCAD Executable: $fullAcadExe" | Out-File -LiteralPath $logFile -Append
+"Output Folder: $batchOutputDir" | Out-File -LiteralPath $logFile -Append
+"Combined PDF Name: $combinedPdfName" | Out-File -LiteralPath $logFile -Append
+"Processing $($files.Count) files..." | Out-File -LiteralPath $logFile -Append
 
 # Initialize lists to track progress and generated files
 $allGeneratedPdfs = [System.Collections.ArrayList]::new()
@@ -1208,7 +1242,7 @@ function Invoke-CorePlotAttempt {
 "@
 
   try {
-    Set-Content -Encoding ASCII -LiteralPath $lispFile -Value $lispContent
+    Set-Content -Encoding Default -LiteralPath $lispFile -Value $lispContent
     $lispPathForScript = $lispFile -replace '\\', '/'
     # Core Console treats an opened drawing as changed, so QUIT asks "Really
     # want to discard all changes?" An answer passed inside LISP is ignored and
@@ -1218,12 +1252,22 @@ function Invoke-CorePlotAttempt {
     $scriptLines = @(Get-AcadTrustedLoadScriptLines -LoadLines @(
       "(load `"$lispPathForScript`")"
     )) + @('PlotAllLayouts', '_Y')
-    Set-Content -Encoding ASCII -LiteralPath $scriptFile -Value $scriptLines
+    Set-Content -Encoding Default -LiteralPath $scriptFile -Value $scriptLines
 
-    $plotOutput = & $acadCore /i "$DwgPath" /s "$scriptFile" 2>&1 | Tee-Object -FilePath $LogFile -Append
+    Push-Location -LiteralPath $env:TEMP
+    try {
+      $plotOutput = @(& $acadCore /i "$DwgPath" /s "$scriptFile" 2>&1)
+      $acadExitCode = $LASTEXITCODE
+    }
+    finally {
+      Pop-Location
+    }
+    if ($plotOutput.Count -gt 0) {
+      $plotOutput | Out-File -LiteralPath $LogFile -Append
+    }
     return [pscustomobject]@{
       Output = @($plotOutput)
-      ExitCode = $LASTEXITCODE
+      ExitCode = $acadExitCode
     }
   }
   finally {
@@ -1238,13 +1282,13 @@ function Invoke-CorePlotAttempt {
 # --- Main Processing Loop (Plotting ONLY) ---
 foreach ($dwgPath in $files) {
   $i++
-  $dwgItem = Get-Item $dwgPath
+  $dwgItem = Get-Item -LiteralPath $dwgPath
   $dwgNameWithoutExt = $dwgItem.BaseName
   Write-Host "PROGRESS: Plotting $i of $($files.Count): $($dwgItem.Name)"
 
-  "===== $(Get-Date -f 'yyyy-MM-dd HH:mm:ss') Start Plotting: $($dwgItem.Name) =====" | Out-File $logFile -Append
+  "===== $(Get-Date -f 'yyyy-MM-dd HH:mm:ss') Start Plotting: $($dwgItem.Name) =====" | Out-File -LiteralPath $logFile -Append
 
-  $existingPerDwgPdfs = @(Get-ChildItem -Path $batchOutputDir -Filter "$($dwgNameWithoutExt)-*.pdf" -ErrorAction SilentlyContinue)
+  $existingPerDwgPdfs = @(Get-ChildItem -LiteralPath $batchOutputDir -Filter "$($dwgNameWithoutExt)-*.pdf" -ErrorAction SilentlyContinue)
   $existingPerDwgPdfSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
   foreach ($existingPdf in $existingPerDwgPdfs) {
     [void]$existingPerDwgPdfSet.Add($existingPdf.FullName)
@@ -1258,7 +1302,7 @@ foreach ($dwgPath in $files) {
   $oleRefreshSkipReason = ""
   if ($RefreshExcelOleLinks) {
     $excelLinkFreshness = Get-ExcelLinkFreshness -DwgPath $dwgPath
-    "EXCEL_LINK_CHECK: $($excelLinkFreshness.Decision) - $($excelLinkFreshness.Reason)" | Out-File $logFile -Append
+    "EXCEL_LINK_CHECK: $($excelLinkFreshness.Decision) - $($excelLinkFreshness.Reason)" | Out-File -LiteralPath $logFile -Append
     if ($excelLinkFreshness.Decision -eq "skip") {
       $refreshOleLinksForDwg = $false
       $oleRefreshSkipReason = $excelLinkFreshness.Reason
@@ -1288,27 +1332,27 @@ foreach ($dwgPath in $files) {
       Write-Host "PROGRESS: $($dwgItem.Name) - $($excelLinkFreshness.Reason)"
     }
     Write-Host "PROGRESS: Refreshing linked Excel content in $($dwgItem.Name) and saving the drawing..."
-    "OLE_REFRESH: Required for $dwgPath" | Out-File $logFile -Append
+    "OLE_REFRESH: Required for $dwgPath" | Out-File -LiteralPath $logFile -Append
     $oleRefreshResult = Invoke-FullAutoCadOleRefresh `
       -AcadExe $fullAcadExe `
       -DwgPath $dwgPath `
       -LogFile $logFile `
       -TimeoutSeconds 180
 
-    "OLE_REFRESH_RESULT: $($oleRefreshResult.Status) - $($oleRefreshResult.Message)" | Out-File $logFile -Append
+    "OLE_REFRESH_RESULT: $($oleRefreshResult.Status) - $($oleRefreshResult.Message)" | Out-File -LiteralPath $logFile -Append
     if ($oleRefreshResult.Status -eq "success") {
       Write-Host "PROGRESS: $($dwgItem.Name) - $($oleRefreshResult.Message)"
     }
     else {
       Write-Host "PROGRESS: ERROR: $($dwgItem.Name) - $($oleRefreshResult.Message) Plot skipped to prevent stale OLE content."
-      "Plot skipped because linked Excel OLE refresh did not complete." | Out-File $logFile -Append
+      "Plot skipped because linked Excel OLE refresh did not complete." | Out-File -LiteralPath $logFile -Append
       if (-not ($oleRefreshFailures -contains $dwgPath)) {
         $oleRefreshFailures += $dwgPath
       }
       if (-not ($failed -contains $dwgPath)) {
         $failed += $dwgPath
       }
-      "===== $(Get-Date -f 'yyyy-MM-dd HH:mm:ss') Done: $($dwgItem.Name) =====" | Out-File $logFile -Append
+      "===== $(Get-Date -f 'yyyy-MM-dd HH:mm:ss') Done: $($dwgItem.Name) =====" | Out-File -LiteralPath $logFile -Append
       continue
     }
 
@@ -1377,15 +1421,15 @@ foreach ($dwgPath in $files) {
     Write-Host "PROGRESS: Linked Excel OLE content detected in $($dwgItem.Name), but automatic refresh is disabled."
   }
 
-  $currentPerDwgPdfs = @(Get-ChildItem -Path $batchOutputDir -Filter "$($dwgNameWithoutExt)-*.pdf" -ErrorAction SilentlyContinue | Sort-Object FullName)
+  $currentPerDwgPdfs = @(Get-ChildItem -LiteralPath $batchOutputDir -Filter "$($dwgNameWithoutExt)-*.pdf" -ErrorAction SilentlyContinue | Sort-Object FullName)
   $newPerDwgPdfs = @($currentPerDwgPdfs | Where-Object { -not $existingPerDwgPdfSet.Contains($_.FullName) })
   $newPerDwgPdfCount = $newPerDwgPdfs.Count
 
-  "ARC_CHECK: $arcCheckStatus" | Out-File $logFile -Append
-  "ARC_MODULE_LOAD: $arcModuleLoadStatus" | Out-File $logFile -Append
-  "OLE_CHECK: $oleCheckStatus" | Out-File $logFile -Append
-  "PLOT_DECISION: $plotDecision" | Out-File $logFile -Append
-  "PDF_COUNT_AFTER_DWG: $newPerDwgPdfCount" | Out-File $logFile -Append
+  "ARC_CHECK: $arcCheckStatus" | Out-File -LiteralPath $logFile -Append
+  "ARC_MODULE_LOAD: $arcModuleLoadStatus" | Out-File -LiteralPath $logFile -Append
+  "OLE_CHECK: $oleCheckStatus" | Out-File -LiteralPath $logFile -Append
+  "PLOT_DECISION: $plotDecision" | Out-File -LiteralPath $logFile -Append
+  "PDF_COUNT_AFTER_DWG: $newPerDwgPdfCount" | Out-File -LiteralPath $logFile -Append
   Write-Host "TELEMETRY: $($dwgItem.Name): OLE_CHECK=$oleCheckStatus; ARC_CHECK=$arcCheckStatus; ARC_MODULE_LOAD=$arcModuleLoadStatus; PLOT_DECISION=$plotDecision; PDF_COUNT_AFTER_DWG=$newPerDwgPdfCount"
 
   $preflightSkipped = ($plotDecision -eq "skip")
@@ -1396,17 +1440,17 @@ foreach ($dwgPath in $files) {
       $arcAlignedTextSupportFailures += $dwgPath
     }
     Write-Host "PROGRESS: ERROR: $($dwgItem.Name) - ARCALIGNEDTEXT support missing (ctextapp.arx is not loadable by accoreconsole)."
-    "ARCALIGNEDTEXT support failure detected in headless plotting output." | Out-File $logFile -Append
-    "Hint: Ensure Express Tools is installed and ctextapp.arx is loadable by accoreconsole." | Out-File $logFile -Append
+    "ARCALIGNEDTEXT support failure detected in headless plotting output." | Out-File -LiteralPath $logFile -Append
+    "Hint: Ensure Express Tools is installed and ctextapp.arx is loadable by accoreconsole." | Out-File -LiteralPath $logFile -Append
   }
   elseif ($preflightSkipped) {
     Write-Host "PROGRESS: ERROR: $($dwgItem.Name) - Plot skipped by preflight checks."
-    "Plot skipped by preflight checks." | Out-File $logFile -Append
+    "Plot skipped by preflight checks." | Out-File -LiteralPath $logFile -Append
   }
   if ($preflightError) {
     $details = if ($preflightErrorLine) { $preflightErrorLine } else { "Preflight reported an unspecified AutoLISP error." }
     Write-Host "PROGRESS: ERROR: $($dwgItem.Name) - $details"
-    "Preflight error detail: $details" | Out-File $logFile -Append
+    "Preflight error detail: $details" | Out-File -LiteralPath $logFile -Append
   }
 
   if ($noPdfOutputFailure) {
@@ -1414,13 +1458,13 @@ foreach ($dwgPath in $files) {
       $noPdfOutputFailures += $dwgPath
     }
     Write-Host "PROGRESS: ERROR: $($dwgItem.Name) - No PDFs were generated from layouts."
-    "No PDFs were generated from layouts for this DWG." | Out-File $logFile -Append
+    "No PDFs were generated from layouts for this DWG." | Out-File -LiteralPath $logFile -Append
   }
 
   if ($code -ne 0) {
     Write-Host "PROGRESS: ERROR: $($dwgItem.Name) - accoreconsole exited with code $code."
   }
-  "ExitCode: $code" | Out-File $logFile -Append
+  "ExitCode: $code" | Out-File -LiteralPath $logFile -Append
 
   if ($code -ne 0 -or $missingArcAlignedTextSupport -or $preflightSkipped -or $preflightError -or $noPdfOutputFailure) {
     Write-AcadOutputTail -Label $dwgItem.Name -Lines $normalizedOutputLines
@@ -1435,7 +1479,7 @@ foreach ($dwgPath in $files) {
       $allGeneratedPdfs.AddRange($pdfPaths)
     }
   }
-  "===== $(Get-Date -f 'yyyy-MM-dd HH:mm:ss') Done: $($dwgItem.Name) =====" | Out-File $logFile -Append
+  "===== $(Get-Date -f 'yyyy-MM-dd HH:mm:ss') Done: $($dwgItem.Name) =====" | Out-File -LiteralPath $logFile -Append
 }
 
 # --- FINAL MERGE (After the loop) ---
@@ -1449,23 +1493,23 @@ if ($allGeneratedPdfs.Count -gt 0) {
   $mergeOutput = & $pythonExecutable $pythonScriptPath @pythonArgs 2>&1
    
   if ($LASTEXITCODE -eq 0) {
-    "Python script executed successfully." | Out-File $logFile -Append
-    $mergeOutput | ForEach-Object { [string]$_ } | Out-File $logFile -Append
+    "Python script executed successfully." | Out-File -LiteralPath $logFile -Append
+    $mergeOutput | ForEach-Object { [string]$_ } | Out-File -LiteralPath $logFile -Append
     $finalCombinedPdfPath = $combinedPdfPath
 
     if ($StripPdfLayers) {
       Write-Host "PROGRESS: Removing PDF layers from combined PDF..."
       $stripOutput = & $pythonExecutable $stripPdfLayersScriptPath $combinedPdfPath 2>&1
       if ($LASTEXITCODE -eq 0) {
-        "PDF layer cleanup completed." | Out-File $logFile -Append
-        "$stripOutput" | Out-File $logFile -Append
+        "PDF layer cleanup completed." | Out-File -LiteralPath $logFile -Append
+        "$stripOutput" | Out-File -LiteralPath $logFile -Append
       }
       else {
         $pdfLayerCleanupFailed = $true
         $finalCombinedPdfPath = ""
         Write-Host "PROGRESS: ERROR: PDF layer cleanup failed."
-        "PDF layer cleanup failed. Output from Python script:" | Out-File $logFile -Append
-        "$stripOutput" | Out-File $logFile -Append
+        "PDF layer cleanup failed. Output from Python script:" | Out-File -LiteralPath $logFile -Append
+        "$stripOutput" | Out-File -LiteralPath $logFile -Append
       }
     }
 
@@ -1473,9 +1517,8 @@ if ($allGeneratedPdfs.Count -gt 0) {
     if ($shrinkPercentInt -lt 5) { $shrinkPercentInt = 5 }
     if ($shrinkPercentInt -gt 100) { $shrinkPercentInt = 100 }
     if (-not $pdfLayerCleanupFailed -and $shrinkPercentInt -lt 100) {
-      if (Test-Path $shrinkScriptPath) {
-        $combinedPdfBaseName = [System.IO.Path]::GetFileNameWithoutExtension($combinedPdfName)
-        $shrunkName = "$combinedPdfBaseName-shrunk-$shrinkPercentInt-percent.tmp.pdf"
+      if (Test-Path -LiteralPath $shrinkScriptPath -PathType Leaf) {
+        $shrunkName = "_shrink_$([guid]::NewGuid().ToString('N').Substring(0, 8)).pdf"
         $shrunkPath = Join-Path $batchOutputDir $shrunkName
         if (Test-Path -LiteralPath $shrunkPath -PathType Leaf) {
           Remove-Item -LiteralPath $shrunkPath -Force
@@ -1484,17 +1527,17 @@ if ($allGeneratedPdfs.Count -gt 0) {
         $shrinkOutput = & $pythonExecutable $shrinkScriptPath $combinedPdfPath $shrunkPath $shrinkPercentInt 2>&1
         if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $shrunkPath -PathType Leaf)) {
           Move-Item -LiteralPath $shrunkPath -Destination $combinedPdfPath -Force
-          "Shrunk PDF applied to final output: $combinedPdfName" | Out-File $logFile -Append
-          "$shrinkOutput" | Out-File $logFile -Append
+          "Shrunk PDF applied to final output: $combinedPdfName" | Out-File -LiteralPath $logFile -Append
+          "$shrinkOutput" | Out-File -LiteralPath $logFile -Append
           $finalCombinedPdfPath = $combinedPdfPath
         } else {
           Write-Host "PROGRESS: ERROR: PDF shrinking failed."
-          "PDF shrinking failed. Output from Python script:" | Out-File $logFile -Append
-          "$shrinkOutput" | Out-File $logFile -Append
+          "PDF shrinking failed. Output from Python script:" | Out-File -LiteralPath $logFile -Append
+          "$shrinkOutput" | Out-File -LiteralPath $logFile -Append
         }
       } else {
         Write-Host "PROGRESS: ERROR: 'shrink_pdf.py' not found."
-        "'shrink_pdf.py' not found; skipped shrinking." | Out-File $logFile -Append
+        "'shrink_pdf.py' not found; skipped shrinking." | Out-File -LiteralPath $logFile -Append
       }
     }
   }
@@ -1503,50 +1546,50 @@ if ($allGeneratedPdfs.Count -gt 0) {
     $finalCombinedPdfPath = ""
     $mergeErrorSummary = Get-ToolOutputSummary -Output $mergeOutput
     Write-Host "PROGRESS: ERROR: PDF merging failed: $mergeErrorSummary"
-    "PDF Merging Failed. Output from Python script:" | Out-File $logFile -Append
-    $mergeOutput | ForEach-Object { [string]$_ } | Out-File $logFile -Append
+    "PDF Merging Failed. Output from Python script:" | Out-File -LiteralPath $logFile -Append
+    $mergeOutput | ForEach-Object { [string]$_ } | Out-File -LiteralPath $logFile -Append
   }
 }
 else {
   Write-Host "PROGRESS: No PDFs were generated to combine."
-  "No PDFs were generated to merge." | Out-File $logFile -Append
+  "No PDFs were generated to merge." | Out-File -LiteralPath $logFile -Append
 }
 
 # --- CLEANUP & NOTIFICATION ---
-"===== Batch Plot Finished: $(Get-Date -f 'yyyy-MM-dd HH:mm:ss') =====" | Out-File $logFile -Append
+"===== Batch Plot Finished: $(Get-Date -f 'yyyy-MM-dd HH:mm:ss') =====" | Out-File -LiteralPath $logFile -Append
 if ($arcAlignedTextSupportFailures.Count) {
   $arcFails = @($arcAlignedTextSupportFailures | Select-Object -Unique)
   $arcFailMsg = "ARCALIGNEDTEXT entities could not be plotted in headless mode because ctextapp.arx could not be loaded: $($arcFails -join ', ')"
   Write-Host "PROGRESS: ERROR: $arcFailMsg"
   Write-Host "PROGRESS: ERROR: Install/repair AutoCAD Express Tools (ctextapp.arx) for the selected AutoCAD Core Console."
-  $arcFailMsg | Out-File $logFile -Append
-  "Install/repair AutoCAD Express Tools and verify ctextapp.arx can be loaded by accoreconsole." | Out-File $logFile -Append
+  $arcFailMsg | Out-File -LiteralPath $logFile -Append
+  "Install/repair AutoCAD Express Tools and verify ctextapp.arx can be loaded by accoreconsole." | Out-File -LiteralPath $logFile -Append
 }
 if ($oleRefreshFailures.Count) {
   $oleFails = @($oleRefreshFailures | Select-Object -Unique)
   $oleFailMsg = "Linked Excel OLE refresh did not complete; stale drawings were not plotted: $($oleFails -join ', ')"
   Write-Host "PROGRESS: ERROR: $oleFailMsg"
-  $oleFailMsg | Out-File $logFile -Append
+  $oleFailMsg | Out-File -LiteralPath $logFile -Append
 }
 if ($noPdfOutputFailures.Count) {
   $noPdfFails = @($noPdfOutputFailures | Select-Object -Unique)
   $noPdfFailMsg = "One or more files reported plot success but produced zero layout PDFs: $($noPdfFails -join ', ')"
   Write-Host "PROGRESS: ERROR: $noPdfFailMsg"
-  $noPdfFailMsg | Out-File $logFile -Append
+  $noPdfFailMsg | Out-File -LiteralPath $logFile -Append
 }
 if ($failed.Count) {
   $failedUnique = @($failed | Select-Object -Unique)
   $failMsg = "One or more files failed to plot: $($failedUnique -join ', ')"
   Write-Host "PROGRESS: ERROR: $failMsg"
-  $failMsg | Out-File $logFile -Append
+  $failMsg | Out-File -LiteralPath $logFile -Append
 }
 if ($pdfLayerCleanupFailed) {
   Write-Host "PROGRESS: ERROR: Publish failed because PDF layer cleanup did not complete."
-  "Publish failed because PDF layer cleanup did not complete." | Out-File $logFile -Append
+  "Publish failed because PDF layer cleanup did not complete." | Out-File -LiteralPath $logFile -Append
 }
 if ($pdfMergeFailed) {
   Write-Host "PROGRESS: ERROR: Publish failed because PDF merge did not complete."
-  "Publish failed because PDF merge did not complete." | Out-File $logFile -Append
+  "Publish failed because PDF merge did not complete." | Out-File -LiteralPath $logFile -Append
 }
 
 if (-not [string]::IsNullOrWhiteSpace($finalCombinedPdfPath) -and (Test-Path -Path $finalCombinedPdfPath -PathType Leaf)) {

@@ -3,6 +3,7 @@
 // build time means Wire Sizer styles itself with no internet access and no third-party
 // script running inside the app.
 export default {
+  darkMode: 'class',
   content: ['./index.html', './*.{ts,tsx}', './components/**/*.{ts,tsx}', './utils/**/*.{ts,tsx}'],
   theme: {
     extend: {},

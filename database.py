@@ -212,6 +212,7 @@ def upsert_project(project_number: str, project_name: str, project_path: str, db
 
 def get_project(project_id_or_number: str, db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Retrieves a project by ID or project number."""
+    init_db(db_path)
     with db_session(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -377,6 +378,7 @@ def upsert_panel_schedule(project_id: str, panel_data: Dict[str, Any],
 
 def get_panel_schedule(panel_id: str, db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Retrieves a panel schedule with its circuits and parsed load summary."""
+    init_db(db_path)
     with db_session(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM panel_schedules WHERE id = ?", (panel_id,))
@@ -422,6 +424,7 @@ def list_panel_schedules(project_id: str, db_path: Optional[str] = None) -> List
 
 def delete_panel_schedule(panel_id: str, db_path: Optional[str] = None) -> bool:
     """Deletes a panel schedule and cascades circuit deletion."""
+    init_db(db_path)
     with db_session(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM panel_schedules WHERE id = ?", (panel_id,))

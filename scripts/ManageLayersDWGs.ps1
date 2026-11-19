@@ -1,4 +1,4 @@
-param(
+﻿param(
   [string]$AcadCore,
   [string]$ScanAllLayers = "true",
   [string]$FilesListPath = "",
@@ -63,7 +63,7 @@ Write-Host "PROGRESS: Initializing script..."
 
 # ---------------- 1) FIND ACCORECONSOLE ----------------
 . (Join-Path $PSScriptRoot 'AutoCadDiscovery.ps1')
-if ($AcadCore -and (Test-Path -Path $AcadCore)) {
+if ($AcadCore -and (Test-Path -LiteralPath $AcadCore -PathType Leaf)) {
   $acadCore = $AcadCore
 }
 else {
@@ -238,11 +238,11 @@ Write-Host "PROGRESS: TRACE files_list_param_bound=$([int]$filesListWasProvided)
 if ($filesListWasProvided) {
   if ($hasFilesListPath) {
     Write-Host "PROGRESS: Received auto-selected files list: $FilesListPath"
-    if (Test-Path $FilesListPath) {
+    if (Test-Path -LiteralPath $FilesListPath -PathType Leaf) {
       Write-Host "PROGRESS: TRACE files_list_path_exists=1"
       $files = @(
-        Get-Content -Path $FilesListPath -Encoding UTF8 |
-          Where-Object { $_ -and $_.Trim() -and (Test-Path $_.Trim()) } |
+        Get-Content -LiteralPath $FilesListPath -Encoding UTF8 |
+          Where-Object { $_ -and $_.Trim() -and (Test-Path -LiteralPath $_.Trim() -PathType Leaf) } |
           ForEach-Object { $_.Trim() }
       )
       Write-Host "PROGRESS: TRACE files_list_valid_count=$($files.Count)"
@@ -334,7 +334,7 @@ function Get-TextFileLineCount {
   if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
     return 0
   }
-  return [int]((Get-Content -LiteralPath $Path -Encoding ASCII | Measure-Object -Line).Lines)
+  return [int]((Get-Content -LiteralPath $Path -Encoding Default | Measure-Object -Line).Lines)
 }
 
 function Get-ManageLayersReportRows {
@@ -347,7 +347,7 @@ function Get-ManageLayersReportRows {
     return @()
   }
 
-  $allLines = @(Get-Content -LiteralPath $ReportPath -Encoding ASCII)
+  $allLines = @(Get-Content -LiteralPath $ReportPath -Encoding Default)
   if ($SkipLines -lt 0) { $SkipLines = 0 }
   if ($allLines.Count -le $SkipLines) {
     return @()
@@ -531,8 +531,13 @@ $extractLspContent = @"
   (princ)
 )
 
-;;; Try to create ObjectDBX document with version-specific ProgIDs
-(defun _create-dbx-doc (/ dbxDoc progIds progId)
+;;; Try to create ObjectDBX document with current AutoCAD major version first, then fallbacks
+(defun _create-dbx-doc (/ dbxDoc progIds progId acadVer dotPos majorVer)
+  (setq acadVer (getvar "ACADVER"))
+  (setq majorVer nil)
+  (if (and acadVer (setq dotPos (vl-string-search "." acadVer)))
+    (setq majorVer (substr acadVer 1 dotPos))
+  )
   (setq progIds (list
     "ObjectDBX.AxDbDocument.25"  ; AutoCAD 2026
     "ObjectDBX.AxDbDocument.24"  ; AutoCAD 2025
@@ -544,6 +549,9 @@ $extractLspContent = @"
     "ObjectDBX.AxDbDocument.18"  ; AutoCAD 2019
     "ObjectDBX.AxDbDocument"     ; Generic fallback
   ))
+  (if (and majorVer (> (strlen majorVer) 0))
+    (setq progIds (cons (strcat "ObjectDBX.AxDbDocument." majorVer) progIds))
+  )
   (setq dbxDoc nil)
   (foreach progId progIds
     (if (null dbxDoc)
@@ -639,7 +647,7 @@ $extractLspContent = @"
 )
 (princ)
 "@
-Set-Content -Path $extractLsp -Value $extractLspContent -Encoding ASCII
+Set-Content -Path $extractLsp -Value $extractLspContent -Encoding Default
 
 $extractScr = Join-Path $ToolDir "extract.scr"
 
@@ -658,13 +666,13 @@ if ($filesToScan.Count -eq 0) {
 }
 
 $filesToScan | ForEach-Object { ($_ -replace '\\', '/') } |
-  Set-Content -Path $scanListFile -Encoding ASCII
+  Set-Content -Path $scanListFile -Encoding Default
 
 # Core Console shows no dialogs, so profile-backed FILEDIA/CMDDIA/PROXYNOTICE are left alone.
 $extractScrLines = @(Get-AcadTrustedLoadScriptLines -LoadLines @("(load `"$extractLspForLisp`")")) + @(
   "(c:ExtractLayersBatch)"
 )
-Set-Content -Path $extractScr -Value ($extractScrLines -join "`r`n") -Encoding ASCII
+Set-Content -Path $extractScr -Value ($extractScrLines -join "`r`n") -Encoding Default
 
 $outLog = Join-Path $ToolDir "extract_batch.out.txt"
 $errLog = Join-Path $ToolDir "extract_batch.err.txt"
@@ -693,7 +701,7 @@ if (-not $r.TimedOut -and (Test-Path $layerDumpFile)) {
     $fallbackScr = Join-Path $ToolDir "extract_current.scr"
     Set-Content -Path $fallbackScr -Value ((@(Get-AcadTrustedLoadScriptLines -LoadLines @("(load `"$extractLspForLisp`")")) + @(
         "(c:ExtractLayersCurrent)"
-      )) -join "`r`n") -Encoding ASCII
+      )) -join "`r`n") -Encoding Default
     foreach ($unread in $unreadFiles) {
       Write-Host "PROGRESS: Reading layers from $([System.IO.Path]::GetFileName($unread)) directly..."
       $fbOut = Join-Path $ToolDir "extract_current.out.txt"
@@ -1157,7 +1165,7 @@ if ($layersToFreeze.Count -eq 0 -and $layersToThaw.Count -eq 0) {
 # ---------------- 6) UPDATE PHASE (STATE-AWARE, NO COM) ----------------
 $updateReport = Join-Path $ToolDir "LayerUpdateReport.tsv"
 "DWG`tLayer`tOpType`tExists`tWasCurrent`tWasOff`tWasFrozen`tWasLocked`tAction`tResultFrozen`tSaveStatus" |
-  Set-Content -Path $updateReport -Encoding ASCII
+  Set-Content -Path $updateReport -Encoding Default
 
 $updateReportForLisp = ($updateReport -replace '\\', '/')
 
@@ -1383,26 +1391,28 @@ $updateLspContent = @"
 
 (defun c:BatchUpdateFiles (/)
   (c:BatchUpdate)
-  (command "_.QUIT" "_N")
+  (if (/= 0 (getvar "DBMOD")) (command "_.QUIT" "_Y") (command "_.QUIT"))
   (princ)
 )
 (princ)
 "@
-Set-Content -Path $updateLsp -Value $updateLspContent -Encoding ASCII
+Set-Content -LiteralPath $updateLsp -Value $updateLspContent -Encoding Default
 
 $updateScr = Join-Path $ToolDir "update.scr"
 $updateScrLines = @(Get-AcadTrustedLoadScriptLines -LoadLines @("(load `"$updateLspForLisp`")")) + @(
   "(c:BatchUpdateFiles)"
 )
-Set-Content -Path $updateScr -Value ($updateScrLines -join "`r`n") -Encoding ASCII
+Set-Content -LiteralPath $updateScr -Value ($updateScrLines -join "`r`n") -Encoding Default
 
 # ---------------- 7) EXECUTE UPDATES ----------------
-$logFile = Join-Path ([Environment]::GetFolderPath("Desktop")) "LayerUpdateLog.txt"
-"Starting Update at $(Get-Date)" | Out-File $logFile
-"Files:" | Out-File $logFile -Append
-$files | ForEach-Object { $_ | Out-File $logFile -Append }
-"Layers to freeze: $($layersToFreeze -join ', ')" | Out-File $logFile -Append
-"Layers to thaw:   $($layersToThaw -join ', ')" | Out-File $logFile -Append
+# Store the summary log under $ToolDir instead of Desktop so Controlled Folder Access
+# or redirected/offline Desktop folders cannot abort a layer update.
+$logFile = Join-Path $ToolDir "LayerUpdateLog.txt"
+"Starting Update at $(Get-Date)" | Out-File -LiteralPath $logFile
+"Files:" | Out-File -LiteralPath $logFile -Append
+$files | ForEach-Object { $_ | Out-File -LiteralPath $logFile -Append }
+"Layers to freeze: $($layersToFreeze -join ', ')" | Out-File -LiteralPath $logFile -Append
+"Layers to thaw:   $($layersToThaw -join ', ')" | Out-File -LiteralPath $logFile -Append
 
 Write-Host "PROGRESS: Updating $($files.Count) file(s)..."
 
@@ -1442,20 +1452,20 @@ foreach ($dwgFile in $files) {
       $displayExitCode = if ($null -eq $r.ExitCode) { "unavailable" } else { [string]$r.ExitCode }
       $successColor = if ($attempt -eq 1 -and $displayExitCode -eq "0") { "Green" } else { "Yellow" }
       Write-Host "    -> Verified OK on attempt $attempt of $MaxUpdateAttemptsPerFile (exit code $displayExitCode)." -ForegroundColor $successColor
-      "DONE (verified on attempt $attempt, exit code $displayExitCode): $dwgFile" | Out-File $logFile -Append
+      "DONE (verified on attempt $attempt, exit code $displayExitCode): $dwgFile" | Out-File -LiteralPath $logFile -Append
       continue
     }
 
     if ($attempt -lt $MaxUpdateAttemptsPerFile) {
       Write-Host "PROGRESS: Verification failed for $([IO.Path]::GetFileName($dwgFile)) on attempt $attempt of ${MaxUpdateAttemptsPerFile}: $attemptReason"
-      "RETRY ($attempt/$MaxUpdateAttemptsPerFile): $dwgFile :: $attemptReason" | Out-File $logFile -Append
+      "RETRY ($attempt/$MaxUpdateAttemptsPerFile): $dwgFile :: $attemptReason" | Out-File -LiteralPath $logFile -Append
       Start-Sleep -Seconds 2
       continue
     }
 
     Write-Host "    -> FAILED verification: $attemptReason" -ForegroundColor Red
     Write-AcadOutputTail -Label ([IO.Path]::GetFileName($dwgFile)) -Paths @($outLog, $errLog)
-    "FAILED ($attemptReason): $dwgFile" | Out-File $logFile -Append
+    "FAILED ($attemptReason): $dwgFile" | Out-File -LiteralPath $logFile -Append
     $failedFiles += $dwgFile
     $failedDetails += [pscustomobject]@{
       Path   = $dwgFile
