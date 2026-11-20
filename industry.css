@@ -546,33 +546,6 @@
   text-align: right;
 }
 
-#projects-panel .projects-table th[data-sort] {
-  cursor: pointer;
-  user-select: none;
-}
-
-#projects-panel .projects-table th[data-sort]:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-
-#projects-panel .projects-table th[data-sort]:hover,
-#projects-panel .projects-table th[data-sort].sorted,
-#projects-panel .projects-table th[data-sort].sort-asc,
-#projects-panel .projects-table th[data-sort].sort-desc {
-  color: var(--accent);
-}
-
-#projects-panel .projects-table th[data-sort].sort-asc::after {
-  content: " ▲";
-  font-size: 0.72em;
-}
-
-#projects-panel .projects-table th[data-sort].sort-desc::after {
-  content: " ▼";
-  font-size: 0.72em;
-}
-
 /* rows */
 #projects-panel .projects-table tbody > tr {
   display: block;

@@ -490,6 +490,7 @@ $oleCheckPresentMarker = "ACIES_OLE_CHECK:PRESENT"
 $oleCheckAbsentMarker = "ACIES_OLE_CHECK:ABSENT"
 $oleCheckErrorMarker = "ACIES_OLE_CHECK:ERROR"
 $oleRefreshRequiredMarker = "ACIES_OLE_REFRESH:REQUIRED"
+$layoutOrderMarker = "ACIES_LAYOUT_ORDER:"
 Write-Host "PROGRESS: ARCALIGNEDTEXT module candidates: $($arcAlignedTextSupportCandidates -join '; ')"
 
 function Test-DwgOpenInAutoCad {
@@ -1006,6 +1007,43 @@ $pdfMergeFailed = $false
 $pdfLayerCleanupFailed = $false
 $i = 0
 
+# Orders one drawing's layout PDFs the way its tabs are ordered in AutoCAD.
+# The plot LISP reports "ACIES_LAYOUT_ORDER:<n>:<layout>|" before plotting each
+# layout ("|" cannot appear in a layout name, so it ends the name even when
+# Core Console prints its next prompt on the same line). PDFs that match no
+# reported layout keep name order, after the rest.
+function Get-LayoutPdfPathsInTabOrder {
+  param(
+    [string[]]$PdfPaths,
+    [string[]]$OutputLines,
+    [string]$DwgNameWithoutExt,
+    [string]$Marker = "ACIES_LAYOUT_ORDER:"
+  )
+
+  $positionByFileName = @{}
+  $pattern = [regex]::Escape($Marker) + '(\d+):([^|]+)\|'
+  foreach ($line in @($OutputLines)) {
+    $match = [regex]::Match(("$line" -replace ([char]0), ''), $pattern)
+    if (-not $match.Success) { continue }
+    $fileName = ("$DwgNameWithoutExt-$($match.Groups[2].Value).pdf").ToUpperInvariant()
+    # A drawing re-plotted after an OLE refresh reports its layouts again; keep the last run.
+    $positionByFileName[$fileName] = [int]$match.Groups[1].Value
+  }
+
+  $unordered = [int]::MaxValue
+  return @(
+    @($PdfPaths) |
+      Where-Object { $_ } |
+      Sort-Object -Property @(
+        @{ Expression = {
+            $key = [IO.Path]::GetFileName($_).ToUpperInvariant()
+            if ($positionByFileName.ContainsKey($key)) { $positionByFileName[$key] } else { $unordered }
+          } },
+        @{ Expression = { $_ } }
+      )
+  )
+}
+
 function Invoke-CorePlotAttempt {
   param(
     [string]$DwgPath,
@@ -1177,7 +1215,28 @@ function Invoke-CorePlotAttempt {
   )
 )
 
-(defun PlotLayoutsAfterPreflight (/ main-dict layout-dict item layout-name pdfName preflightResult *error*)
+;; The ACAD_LAYOUT dictionary is keyed by name, so walking it yields layouts
+;; alphabetically. Each layout's TabOrder (DXF 71) is the order of the tabs in
+;; AutoCAD, which is the order sheets must be published in.
+(defun AciesLayoutsInTabOrder (/ layout-dict item layout-name layout-data tab-order layouts)
+  (setq layout-dict (dictsearch (namedobjdict) "ACAD_LAYOUT"))
+  (foreach item layout-dict
+    (cond
+      ((= (car item) 3) (setq layout-name (cdr item)))
+      ((and (= (car item) 350) layout-name)
+        (setq layout-data (entget (cdr item)))
+        (setq tab-order (cdr (assoc 71 layout-data)))
+        (if (/= (strcase layout-name) "MODEL")
+          (setq layouts (cons (cons (if tab-order tab-order 32767) layout-name) layouts))
+        )
+        (setq layout-name nil)
+      )
+    )
+  )
+  (mapcar 'cdr (vl-sort (reverse layouts) '(lambda (a b) (< (car a) (car b)))))
+)
+
+(defun PlotLayoutsAfterPreflight (/ layout-name layout-index pdfName preflightResult *error*)
   (defun *error* (msg)
     (AciesRestorePlotSettings)
     (if msg (princ (strcat "\n; error: " msg)))
@@ -1193,21 +1252,13 @@ function Invoke-CorePlotAttempt {
     )
     (if preflightResult
       (progn
-        (setq main-dict (namedobjdict))
-        (setq layout-dict (dictsearch main-dict "ACAD_LAYOUT"))
-        (foreach item layout-dict
-          (if (= (car item) 3)
-            (progn
-              (setq layout-name (cdr item))
-              (if (/= (strcase layout-name) "MODEL")
-                (progn
-                  (setvar "CTAB" layout-name)
-                  (setq pdfName (strcat "$lispOutputDir\\" "$DwgNameWithoutExt" "-" layout-name ".pdf"))
-                  (command "-PLOT" "Y" "" "DWG to PDF.pc3" "$PaperSize" "I" "L" "N" "L" "1:1" "0.00,0.00" "Y" "510-monochrome.ctb" "Y" "N" "N" "N" pdfName "N" "Y")
-                )
-              )
-            )
-          )
+        (setq layout-index 0)
+        (foreach layout-name (AciesLayoutsInTabOrder)
+          (setq layout-index (1+ layout-index))
+          (AciesLog (strcat "$layoutOrderMarker" (itoa layout-index) ":" layout-name "|"))
+          (setvar "CTAB" layout-name)
+          (setq pdfName (strcat "$lispOutputDir\\" "$DwgNameWithoutExt" "-" layout-name ".pdf"))
+          (command "-PLOT" "Y" "" "DWG to PDF.pc3" "$PaperSize" "I" "L" "N" "L" "1:1" "0.00,0.00" "Y" "510-monochrome.ctb" "Y" "N" "N" "N" pdfName "N" "Y")
         )
         (AciesRestorePlotSettings)
         (command "_.QUIT")
@@ -1475,7 +1526,11 @@ foreach ($dwgPath in $files) {
   }
   else {
     if ($newPerDwgPdfs.Count -gt 0) {
-      $pdfPaths = @($newPerDwgPdfs | ForEach-Object { $_.FullName } | Sort-Object)
+      $pdfPaths = @(Get-LayoutPdfPathsInTabOrder `
+        -PdfPaths @($newPerDwgPdfs | ForEach-Object { $_.FullName }) `
+        -OutputLines $normalizedOutputLines `
+        -DwgNameWithoutExt $dwgNameWithoutExt `
+        -Marker $layoutOrderMarker)
       $allGeneratedPdfs.AddRange($pdfPaths)
     }
   }

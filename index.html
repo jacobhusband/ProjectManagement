@@ -20,6 +20,7 @@
     <link rel="stylesheet" href="styles.css?v=20261118-timesheet-project-picker" />
     <link rel="stylesheet" href="symbol_counter.css?v=20260818-delete-actions" />
     <link rel="stylesheet" href="panel_schedule_export.css?v=20261009-initial" />
+    <link rel="stylesheet" href="panel_schedule_ai.css?v=20261118-hydrogen-v10" />
     <link rel="stylesheet" href="industry.css?v=20260930-work-locally" />
     <link rel="stylesheet" href="modern-workspace.css?v=20261112-help-guides" />
     <link rel="stylesheet" href="deliverables-workspace.css?v=20261112-header-actions" />
@@ -255,7 +256,6 @@
                                     <button type="button" class="projects-filter-option" data-filter-value="lastWeek" role="menuitemradio" aria-checked="false" tabindex="-1">Last week</button>
                                     <button type="button" class="projects-filter-option" data-filter-value="soon" role="menuitemradio" aria-checked="false" tabindex="-1">This week</button>
                                     <button type="button" class="projects-filter-option" data-filter-value="future" role="menuitemradio" aria-checked="false" tabindex="-1">Upcoming Weeks</button>
-                                    <button type="button" class="projects-filter-option" data-filter-value="attention" role="menuitemradio" aria-checked="false" tabindex="-1">Needs attention</button>
                                 </div>
                             </div>
                         </div>
@@ -356,11 +356,11 @@
                     <thead>
                         <tr class="reg-head">
                             <th class="reg-th reg-th--rail" aria-hidden="true"></th>
-                            <th class="reg-th" data-sort="id" tabindex="0">ID</th>
-                            <th class="reg-th" data-sort="name" tabindex="0">Project</th>
-                            <th class="reg-th deliverables-header" data-sort="deliverable" tabindex="0">Deliverable</th>
-                            <th class="reg-th" data-sort="due" tabindex="0">Due</th>
-                            <th class="reg-th" data-sort="status" tabindex="0">Status</th>
+                            <th class="reg-th reg-th--id">ID</th>
+                            <th class="reg-th">Project</th>
+                            <th class="reg-th deliverables-header">Deliverable</th>
+                            <th class="reg-th">Due</th>
+                            <th class="reg-th">Status</th>
                             <th class="reg-th reg-th--right">Notes</th>
                         </tr>
                     </thead>
@@ -751,6 +751,22 @@
                                 </div>
                             </div>
                             <div class="tool-card-status">Under construction</div>
+                        </div>
+                        <div id="toolPanelScheduleStudio" class="tool-card" role="button" tabindex="0">
+                            <div class="tool-card-content">
+                                <div class="tool-icon">
+                                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+                                        <path d="M9 3v18M15 3v18M3 9h18M3 15h18"></path>
+                                    </svg>
+                                </div>
+                                <div class="tool-card-header">Panel Schedule AI Studio</div>
+                                <div class="tool-card-body">
+                                    Turn site survey photos or as-built PDF drawings into ACIES Excel panel schedules
+                                    using Gemini 4 Hydrogen, with side-by-side review before export.
+                                </div>
+                            </div>
                         </div>
                         <div id="toolCircuitBreaker" class="tool-card tool-card-under-construction" role="button"
                             tabindex="0" aria-disabled="true" aria-describedby="toolsUnderConstructionWarning"
@@ -3836,6 +3852,495 @@
             </div>
         </div>
     </section>
+    <dialog id="panelStudioDlg" class="psa-dialog" aria-labelledby="psaDialogTitle">
+        <div class="psa-shell">
+            <header class="psa-header">
+                <div class="psa-title-wrap">
+                    <div class="psa-mark" aria-hidden="true">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+                            <path d="M9 3v18M15 3v18M3 9h18M3 15h18"></path>
+                        </svg>
+                    </div>
+                    <div>
+                        <div id="psaDialogTitle" class="psa-title">Panel Schedule AI Studio</div>
+                        <div class="psa-subtitle">Site survey photos &amp; as-built PDFs &rarr; ACIES Excel template</div>
+                    </div>
+                </div>
+                <div class="psa-header-mid">
+                    <div class="psa-step-tabs" role="tablist" aria-label="Studio Steps">
+                        <button id="psaStepSourcesBtn" class="psa-step-btn is-active" type="button">1. Sources &amp; Extract</button>
+                        <button id="psaStepReviewBtn" class="psa-step-btn" type="button" disabled>2. Review &amp; Export</button>
+                    </div>
+                </div>
+                <div class="psa-header-actions">
+                    <span id="psaModelPill" class="psa-model-pill"
+                        title="Uses your Google AI Studio API key in Settings. Free-tier requests may be used by Google to improve products.">
+                        <span class="psa-model-dot" aria-hidden="true"></span>
+                        <span id="psaModelPillText">Gemini 4 Hydrogen &bull; Free Tier</span>
+                    </span>
+                    <button id="psaCloseBtn" class="btn ghost" type="button">Close</button>
+                </div>
+            </header>
+
+            <!-- Non-blocking Background Analysis Banner -->
+            <div id="psaBgProgressBanner" class="psa-bg-banner" hidden>
+                <div class="psa-bg-banner-left">
+                    <span class="psa-bg-spinner" aria-hidden="true"></span>
+                    <div class="psa-bg-copy">
+                        <div id="psaBgBannerMsg" class="psa-bg-msg">Analyzing in background with Gemini 4 Hydrogen...</div>
+                        <div class="psa-bg-bar-track">
+                            <div id="psaBgBarFill" class="psa-bg-bar-fill" style="width: 12%;"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="psa-bg-banner-actions">
+                    <span id="psaBgElapsed" class="tiny muted psa-zoom-readout">0:00</span>
+                    <button id="psaMinimizeBtn" class="btn tiny" type="button"
+                        title="Close this window while Gemini keeps running — you will be notified as soon as results are ready">
+                        Minimize &amp; Keep Working
+                    </button>
+                </div>
+            </div>
+
+            <main class="psa-main">
+                <!-- Step 1: Structured Sources & Extraction -->
+                <section id="psaSourcesView" class="psa-sources-shell">
+                    <div class="psa-workflow-bar">
+                        <div class="psa-workflow-tabs" role="tablist" aria-label="Input Type">
+                            <button id="psaWorkflowFieldBtn" class="psa-workflow-tab is-active" type="button" data-workflow="field_photos">
+                                <strong>Site Survey Photos</strong>
+                                <span>Structured per panel: tags/labels, breakers, circuit directory, main breaker</span>
+                            </button>
+                            <button id="psaWorkflowDrawingBtn" class="psa-workflow-tab" type="button" data-workflow="as_built_drawing">
+                                <strong>As-Built / Record Drawings (PDF / Images)</strong>
+                                <span>Extract 1 or multiple printed panel schedules from drawing sheets</span>
+                            </button>
+                        </div>
+                        <div class="psa-privacy-inline" title="Runs on gemini-4-hydrogen using your Google AI Studio key from Settings. Free-tier requests may be used by Google to improve products.">
+                            Runs on <code>gemini-4-hydrogen</code> (Free Tier)
+                        </div>
+                    </div>
+
+                    <!-- Token & Duplicate Photo Optimization Advisor -->
+                    <div id="psaTokenAdvisor" class="psa-token-advisor" hidden>
+                        <div id="psaTokenAdvisorMsg" class="psa-token-advisor-msg"></div>
+                        <div class="psa-token-advisor-actions">
+                            <button id="psaRemoveDupesBtn" class="btn tiny" type="button" hidden>Remove Duplicates</button>
+                        </div>
+                    </div>
+
+                    <input id="psaFallbackFileInput" type="file" multiple
+                        accept=".pdf,.jpg,.jpeg,.png,.heic,.heif,.tif,.tiff,.bmp,.webp" hidden />
+
+                    <!-- Workflow A: Structured Site Survey Photos (1 or more panels) -->
+                    <div id="psaFieldWorkflow" class="psa-field-workflow">
+                        <div class="psa-group-bar">
+                            <div id="psaFieldGroupTabs" class="psa-group-tabs"></div>
+                            <div class="psa-group-bar-actions">
+                                <button id="psaAddFieldGroupBtn" class="btn tiny" type="button">+ Add Panel</button>
+                                <button id="psaRemoveFieldGroupBtn" class="btn tiny ghost" type="button">Remove Panel</button>
+                            </div>
+                        </div>
+
+                        <div class="psa-group-meta-bar">
+                            <div class="psa-group-meta-field">
+                                <label class="psa-label" for="psaGroupPanelName">Panel Name</label>
+                                <input id="psaGroupPanelName" class="psa-input" type="text"
+                                    placeholder="e.g. A, D3, LP-1 (or leave blank to read from nameplate)" />
+                            </div>
+                            <div class="psa-group-meta-field is-compact">
+                                <label class="psa-label" for="psaGroupCondition">Condition</label>
+                                <select id="psaGroupCondition" class="psa-select">
+                                    <option value="EXISTING">EXISTING (E)</option>
+                                    <option value="NEW">NEW (N)</option>
+                                </select>
+                            </div>
+                            <div class="psa-group-meta-hint">
+                                All photos added to this panel tab are guaranteed to merge into <strong>1 panel schedule</strong>, even if close-up breaker photos do not show the panel name. Click any box below to set it as the active <code>Ctrl+V</code> paste target.
+                            </div>
+                        </div>
+
+                        <div class="psa-autosort-bar" id="psaAutoSortBar">
+                            <div class="psa-autosort-copy">
+                                <div class="psa-autosort-title">
+                                    Smart Survey Intake: Local ONNX Filter ($0) &rarr; <code>gemini-decision-1</code>
+                                    <span id="psaLocalModelStatus" class="psa-autosort-pill">Local ONNX Ready</span>
+                                </div>
+                                <div class="psa-autosort-sub">
+                                    Pick an entire <code>Survey/Photos</code> folder (100+ photos) to filter out non-panel rooms, ceilings, &amp; blurry duplicates locally at $0 tokens, then auto-bucket &amp; split only the panel photos — or drop a small batch here.
+                                </div>
+                            </div>
+                            <div class="psa-autosort-actions">
+                                <select id="psaPrefilterSensitivity" class="psa-select" style="width: auto;"
+                                    title="Local ONNX filter strictness">
+                                    <option value="balanced" selected>Filter: Balanced</option>
+                                    <option value="high_recall">Filter: High Recall</option>
+                                    <option value="strict">Filter: Strict</option>
+                                </select>
+                                <label class="psa-autosort-toggle" title="Split multi-panel survey folders into separate Panel 1, Panel 2, ... tabs automatically">
+                                    <input id="psaAutoSortSplitCb" type="checkbox" checked />
+                                    <span>Split Panel tabs</span>
+                                </label>
+                                <button id="psaPrefilterFolderBtn" class="btn-primary tiny" type="button"
+                                    title="Recursively scan a Survey Photos folder locally with ONNX CLIP ($0 tokens) before bucketing">
+                                    Scan Survey Folder (Local AI)
+                                </button>
+                                <button id="psaAutoSortBrowseBtn" class="btn tiny" type="button">Auto-Sort Photos...</button>
+                            </div>
+                        </div>
+
+                        <div class="psa-buckets-grid">
+                            <!-- Bucket 1: Panelboard Tags / Nameplate Labels -->
+                            <div class="psa-bucket" data-bucket="nameplate" tabindex="0">
+                                <div class="psa-bucket-head">
+                                    <div>
+                                        <div class="psa-bucket-title">1. Panelboard Tags &amp; Nameplate Labels <span class="psa-bucket-opt">Recommended</span></div>
+                                        <div class="psa-bucket-desc">Manufacturer label, voltage, bus rating, phase, wire, AIC, NEMA type, and feeder tag.</div>
+                                    </div>
+                                    <div class="psa-bucket-head-actions">
+                                        <span class="psa-paste-chip" hidden>Ctrl+V target</span>
+                                        <span class="psa-bucket-count" data-bucket-count="nameplate">0</span>
+                                        <button class="btn tiny" type="button" data-bucket-browse="nameplate">+ Add</button>
+                                    </div>
+                                </div>
+                                <div class="psa-bucket-drop" data-bucket-drop="nameplate" role="button" tabindex="0">
+                                    Drop nameplate / tag photos here, click to browse, or press Ctrl+V
+                                </div>
+                                <div class="psa-bucket-list" data-bucket-list="nameplate"></div>
+                            </div>
+
+                            <!-- Bucket 2: Circuit Breakers -->
+                            <div class="psa-bucket is-paste-target" data-bucket="breakers" tabindex="0">
+                                <div class="psa-bucket-head">
+                                    <div>
+                                        <div class="psa-bucket-title">2. Circuit Breakers (Close-Ups)</div>
+                                        <div class="psa-bucket-desc">Clear photos of breaker handles, amp ratings, and 2P/3P ties. Add circuit ranges (e.g. <code>1-21 &amp; 2-22</code>) under split close-ups.</div>
+                                    </div>
+                                    <div class="psa-bucket-head-actions">
+                                        <span class="psa-paste-chip">Ctrl+V target</span>
+                                        <span class="psa-bucket-count" data-bucket-count="breakers">0</span>
+                                        <button class="btn tiny" type="button" data-bucket-browse="breakers">+ Add</button>
+                                    </div>
+                                </div>
+                                <div class="psa-bucket-drop" data-bucket-drop="breakers" role="button" tabindex="0">
+                                    Drop breaker close-up photo(s) here, click to browse, or press Ctrl+V
+                                </div>
+                                <div class="psa-bucket-list" data-bucket-list="breakers"></div>
+                            </div>
+
+                            <!-- Bucket 3: Printed / Door Circuit Directory -->
+                            <div class="psa-bucket" data-bucket="directory" tabindex="0">
+                                <div class="psa-bucket-head">
+                                    <div>
+                                        <div class="psa-bucket-title">3. Printed / Door Circuit Directory</div>
+                                        <div class="psa-bucket-desc">Typed or handwritten circuit schedule card inside the door (supports multiple pages like 1–42 and 43–84).</div>
+                                    </div>
+                                    <div class="psa-bucket-head-actions">
+                                        <span class="psa-paste-chip" hidden>Ctrl+V target</span>
+                                        <span class="psa-bucket-count" data-bucket-count="directory">0</span>
+                                        <button class="btn tiny" type="button" data-bucket-browse="directory">+ Add</button>
+                                    </div>
+                                </div>
+                                <div class="psa-bucket-drop" data-bucket-drop="directory" role="button" tabindex="0">
+                                    Drop circuit directory photo(s) here, click to browse, or press Ctrl+V
+                                </div>
+                                <div class="psa-bucket-list" data-bucket-list="directory"></div>
+                            </div>
+
+                            <!-- Bucket 4: Main Breaker / Main Lugs -->
+                            <div class="psa-bucket" data-bucket="main_breaker" tabindex="0">
+                                <div class="psa-bucket-head">
+                                    <div>
+                                        <div class="psa-bucket-title">4. Main Breaker / Main Lugs <span class="psa-bucket-opt">Optional</span></div>
+                                        <div class="psa-bucket-desc">Close-up of the main breaker amp handle (MCB) or main lugs (MLO) if separate from branch breakers.</div>
+                                    </div>
+                                    <div class="psa-bucket-head-actions">
+                                        <span class="psa-paste-chip" hidden>Ctrl+V target</span>
+                                        <span class="psa-bucket-count" data-bucket-count="main_breaker">0</span>
+                                        <button class="btn tiny" type="button" data-bucket-browse="main_breaker">+ Add</button>
+                                    </div>
+                                </div>
+                                <div class="psa-bucket-drop" data-bucket-drop="main_breaker" role="button" tabindex="0">
+                                    Drop main breaker / MLO photo(s) here, click to browse, or press Ctrl+V
+                                </div>
+                                <div class="psa-bucket-list" data-bucket-list="main_breaker"></div>
+                            </div>
+
+                            <!-- Bucket 5: Full Panelboard / Multi-Part Overview -->
+                            <div class="psa-bucket psa-bucket-wide" data-bucket="full_panel" tabindex="0">
+                                <div class="psa-bucket-head">
+                                    <div>
+                                        <div class="psa-bucket-title">5. Full Panelboard / Multi-Part Overview <span class="psa-bucket-opt">Optional</span></div>
+                                        <div class="psa-bucket-desc">Wide shots showing multiple parts together (e.g. entire open panelboard with tag, breakers, main breaker, and door directory). You can also click <strong>Crop</strong> on any shot here to send a close-up copy to another bucket.</div>
+                                    </div>
+                                    <div class="psa-bucket-head-actions">
+                                        <span class="psa-paste-chip" hidden>Ctrl+V target</span>
+                                        <span class="psa-bucket-count" data-bucket-count="full_panel">0</span>
+                                        <button class="btn tiny" type="button" data-bucket-browse="full_panel">+ Add</button>
+                                    </div>
+                                </div>
+                                <div class="psa-bucket-drop" data-bucket-drop="full_panel" role="button" tabindex="0">
+                                    Drop full panelboard / multi-part photo(s) here, click to browse, or press Ctrl+V
+                                </div>
+                                <div class="psa-bucket-list" data-bucket-list="full_panel"></div>
+                            </div>
+
+                            <!-- Collapsible Ignored / Non-Panel Photos Tray (populated by Auto-Sort or manual Ignore) -->
+                            <div id="psaIgnoredTray" class="psa-ignored-tray" hidden>
+                                <div class="psa-bucket-head">
+                                    <div>
+                                        <div class="psa-bucket-title">Ignored / Non-Panel Photos <span class="psa-bucket-opt">Skipped during extraction</span></div>
+                                        <div class="psa-bucket-desc">Photos classified as unrelated or unreadable by <code>gemini-decision-1</code>. Use the dropdown on any card to move it back into a bucket.</div>
+                                    </div>
+                                    <div class="psa-bucket-head-actions">
+                                        <span id="psaIgnoredCount" class="psa-bucket-count">0</span>
+                                        <button id="psaClearIgnoredBtn" class="btn tiny ghost" type="button">Clear Ignored</button>
+                                    </div>
+                                </div>
+                                <div id="psaIgnoredList" class="psa-bucket-list"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Workflow B: As-Built / Record PDF Drawings -->
+                    <div id="psaDrawingWorkflow" class="psa-sources-view" hidden>
+                        <aside class="psa-sources-left">
+                            <div id="psaDropzone" class="psa-dropzone" role="button" tabindex="0">
+                                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                    <polyline points="17 8 12 3 7 8"></polyline>
+                                    <line x1="12" y1="3" x2="12" y2="15"></line>
+                                </svg>
+                                <div class="psa-dropzone-title">Drop record PDFs or schedule images</div>
+                                <div class="psa-dropzone-sub">
+                                    Multi-page electrical drawing PDFs are split into selectable page thumbnails.
+                                    Gemini extracts every printed panel schedule on the selected sheets.
+                                </div>
+                            </div>
+
+                            <div class="psa-field-group">
+                                <label class="psa-label" for="psaPanelNameHint">Panel Name Hint (Optional)</label>
+                                <input id="psaPanelNameHint" class="psa-input" type="text"
+                                    placeholder="Leave blank to read printed panel names" />
+                            </div>
+
+                            <div class="psa-privacy-note">
+                                <strong>Exact kVA Transcription:</strong> Visible kVA / VA values on as-built drawings are copied verbatim into the Excel schedule. Blank cells stay blank unless you choose to estimate them during review.
+                            </div>
+                        </aside>
+
+                        <div class="psa-sources-right">
+                            <div class="psa-sources-toolbar">
+                                <div id="psaSourcesCount" class="tiny muted">No drawing PDFs or images loaded yet</div>
+                                <div class="psa-sources-toolbar-actions">
+                                    <button id="psaAddFilesBtn" class="btn tiny" type="button">+ Add PDFs / Drawings</button>
+                                    <button id="psaSelectAllBtn" class="btn tiny ghost" type="button">Select All</button>
+                                    <button id="psaSelectNoneBtn" class="btn tiny ghost" type="button">Select None</button>
+                                    <button id="psaClearSourcesBtn" class="btn tiny ghost" type="button">Clear</button>
+                                </div>
+                            </div>
+                            <div id="psaSourceGrid" class="psa-source-grid"></div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Step 2: Side-by-Side Review & Export Studio -->
+                <section id="psaReviewView" class="psa-review-view" hidden>
+                    <div class="psa-viewer-pane">
+                        <div class="psa-viewer-toolbar">
+                            <div id="psaViewerCaption" class="psa-viewer-caption">Source preview</div>
+                            <div class="psa-viewer-controls">
+                                <button id="psaZoomOutBtn" class="btn tiny ghost" type="button" title="Zoom out">&minus;</button>
+                                <span id="psaZoomLabel" class="tiny muted psa-zoom-readout">100%</span>
+                                <button id="psaZoomInBtn" class="btn tiny ghost" type="button" title="Zoom in">+</button>
+                                <button id="psaZoomFitBtn" class="btn tiny ghost" type="button" title="Fit to viewer">Fit</button>
+                                <button id="psaZoomActualBtn" class="btn tiny ghost" type="button" title="Zoom to 250% for fine text">250%</button>
+                                <button id="psaRotateBtn" class="btn tiny ghost" type="button" title="Rotate 90 degrees">Rotate</button>
+                            </div>
+                        </div>
+                        <div id="psaViewerStage" class="psa-viewer-stage" title="Scroll to zoom at cursor, drag to pan, double-click to toggle zoom">
+                            <img id="psaViewerImg" alt="Source panel schedule preview" draggable="false" />
+                            <div class="psa-viewer-hint" aria-hidden="true">Scroll to zoom at cursor &bull; Drag to pan &bull; Double-click to zoom</div>
+                            <div id="psaViewerLoading" class="psa-viewer-loading" hidden>Rendering high-res page...</div>
+                        </div>
+                        <div id="psaFilmstrip" class="psa-filmstrip"></div>
+                    </div>
+
+                    <div id="psaReviewResizer" class="psa-review-resizer" role="separator"
+                        aria-orientation="vertical" aria-label="Resize image viewer and schedule panel"
+                        title="Drag to resize image viewer"></div>
+
+                    <div class="psa-editor-pane">
+                        <div class="psa-panel-tabs-bar">
+                            <div id="psaPanelTabs" class="psa-panel-tabs"></div>
+                            <div class="psa-header-actions">
+                                <button id="psaAddBlankPanelBtn" class="btn tiny ghost" type="button">+ Blank Panel</button>
+                                <button id="psaDeletePanelBtn" class="btn tiny ghost" type="button">Delete Tab</button>
+                            </div>
+                        </div>
+
+                        <div id="psaAlertBar" class="psa-alert-bar is-clean"></div>
+                        <div id="psaPanelHeaderGrid" class="psa-panel-header-grid"></div>
+
+                        <div class="psa-schedule-scroll">
+                            <table class="psa-schedule-table" aria-label="Editable panel schedule">
+                                <thead>
+                                    <tr>
+                                        <th class="psa-col-ckt">CKT</th>
+                                        <th class="psa-col-note">NOTE</th>
+                                        <th class="psa-col-load">LOAD</th>
+                                        <th class="psa-col-pole">P</th>
+                                        <th class="psa-col-trip">TRIP</th>
+                                        <th>LOAD DESCRIPTION (ODD)</th>
+                                        <th class="psa-col-kva">kVA</th>
+                                        <th class="psa-col-phase">PH</th>
+                                        <th class="psa-col-kva">kVA</th>
+                                        <th>LOAD DESCRIPTION (EVEN)</th>
+                                        <th class="psa-col-pole">P</th>
+                                        <th class="psa-col-trip">TRIP</th>
+                                        <th class="psa-col-load">LOAD</th>
+                                        <th class="psa-col-note">NOTE</th>
+                                        <th class="psa-col-ckt">CKT</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="psaScheduleBody"></tbody>
+                            </table>
+                        </div>
+
+                        <div id="psaLoadStrip" class="psa-load-strip"></div>
+                    </div>
+                </section>
+            </main>
+
+            <footer class="psa-footer">
+                <div id="psaFooterStatus" class="psa-footer-status">Add site survey photos or as-built PDF drawings to begin.</div>
+
+                <div id="psaSourcesFooterActions" class="psa-footer-actions">
+                    <button id="psaAnalyzeBtn" class="btn-primary" type="button" disabled>Extract Panel Schedules</button>
+                </div>
+
+                <div id="psaReviewFooterActions" class="psa-footer-actions" hidden>
+                    <div class="psa-export-controls">
+                        <select id="psaExportModeSelect" class="psa-select" style="width: auto;">
+                            <option value="new">New Workbook (from Template)</option>
+                            <option value="existing">Append to Existing Workbook</option>
+                        </select>
+                        <select id="psaExportFormatSelect" class="psa-select" style="width: auto;">
+                            <option value="xlsx">.xlsx</option>
+                            <option value="xls">.xls (Excel)</option>
+                        </select>
+                        <label id="psaReplaceExistingWrap" class="tiny muted" style="display:inline-flex;align-items:center;gap:4px;" hidden>
+                            <input id="psaReplaceExistingCb" type="checkbox" />
+                            Replace matching tabs
+                        </label>
+                        <span id="psaExportPathBadge" class="psa-export-path">Click Export or Browse to pick Excel file</span>
+                        <button id="psaBrowseExportBtn" class="btn tiny" type="button">Browse...</button>
+                        <button id="psaExportBtn" class="btn-primary" type="button">Export to Excel</button>
+                        <button id="psaOpenExcelBtn" class="btn tiny" type="button" hidden>Open Excel</button>
+                        <button id="psaOpenFolderBtn" class="btn tiny ghost" type="button" hidden>Show in Folder</button>
+                    </div>
+                </div>
+            </footer>
+
+            <!-- Fullscreen Image Lightbox & Interactive Cropper -->
+            <div id="psaLightboxOverlay" class="psa-lightbox-overlay" hidden role="dialog"
+                aria-modal="true" aria-labelledby="psaLightboxTitle">
+                <div class="psa-lightbox-shell">
+                    <div class="psa-lightbox-header">
+                        <div class="psa-lightbox-title-wrap">
+                            <div id="psaLightboxTitle" class="psa-lightbox-title">Image Preview</div>
+                            <div id="psaLightboxSub" class="psa-lightbox-sub">Scroll to zoom at cursor &bull; Drag to pan</div>
+                        </div>
+                        <div class="psa-lightbox-controls">
+                            <button id="psaLbZoomOutBtn" class="btn tiny ghost" type="button" title="Zoom out">&minus;</button>
+                            <span id="psaLbZoomLabel" class="tiny muted psa-zoom-readout">100%</span>
+                            <button id="psaLbZoomInBtn" class="btn tiny ghost" type="button" title="Zoom in">+</button>
+                            <button id="psaLbFitBtn" class="btn tiny ghost" type="button">Fit</button>
+                            <button id="psaLbRotateBtn" class="btn tiny ghost" type="button">Rotate</button>
+                            <button id="psaLbCropToggleBtn" class="btn tiny" type="button">Crop Region</button>
+                            <button id="psaLbCloseBtn" class="btn tiny ghost" type="button">Close</button>
+                        </div>
+                    </div>
+
+                    <div id="psaLbStage" class="psa-lb-stage">
+                        <div id="psaLbCanvasWrap" class="psa-lb-canvas-wrap">
+                            <img id="psaLbImg" alt="Fullscreen photo preview" draggable="false" />
+                            <div id="psaLbCropLayer" class="psa-lb-crop-layer" hidden>
+                                <div id="psaLbCropBox" class="psa-lb-crop-box" hidden>
+                                    <span id="psaLbCropSize" class="psa-lb-crop-size"></span>
+                                </div>
+                            </div>
+                        </div>
+                        <div id="psaLbLoading" class="psa-viewer-loading" hidden>Loading full-resolution image...</div>
+                    </div>
+
+                    <div id="psaLbCropBar" class="psa-lb-crop-bar" hidden>
+                        <div class="psa-lb-crop-help">
+                            Click and drag on the image to draw a crop box (e.g., around a panelboard nameplate or tag).
+                        </div>
+                        <div class="psa-lb-crop-actions">
+                            <label id="psaLbDestWrap" class="psa-lb-dest-wrap">
+                                <span class="tiny muted">Save copy into:</span>
+                                <select id="psaLbDestBucket" class="psa-select" style="width: auto;">
+                                    <option value="nameplate">1. Tag / Nameplate</option>
+                                    <option value="breakers">2. Breakers</option>
+                                    <option value="directory">3. Directory</option>
+                                    <option value="main_breaker">4. Main Breaker</option>
+                                    <option value="full_panel">5. Full Panelboard</option>
+                                </select>
+                            </label>
+                            <button id="psaLbClearCropBtn" class="btn tiny ghost" type="button">Clear</button>
+                            <button id="psaLbReplaceCropBtn" class="btn tiny" type="button" disabled>Replace Original</button>
+                            <button id="psaLbSaveCopyCropBtn" class="btn-primary" type="button" disabled>Save Crop as Copy</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="psaFlagCheckOverlay" class="psa-checkup-overlay" hidden role="alertdialog"
+                aria-modal="true" aria-labelledby="psaCheckupTitle">
+                <div class="psa-checkup-card">
+                    <div class="psa-checkup-head">
+                        <div class="psa-checkup-icon" aria-hidden="true">!</div>
+                        <div>
+                            <div id="psaCheckupTitle" class="psa-checkup-title">Flagged items found before export</div>
+                            <div id="psaCheckupSub" class="psa-checkup-sub">
+                                These panels will still export to Excel, or you can review the highlighted items first.
+                            </div>
+                        </div>
+                    </div>
+                    <div id="psaCheckupList" class="psa-checkup-list"></div>
+                    <div class="psa-checkup-actions">
+                        <button id="psaCheckupCancelBtn" class="btn tiny ghost" type="button">Cancel</button>
+                        <button id="psaCheckupReviewBtn" class="btn tiny" type="button">Review Flagged Items</button>
+                        <button id="psaCheckupContinueBtn" class="btn-primary" type="button">Export Anyway</button>
+                    </div>
+                </div>
+            </div>
+
+            <div id="psaBusyOverlay" class="psa-busy-overlay" hidden>
+                <div class="psa-busy-card">
+                    <div class="psa-spinner" aria-hidden="true"></div>
+                    <div id="psaBusyTitle" class="psa-busy-title">Analyzing with Gemini 4 Hydrogen...</div>
+                    <div id="psaBusySub" class="psa-busy-sub">Please wait while we extract the panel schedule.</div>
+                </div>
+            </div>
+        </div>
+    </dialog>
+    <!-- Floating Non-Blocking Notification when Background Panel Studio Finishes -->
+    <div id="psaReadyToast" class="psa-ready-toast" hidden role="status" aria-live="polite">
+        <div class="psa-ready-toast-copy">
+            <div id="psaReadyToastTitle" class="psa-ready-toast-title">Panel schedules ready</div>
+            <div id="psaReadyToastSub" class="psa-ready-toast-sub">Gemini 4 Hydrogen finished extracting your panels.</div>
+        </div>
+        <div class="psa-ready-toast-actions">
+            <button id="psaReadyToastOpenBtn" class="btn-primary tiny" type="button">Review Now</button>
+            <button id="psaReadyToastDismissBtn" class="btn tiny ghost" type="button" aria-label="Dismiss">&times;</button>
+        </div>
+    </div>
     <div id="updateCheckIndicator" class="corner-status" hidden>Checking for updates...</div>
     <script src="project-pages-editor/dist/project-pages-editor.js?v=20261019-outlook-email-drop"></script>
     <script src="script.js?v=20261118-timesheet-project-picker"></script>
@@ -3843,6 +4348,7 @@
     <script src="industry-shell.js?v=20261112-header-actions"></script>
     <script src="symbol_counter_ui.js?v=20260818-delete-actions"></script>
     <script src="panel_schedule_export_ui.js?v=20261009-initial"></script>
+    <script src="panel_schedule_ai_ui.js?v=20261118-hydrogen-v10"></script>
 </body>
 
 </html>

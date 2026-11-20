@@ -970,6 +970,167 @@ class WorkroomCadLaunchCommandTests(unittest.TestCase):
                 for message in fallback_messages
             ))
 
+    def test_projects_tab_publish_auto_selects_discipline_dwgs_with_default_settings(self):
+        settings = {
+            **main_module.build_default_user_settings(),
+            "autocadPath": AUTOCAD_CORE_PATH,
+            "discipline": ["Mechanical"],
+            "activeDiscipline": "Mechanical",
+        }
+        with tempfile.TemporaryDirectory(prefix="acies-default-publish-") as temp_dir:
+            project_path = Path(temp_dir)
+            discipline_path = project_path / "Mechanical"
+            discipline_path.mkdir()
+            dwg_path = discipline_path / "M-1.dwg"
+            dwg_path.write_text("", encoding="utf-8")
+
+            captured = []
+            with patch.object(self.api, "get_user_settings", return_value=settings), patch.object(
+                self.api,
+                "_run_script_with_progress",
+                side_effect=lambda command, tool_id, **kwargs: captured.append(
+                    (command, tool_id, kwargs)
+                ),
+            ), patch.object(
+                self.api,
+                "_select_cad_files_in_app",
+            ) as picker_mock, patch.object(
+                self.api,
+                "_notify_tool_status",
+            ):
+                result = self.api.run_publish_script({
+                    "source": "projects-tab",
+                    "projectPath": str(project_path),
+                    "discipline": "Mechanical",
+                })
+
+            self.assertEqual("success", result["status"])
+            picker_mock.assert_not_called()
+            self.assertEqual(1, len(captured))
+            command = captured[0][0]
+            self.assertEqual(
+                "1",
+                command[command.index("-AutoAcceptDetectedPaperSize") + 1],
+            )
+            files_list_path = Path(command[command.index("-FilesListPath") + 1])
+            try:
+                self.assertEqual(
+                    [str(dwg_path)],
+                    files_list_path.read_text(encoding="utf-8").splitlines(),
+                )
+            finally:
+                files_list_path.unlink(missing_ok=True)
+
+    def test_projects_tab_workroom_auto_select_finds_discipline_dwgs_when_auto_publish_off(self):
+        publish_case = next(
+            case for case in TOOL_CASES if case["method_name"] == "run_publish_script"
+        )
+        settings = {
+            **publish_case["settings"],
+            "discipline": ["Electrical", "Plumbing"],
+            "activeDiscipline": "Plumbing",
+            "workroomAutoSelectCadFiles": True,
+            "publishDwgOptions": {
+                **publish_case["settings"]["publishDwgOptions"],
+                "automateProjectDisciplinePublish": False,
+            },
+        }
+        with tempfile.TemporaryDirectory(prefix="acies-projects-tab-auto-") as temp_dir:
+            project_path = Path(temp_dir)
+            discipline_path = project_path / "Plumbing"
+            discipline_path.mkdir()
+            dwg_path = discipline_path / "P-1.dwg"
+            dwg_path.write_text("", encoding="utf-8")
+
+            captured = []
+            with patch.object(self.api, "get_user_settings", return_value=settings), patch.object(
+                self.api,
+                "_run_script_with_progress",
+                side_effect=lambda command, tool_id, **kwargs: captured.append(
+                    (command, tool_id, kwargs)
+                ),
+            ), patch.object(
+                self.api,
+                "_select_cad_files_in_app",
+            ) as picker_mock, patch.object(
+                self.api,
+                "_notify_tool_status",
+            ):
+                result = self.api.run_publish_script({
+                    "source": "projects-tab",
+                    "projectPath": str(project_path),
+                    "discipline": "Plumbing",
+                })
+
+            self.assertEqual("success", result["status"])
+            picker_mock.assert_not_called()
+            self.assertEqual(1, len(captured))
+            command = captured[0][0]
+            self.assertEqual(
+                "0",
+                command[command.index("-AutoAcceptDetectedPaperSize") + 1],
+            )
+            files_list_path = Path(command[command.index("-FilesListPath") + 1])
+            try:
+                self.assertEqual(
+                    [str(dwg_path)],
+                    files_list_path.read_text(encoding="utf-8").splitlines(),
+                )
+            finally:
+                files_list_path.unlink(missing_ok=True)
+
+    def test_projects_tab_publish_prompts_manually_when_both_auto_settings_off(self):
+        publish_case = next(
+            case for case in TOOL_CASES if case["method_name"] == "run_publish_script"
+        )
+        settings = {
+            **publish_case["settings"],
+            "discipline": ["Electrical"],
+            "activeDiscipline": "Electrical",
+            "workroomAutoSelectCadFiles": False,
+            "publishDwgOptions": {
+                **publish_case["settings"]["publishDwgOptions"],
+                "automateProjectDisciplinePublish": False,
+            },
+        }
+        with tempfile.TemporaryDirectory(prefix="acies-projects-tab-manual-") as temp_dir:
+            project_path = Path(temp_dir)
+            discipline_path = project_path / "Electrical"
+            discipline_path.mkdir()
+            (discipline_path / "E01.00.dwg").write_text("", encoding="utf-8")
+
+            captured = []
+            with patch.object(self.api, "get_user_settings", return_value=settings), patch.object(
+                self.api,
+                "_run_script_with_progress",
+                side_effect=lambda command, tool_id, **kwargs: captured.append(
+                    (command, tool_id, kwargs)
+                ),
+            ), patch.object(
+                self.api,
+                "_select_cad_files_in_app",
+                return_value={
+                    "status": "success",
+                    "selection": {
+                        "files_list_path": AUTO_SELECTED_FILES_LIST,
+                        "count": 1,
+                        "resolution_mode": "app_file_picker",
+                    },
+                },
+            ) as picker_mock, patch.object(
+                self.api,
+                "_notify_tool_status",
+            ):
+                result = self.api.run_publish_script({
+                    "source": "projects-tab",
+                    "projectPath": str(project_path),
+                    "discipline": "Electrical",
+                })
+
+            self.assertEqual("success", result["status"])
+            picker_mock.assert_called_once_with(str(project_path))
+            self.assertEqual(1, len(captured))
+
     def test_automatic_project_manage_layers_uses_active_discipline_dwgs(self):
         manage_case = next(
             case for case in TOOL_CASES if case["method_name"] == "run_manage_layers_script"

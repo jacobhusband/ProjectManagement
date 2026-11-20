@@ -55,7 +55,7 @@ body[data-projects-view-mode="card"] #projects-panel .plate-rule-cell.is-clickab
 #projects-panel .projects-table tr.reg-row { padding-left: 28px; padding-right: 28px; }
 #projects-panel .projects-table thead tr { background: transparent; }
 #projects-panel .projects-table th.reg-th--rail,
-#projects-panel .projects-table th[data-sort="id"],
+#projects-panel .projects-table th.reg-th--id,
 #projects-panel .reg-row .reg-rail { display: none; }
 #projects-panel .reg-row .reg-client { display: flex; align-items: center; gap: 4px; margin-top: 5px; color: var(--modern-muted); font: 400 11px/1.4 var(--modern-font); }
 #projects-panel .reg-row .reg-client .id-badge { font: 400 11px/1.4 var(--modern-font); }

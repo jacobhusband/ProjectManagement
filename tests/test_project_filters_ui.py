@@ -22,10 +22,12 @@ class ProjectFiltersUiTests(unittest.TestCase):
         settings_block_end = html.index("<!-- Danger Zone -->")
         settings_block = html[settings_block_start:settings_block_end]
 
+        self.assertIn('id="projectsAttentionBtn"', html)
         self.assertIn('data-filter-dropdown="timeframe"', html)
         self.assertIn('id="timeframeFilterTrigger"', html)
         self.assertIn('id="timeframeFilterMenu"', html)
         self.assertIn('data-filter-value="future"', html)
+        self.assertNotIn('data-filter-value="attention"', projects_filters_block)
         self.assertIn('data-filter-dropdown="status"', html)
         self.assertIn('id="statusFilterTrigger"', html)
         self.assertIn('id="statusFilterMenu"', html)

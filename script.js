@@ -2707,7 +2707,7 @@ const WORKROOM_PHASE_CHECKLIST_MAP = {
 };
 const WORKROOM_PHASE_TOOL_MAP = {
   pre_design: ["toolRepairXrefPaths", "toolCleanXrefs"],
-  design: ["toolLightingSchedule", "toolPanelScheduleManager", "toolCircuitBreaker"],
+  design: ["toolLightingSchedule", "toolPanelScheduleManager", "toolPanelScheduleStudio", "toolCircuitBreaker"],
   preflight: ["toolManageLayers", "toolPublishDwgs"],
   post_permit: ["toolCreateNarrativeTemplate", "toolCreatePlanCheckTemplate"],
 };
@@ -2716,6 +2716,7 @@ const WORKROOM_ALWAYS_AVAILABLE_TOOLS = [
   "toolBackupDrawings",
   "toolWireSizer",
   "toolPanelScheduleManager",
+  "toolPanelScheduleStudio",
   "toolCircuitBreaker",
 ];
 const MAX_HOURS_PER_DAY = 24;
@@ -2812,27 +2813,129 @@ function pageHtmlToPlainText(html) {
   }
 }
 
+function foldProjectSearchText(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "");
+}
+
+function normalizeProjectSearchText(value) {
+  return foldProjectSearchText(value)
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+function buildFoldedTextMap(text) {
+  let folded = "";
+  const indexMap = [];
+  for (let i = 0; i < text.length; ) {
+    const codePoint = text.codePointAt(i);
+    const ch = String.fromCodePoint(codePoint);
+    const nextIdx = i + ch.length;
+    const piece = foldProjectSearchText(ch);
+    if (!piece) {
+      if (indexMap.length) {
+        indexMap[indexMap.length - 1].end = nextIdx;
+      }
+    } else {
+      for (let j = 0; j < piece.length; j += 1) {
+        folded += piece[j];
+        indexMap.push({ start: i, end: nextIdx });
+      }
+    }
+    i = nextIdx;
+  }
+  return { folded, indexMap };
+}
+
+function getHighlightNeedles(query) {
+  const items = Array.isArray(query) ? query : [query];
+  const needles = [];
+  const seen = new Set();
+  const pushNeedle = (value) => {
+    const folded = foldProjectSearchText(value);
+    if (!folded || seen.has(folded)) return;
+    seen.add(folded);
+    needles.push(folded);
+  };
+  items.forEach((item) => {
+    if (typeof item === "string") {
+      pushNeedle(item);
+      return;
+    }
+    if (!item || typeof item !== "object") return;
+    if (item.raw) pushNeedle(item.raw);
+    if (item.isIdLike && item.raw && item.raw.startsWith("#")) {
+      pushNeedle(item.raw.replace(/^#+/, ""));
+    }
+    if (item.normalized && !String(item.raw || "").includes("/")) {
+      pushNeedle(item.normalized);
+    }
+    if (item.isIdLike && item.compact) {
+      pushNeedle(item.compact);
+    }
+  });
+  return needles;
+}
+
+function findHighlightTextRanges(text, query) {
+  if (!query || !text) return [];
+  const needles = getHighlightNeedles(query);
+  if (!needles.length) return [];
+  const { folded, indexMap } = buildFoldedTextMap(text);
+  if (!folded) return [];
+
+  const ranges = [];
+  needles.forEach((needle) => {
+    let pos = folded.indexOf(needle, 0);
+    while (pos !== -1) {
+      const startEntry = indexMap[pos];
+      const endEntry = indexMap[pos + needle.length - 1];
+      if (startEntry && endEntry) {
+        ranges.push({ start: startEntry.start, end: endEntry.end });
+      }
+      pos = folded.indexOf(needle, pos + needle.length);
+    }
+  });
+  if (!ranges.length) return [];
+
+  ranges.sort((a, b) => a.start - b.start || b.end - a.end);
+  const merged = [ranges[0]];
+  for (let i = 1; i < ranges.length; i += 1) {
+    const current = merged[merged.length - 1];
+    const next = ranges[i];
+    if (next.start <= current.end) {
+      current.end = Math.max(current.end, next.end);
+    } else {
+      merged.push(next);
+    }
+  }
+  return merged;
+}
+
 function highlightText(text, query) {
   const frag = document.createDocumentFragment();
   if (!query || !text) {
     frag.appendChild(document.createTextNode(text || ""));
     return frag;
   }
-  const lower = text.toLowerCase();
-  const qLen = query.length;
+  const ranges = findHighlightTextRanges(text, query);
+  if (!ranges.length) {
+    frag.appendChild(document.createTextNode(text));
+    return frag;
+  }
   let lastIdx = 0;
-  let idx = lower.indexOf(query, lastIdx);
-  while (idx !== -1) {
-    if (idx > lastIdx) {
-      frag.appendChild(document.createTextNode(text.slice(lastIdx, idx)));
+  ranges.forEach(({ start, end }) => {
+    if (start > lastIdx) {
+      frag.appendChild(document.createTextNode(text.slice(lastIdx, start)));
     }
     const mark = document.createElement("mark");
     mark.className = "search-highlight";
-    mark.textContent = text.slice(idx, idx + qLen);
+    mark.textContent = text.slice(start, end);
     frag.appendChild(mark);
-    lastIdx = idx + qLen;
-    idx = lower.indexOf(query, lastIdx);
-  }
+    lastIdx = end;
+  });
   if (lastIdx < text.length) {
     frag.appendChild(document.createTextNode(text.slice(lastIdx)));
   }
@@ -4080,6 +4183,16 @@ const SHARED_TOOL_LAUNCH_REGISTRY = Object.freeze([
     isReady: false,
   },
   {
+    id: "toolPanelScheduleStudio",
+    label: "Panel Schedule AI Studio",
+    menuLabel: "Panel Schedule AI Studio",
+    launchType: "modal",
+    category: "electrical",
+    iconSvg:
+      '<rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M9 3v18M15 3v18M3 9h18M3 15h18"></path>',
+    isReady: true,
+  },
+  {
     id: "toolCircuitBreaker",
     label: "Panel Schedule AI",
     menuLabel: "Panel Schedule AI",
@@ -4171,6 +4284,7 @@ function getDeliverableToolMenuEntries() {
     "toolCreatePlanCheckTemplate",
     "toolWireSizer",
     "toolPanelScheduleManager",
+    "toolPanelScheduleStudio",
     "toolCircuitBreaker",
     "toolBackupDrawings",
     "toolCopyProjectLocally",
@@ -4325,6 +4439,10 @@ function launchSharedToolCard(toolId, launchContext = null) {
     void openProjectCadFiles(launchContext);
     return true;
   }
+  if (entry.id === "toolPanelScheduleStudio" && typeof window.openPanelScheduleStudio === "function") {
+    window.openPanelScheduleStudio(launchContext);
+    return true;
+  }
   const card = document.getElementById(entry.id);
   if (!card) {
     toast(`${entry.label} is unavailable.`);
@@ -4390,18 +4508,24 @@ async function resolveCadFilesBeforeLaunch(launchContext = null, toolId = "") {
     userSettings.manageLayersOptions?.autoSelectProjectDisciplineDwgs === true;
   const automaticDisciplineSelection =
     automaticDisciplinePublish || automaticDisciplineManageLayers;
+  const projectAutoSelect =
+    source === "projects-tab" &&
+    userSettings.workroomAutoSelectCadFiles !== false &&
+    (toolId === "toolPublishDwgs" || toolId === "toolManageLayers") &&
+    hasLaunchContextProjectPath(context);
   // XREF (repair paths) always scans the project's discipline DWGs when a
   // project is selected; there is no setting for it.
   const automaticDisciplineRepairXrefs = toolId === "toolRepairXrefPaths";
 
-  // Workroom launches resolve the discipline folder in the backend. Partial Print
-  // presents its own sheet picker dialog. Every other launch selects files in the
-  // app so a hidden PowerShell child never owns the picker and leaves it behind
-  // the main window.
+  // Workroom and project-tab auto-select launches resolve the discipline folder
+  // in the backend. Partial Print presents its own sheet picker dialog. Every
+  // other launch selects files in the app so a hidden PowerShell child never
+  // owns the picker and leaves it behind the main window.
   if (
     source === "workroom" ||
     existingFiles.length ||
     (toolId === "toolPublishDwgs" && context.publishMode === "partial") ||
+    projectAutoSelect ||
     ((automaticDisciplineSelection || automaticDisciplineRepairXrefs) &&
       hasLaunchContextProjectPath(context))
   ) {
@@ -7526,15 +7650,21 @@ function setStat(id, value) {
   if (el) el.textContent = value;
 }
 
-function closeDlg(id) {
+function closeDlg(id, { force = false } = {}) {
+  if (id === "editDlg" && !force && typeof confirmDiscardEditDlgChanges === "function") {
+    if (!confirmDiscardEditDlgChanges()) return false;
+  }
   if (id === "editDlg") {
+    if (typeof closeInlineCalendar === "function") closeInlineCalendar();
     flushModalEmailSession(false);
+    editDlgInitialSnapshot = "";
   }
   if (id === "editDlg" && _aiMatchSnapshot) {
     db[_aiMatchSnapshot.index] = normalizeProject(_aiMatchSnapshot.data);
     _aiMatchSnapshot = null;
   }
-  document.getElementById(id).close();
+  document.getElementById(id)?.close();
+  return true;
 }
 
 // index.html buttons say what they do with data-close-dialog or data-click-action
@@ -7838,7 +7968,7 @@ function isSameDay(date1, date2) {
     date1.getDate() === date2.getDate();
 }
 
-function createCalendarGrid(year, month, onDateSelect) {
+function createCalendarGrid(year, month, onDateSelect, selectedDate = null) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
@@ -7848,20 +7978,22 @@ function createCalendarGrid(year, month, onDateSelect) {
   const prevYear = month === 0 ? year - 1 : year;
   const daysInPrevMonth = getDaysInMonth(prevYear, prevMonth);
 
-  const grid = el('div', { className: 'calendar-grid' });
+  const grid = el('div', { className: 'calendar-grid', role: 'grid' });
 
   // Previous month days
   for (let i = firstDay - 1; i >= 0; i--) {
     const day = daysInPrevMonth - i;
+    const date = new Date(prevYear, prevMonth, day);
+    const classes = ['calendar-day', 'other-month'];
+    if (selectedDate && isSameDay(date, selectedDate)) classes.push('selected');
     const btn = el('button', {
-      className: 'calendar-day other-month',
+      className: classes.join(' '),
       textContent: day,
-      type: 'button'
+      type: 'button',
+      'aria-label': date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }),
     });
-    btn.onclick = () => {
-      const date = new Date(prevYear, prevMonth, day);
-      onDateSelect(date);
-    };
+    if (selectedDate && isSameDay(date, selectedDate)) btn.setAttribute('aria-selected', 'true');
+    btn.onclick = () => onDateSelect(date);
     grid.appendChild(btn);
   }
 
@@ -7869,14 +8001,18 @@ function createCalendarGrid(year, month, onDateSelect) {
   for (let day = 1; day <= daysInMonth; day++) {
     const date = new Date(year, month, day);
     const isToday = isSameDay(date, today);
+    const isSelected = !!(selectedDate && isSameDay(date, selectedDate));
     const classes = ['calendar-day'];
     if (isToday) classes.push('today');
+    if (isSelected) classes.push('selected');
 
     const btn = el('button', {
       className: classes.join(' '),
       textContent: day,
-      type: 'button'
+      type: 'button',
+      'aria-label': date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }),
     });
+    if (isSelected) btn.setAttribute('aria-selected', 'true');
     btn.onclick = () => onDateSelect(date);
     grid.appendChild(btn);
   }
@@ -7888,19 +8024,108 @@ function createCalendarGrid(year, month, onDateSelect) {
   const nextYear = month === 11 ? year + 1 : year;
 
   for (let day = 1; day <= remainingCells; day++) {
+    const date = new Date(nextYear, nextMonth, day);
+    const classes = ['calendar-day', 'other-month'];
+    if (selectedDate && isSameDay(date, selectedDate)) classes.push('selected');
     const btn = el('button', {
-      className: 'calendar-day other-month',
+      className: classes.join(' '),
       textContent: day,
-      type: 'button'
+      type: 'button',
+      'aria-label': date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }),
     });
-    btn.onclick = () => {
-      const date = new Date(nextYear, nextMonth, day);
-      onDateSelect(date);
-    };
+    if (selectedDate && isSameDay(date, selectedDate)) btn.setAttribute('aria-selected', 'true');
+    btn.onclick = () => onDateSelect(date);
     grid.appendChild(btn);
   }
 
   return grid;
+}
+
+let activeInlineCalendarCleanup = null;
+
+function closeInlineCalendar({ restoreFocus = false } = {}) {
+  if (typeof activeInlineCalendarCleanup === "function") {
+    const cleanup = activeInlineCalendarCleanup;
+    activeInlineCalendarCleanup = null;
+    cleanup({ restoreFocus });
+    return;
+  }
+  const existing = document.getElementById("inlineCalendarPicker");
+  if (existing) existing.remove();
+}
+
+function getInlineCalendarQuickPresets(baseDate = null) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const day = today.getDay();
+  const daysUntilFri = (5 - day + 7) % 7;
+  const thisFri = new Date(today);
+  thisFri.setDate(today.getDate() + (daysUntilFri === 0 ? 0 : daysUntilFri));
+  const nextFri = new Date(thisFri);
+  nextFri.setDate(thisFri.getDate() + 7);
+  const shiftAnchor = baseDate instanceof Date && !isNaN(baseDate) ? new Date(baseDate) : new Date(today);
+  shiftAnchor.setHours(0, 0, 0, 0);
+  const plus1w = new Date(shiftAnchor);
+  plus1w.setDate(shiftAnchor.getDate() + 7);
+  const plus2w = new Date(shiftAnchor);
+  plus2w.setDate(shiftAnchor.getDate() + 14);
+  return [
+    { label: "Today", date: today },
+    { label: "This Fri", date: thisFri },
+    { label: "Next Fri", date: nextFri },
+    { label: "+1w", date: plus1w, title: `Shift ${baseDate ? "due date" : "from today"} +1 week` },
+    { label: "+2w", date: plus2w, title: `Shift ${baseDate ? "due date" : "from today"} +2 weeks` },
+  ];
+}
+
+function mountInlineCalendarPopup(anchorElement, calendarContainer) {
+  closeInlineCalendar();
+
+  const parentDialog = anchorElement.closest("dialog");
+  const anchorParent = parentDialog || document.body;
+  anchorParent.appendChild(calendarContainer);
+  positionInlineCalendarPopup(anchorElement, calendarContainer, anchorParent);
+
+  let outsideClickTimer = null;
+  let closed = false;
+
+  const onOutsideClick = (e) => {
+    if (!calendarContainer.contains(e.target) && !anchorElement.contains(e.target)) {
+      closeInlineCalendar({ restoreFocus: false });
+    }
+  };
+  const onDocumentKeydown = (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      closeInlineCalendar({ restoreFocus: true });
+    }
+  };
+
+  activeInlineCalendarCleanup = ({ restoreFocus = false } = {}) => {
+    if (closed) return;
+    closed = true;
+    if (outsideClickTimer) clearTimeout(outsideClickTimer);
+    document.removeEventListener("click", onOutsideClick, true);
+    document.removeEventListener("keydown", onDocumentKeydown, true);
+    calendarContainer.remove();
+    if (restoreFocus && anchorElement?.isConnected && typeof anchorElement.focus === "function") {
+      anchorElement.focus();
+    }
+  };
+
+  document.addEventListener("keydown", onDocumentKeydown, true);
+  outsideClickTimer = setTimeout(() => {
+    if (!closed) {
+      document.addEventListener("click", onOutsideClick, true);
+    }
+  }, 0);
+
+  const initialFocus =
+    calendarContainer.querySelector(".calendar-day.selected") ||
+    calendarContainer.querySelector(".calendar-day.today") ||
+    calendarContainer.querySelector(".calendar-day:not(.other-month)");
+  initialFocus?.focus();
 }
 
 // Inline calendar picker for input fields
@@ -7977,58 +8202,36 @@ function positionInlineCalendarPopup(anchorElement, calendarContainer, anchorPar
 }
 
 function showCalendarForInput(inputElement, onSelectCallback) {
-  // Remove any existing calendar
-  const existingCalendar = document.getElementById('inlineCalendarPicker');
-  if (existingCalendar) existingCalendar.remove();
+  if (!inputElement) return;
+  closeInlineCalendar();
 
-  // Always open to the current month/day.
-  const openDate = new Date();
+  const existingDate = parseDueStr(inputElement.value || "");
+  const openDate = existingDate || new Date();
 
-  // Create calendar container
   const calendarContainer = el('div', {
     className: 'inline-calendar-picker',
-    id: 'inlineCalendarPicker'
+    id: 'inlineCalendarPicker',
+    role: 'dialog',
+    'aria-label': 'Choose due date',
   });
 
-  // Render calendar
   const calendar = renderInlineCalendar(
     openDate.getFullYear(),
     openDate.getMonth(),
     (selectedDate) => {
-      // On date selection
       inputElement.value = formatDueDateShort(selectedDate);
-      // Trigger validation
       validateDueDateInput(inputElement);
-      // Callback
       if (onSelectCallback) onSelectCallback(selectedDate);
-      // Remove calendar
-      calendarContainer.remove();
+      closeInlineCalendar({ restoreFocus: true });
     },
     () => {
-      // On cancel
-      calendarContainer.remove();
-    }
+      closeInlineCalendar({ restoreFocus: true });
+    },
+    { selectedDate: existingDate }
   );
 
   calendarContainer.appendChild(calendar);
-
-  // Append inside the closest dialog (top layer) so it's not hidden behind it.
-  // Fall back to document.body if not inside a dialog.
-  const parentDialog = inputElement.closest('dialog');
-  const anchorParent = parentDialog || document.body;
-  anchorParent.appendChild(calendarContainer);
-  positionInlineCalendarPopup(inputElement, calendarContainer, anchorParent);
-
-  // Close on outside click
-  setTimeout(() => {
-    const closeOnOutsideClick = (e) => {
-      if (!calendarContainer.contains(e.target) && e.target !== inputElement) {
-        calendarContainer.remove();
-        document.removeEventListener('click', closeOnOutsideClick);
-      }
-    };
-    document.addEventListener('click', closeOnOutsideClick);
-  }, 100);
+  mountInlineCalendarPopup(inputElement, calendarContainer);
 }
 
 // Opens a calendar to edit the single due date.
@@ -8039,37 +8242,46 @@ function showCalendarForDeliverableBadge(
   field = ""
 ) {
   if (!anchorElement || !deliverable) return;
-
-  // Remove any existing calendar
-  const existingCalendar = document.getElementById('inlineCalendarPicker');
-  if (existingCalendar) existingCalendar.remove();
+  closeInlineCalendar();
 
   const activeField = "due";
+  const existingStr = getEffectiveDueStr(deliverable);
+  const existingDate = parseDueStr(existingStr);
+  const openDate = existingDate || new Date();
 
-  // Always open to the current month/day.
-  const openDate = new Date();
-
-  // Create calendar container
   const calendarContainer = el('div', {
     className: 'inline-calendar-picker',
-    id: 'inlineCalendarPicker'
+    id: 'inlineCalendarPicker',
+    role: 'dialog',
+    'aria-label': 'Choose due date',
   });
 
   const commit = async (value) => {
+    const prevSnapshot = snapshotDeliverableUndoState(deliverable);
     if (!applyDeliverableDueDate(deliverable, activeField, value)) return;
+    closeInlineCalendar({ restoreFocus: true });
     await save();
     render();
-    calendarContainer.remove();
+    const msg = value ? `Due date set to ${value}.` : "Due date cleared.";
+    pushProjectUndo({
+      label: msg,
+      undo: async () => {
+        restoreDeliverableUndoState(deliverable, prevSnapshot);
+        await save();
+        render();
+      },
+    });
+    toast(msg, { actionLabel: "Undo", onAction: () => undoLastProjectAction() });
   };
 
-  // Render calendar
   const calendar = renderInlineCalendar(
     openDate.getFullYear(),
     openDate.getMonth(),
     (selectedDate) => commit(formatDueDateShort(selectedDate)),
     () => {
-      calendarContainer.remove();
-    }
+      closeInlineCalendar({ restoreFocus: true });
+    },
+    { selectedDate: existingDate }
   );
 
   const clearBtn = el('button', {
@@ -8077,37 +8289,39 @@ function showCalendarForDeliverableBadge(
     textContent: 'Clear',
     type: 'button',
     title: 'Clear the due date',
-    hidden: !getEffectiveDueStr(deliverable),
+    hidden: !existingStr,
   });
   clearBtn.onclick = () => commit("");
   calendar.querySelector('.calendar-footer')?.prepend(clearBtn);
 
   calendarContainer.appendChild(calendar);
-
-  // Append inside the closest dialog (top layer) so it's not hidden behind it.
-  // Fall back to document.body if not inside a dialog.
-  const parentDialog = anchorElement.closest('dialog');
-  const anchorParent = parentDialog || document.body;
-  anchorParent.appendChild(calendarContainer);
-  positionInlineCalendarPopup(anchorElement, calendarContainer, anchorParent);
-
-  // Close on outside click
-  setTimeout(() => {
-    const closeOnOutsideClick = (e) => {
-      if (!calendarContainer.contains(e.target) && e.target !== anchorElement) {
-        calendarContainer.remove();
-        document.removeEventListener('click', closeOnOutsideClick);
-      }
-    };
-    document.addEventListener('click', closeOnOutsideClick);
-  }, 100);
+  mountInlineCalendarPopup(anchorElement, calendarContainer);
 }
 
-function renderInlineCalendar(year, month, onDateSelect, onCancel) {
+function renderInlineCalendar(year, month, onDateSelect, onCancel, { selectedDate = null, quickPresets = true } = {}) {
   const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
     'July', 'August', 'September', 'October', 'November', 'December'];
 
+  let currentYear = year;
+  let currentMonth = month;
+
   const container = el('div', { className: 'inline-calendar' });
+
+  // Quick-pick shortcuts
+  if (quickPresets) {
+    const quickBar = el('div', { className: 'calendar-quick-picks' });
+    getInlineCalendarQuickPresets(selectedDate).forEach((preset) => {
+      const btn = el('button', {
+        className: 'calendar-quick-btn',
+        textContent: preset.label,
+        type: 'button',
+        title: preset.title || formatDueDateShort(preset.date),
+      });
+      btn.onclick = () => onDateSelect(preset.date);
+      quickBar.appendChild(btn);
+    });
+    container.appendChild(quickBar);
+  }
 
   // Header with navigation
   const header = el('div', { className: 'calendar-header' });
@@ -8115,7 +8329,8 @@ function renderInlineCalendar(year, month, onDateSelect, onCancel) {
   const prevBtn = el('button', {
     className: 'calendar-nav-btn',
     textContent: '◀',
-    type: 'button'
+    type: 'button',
+    'aria-label': 'Previous month',
   });
 
   const monthYearLabel = el('div', {
@@ -8126,7 +8341,8 @@ function renderInlineCalendar(year, month, onDateSelect, onCancel) {
   const nextBtn = el('button', {
     className: 'calendar-nav-btn',
     textContent: '▶',
-    type: 'button'
+    type: 'button',
+    'aria-label': 'Next month',
   });
 
   header.appendChild(prevBtn);
@@ -8143,8 +8359,31 @@ function renderInlineCalendar(year, month, onDateSelect, onCancel) {
 
   // Calendar grid
   const gridContainer = el('div');
-  gridContainer.appendChild(createCalendarGrid(year, month, onDateSelect));
+  gridContainer.appendChild(createCalendarGrid(year, month, onDateSelect, selectedDate));
   container.appendChild(gridContainer);
+
+  // Keyboard arrow navigation within the day grid
+  gridContainer.addEventListener('keydown', (event) => {
+    const stepMap = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -7, ArrowDown: 7 };
+    const delta = stepMap[event.key];
+    if (!delta) return;
+    const buttons = [...gridContainer.querySelectorAll('.calendar-day')];
+    const index = buttons.indexOf(document.activeElement);
+    if (index < 0) return;
+    event.preventDefault();
+    const nextIndex = index + delta;
+    if (nextIndex >= 0 && nextIndex < buttons.length) {
+      buttons[nextIndex].focus();
+      return;
+    }
+    const dir = nextIndex < 0 ? -1 : 1;
+    const targetMonth = currentMonth + dir;
+    const nextY = targetMonth < 0 ? currentYear - 1 : targetMonth > 11 ? currentYear + 1 : currentYear;
+    const nextM = (targetMonth + 12) % 12;
+    navigateMonth(nextY, nextM);
+    const nextButtons = [...gridContainer.querySelectorAll('.calendar-day:not(.other-month)')];
+    (dir < 0 ? nextButtons[nextButtons.length - 1] : nextButtons[0])?.focus();
+  });
 
   // Footer with cancel button
   const footer = el('div', { className: 'calendar-footer' });
@@ -8159,32 +8398,22 @@ function renderInlineCalendar(year, month, onDateSelect, onCancel) {
 
   // Navigation: only swap the grid and update the label to keep DOM stable
   function navigateMonth(newYear, newMonth) {
+    currentYear = newYear;
+    currentMonth = newMonth;
     monthYearLabel.textContent = `${monthNames[newMonth]} ${newYear}`;
     gridContainer.innerHTML = '';
-    gridContainer.appendChild(createCalendarGrid(newYear, newMonth, onDateSelect));
-
-    // Rebind arrows for the new month
-    prevBtn.onclick = () => {
-      const m = newMonth === 0 ? 11 : newMonth - 1;
-      const y = newMonth === 0 ? newYear - 1 : newYear;
-      navigateMonth(y, m);
-    };
-    nextBtn.onclick = () => {
-      const m = newMonth === 11 ? 0 : newMonth + 1;
-      const y = newMonth === 11 ? newYear + 1 : newYear;
-      navigateMonth(y, m);
-    };
+    gridContainer.appendChild(createCalendarGrid(newYear, newMonth, onDateSelect, selectedDate));
   }
 
   prevBtn.onclick = () => {
-    const m = month === 0 ? 11 : month - 1;
-    const y = month === 0 ? year - 1 : year;
+    const m = currentMonth === 0 ? 11 : currentMonth - 1;
+    const y = currentMonth === 0 ? currentYear - 1 : currentYear;
     navigateMonth(y, m);
   };
 
   nextBtn.onclick = () => {
-    const m = month === 11 ? 0 : month + 1;
-    const y = month === 11 ? year + 1 : year;
+    const m = currentMonth === 11 ? 0 : currentMonth + 1;
+    const y = currentMonth === 11 ? currentYear + 1 : currentYear;
     navigateMonth(y, m);
   };
 
@@ -9228,9 +9457,35 @@ function normalizeProjectPathInput(pathInput, { forceProjectFields = false } = {
   return normalized;
 }
 
-function toast(msg, duration = 2500) {
+function hasVisibleModalOverlay() {
+  if (document.querySelector("dialog[open]")) return true;
+  if (typeof document.querySelectorAll !== "function") {
+    const match = document.querySelector("[aria-modal='true']");
+    return Boolean(match && !match.hidden && !match.closest?.("[hidden], dialog:not([open])"));
+  }
+  return Array.from(document.querySelectorAll("[aria-modal='true']")).some((node) => {
+    if (!node || node.hidden) return false;
+    if (node.closest?.("[hidden], dialog:not([open])")) return false;
+    if (typeof node.getClientRects === "function" && !node.getClientRects().length) return false;
+    return true;
+  });
+}
+
+function toast(msg, durationOrOptions = 2500) {
+  const prevActive = document.activeElement;
   const existing = document.querySelector(".toast-notification");
   if (existing) existing.remove();
+
+  const opts =
+    durationOrOptions && typeof durationOrOptions === "object"
+      ? durationOrOptions
+      : { duration: durationOrOptions };
+  const hasAction = Boolean(opts.actionLabel && typeof opts.onAction === "function");
+  const duration = Number.isFinite(Number(opts.duration))
+    ? Number(opts.duration)
+    : hasAction
+      ? 6000
+      : 2500;
 
   const bottomOffset =
     document.body?.dataset?.activeTab === "projects"
@@ -9241,7 +9496,7 @@ function toast(msg, duration = 2500) {
     className: "toast-notification",
     role: "status",
     "aria-live": "polite",
-    textContent: msg,
+    textContent: hasAction ? undefined : msg,
     style: `
             position: fixed;
             inset: auto auto ${bottomOffset} 50%;
@@ -9258,24 +9513,124 @@ function toast(msg, duration = 2500) {
             font-weight: 500;
             display: flex;
             align-items: center;
-            gap: 8px;
-            pointer-events: none;
+            gap: 10px;
+            pointer-events: ${hasAction ? "auto" : "none"};
             animation: slideUp 0.3s ease-out forwards;
         `,
   });
 
+  let dismissTimer = null;
+  if (hasAction) {
+    t.onmousedown = (event) => event.preventDefault();
+    t.append(el("span", { textContent: msg }));
+    let acted = false;
+    const actionBtn = el("button", {
+      type: "button",
+      className: "toast-action-btn",
+      textContent: opts.actionLabel,
+    });
+    actionBtn.onmousedown = (event) => event.preventDefault();
+    actionBtn.onclick = () => {
+      if (acted) return;
+      acted = true;
+      if (dismissTimer) clearTimeout(dismissTimer);
+      t.remove();
+      void Promise.resolve(opts.onAction()).catch((err) =>
+        console.warn("Toast action failed:", err)
+      );
+    };
+    t.append(actionBtn);
+  }
+
   document.body.append(t);
-  // As a popover the message joins the top layer, so it shows above an open modal dialog.
-  if (typeof t.showPopover === "function") {
+  // Only promote to the top layer when a modal dialog is open; otherwise
+  // fixed z-index keeps the toast visible without popover focus quirks.
+  if (typeof t.showPopover === "function" && document.querySelector?.("dialog[open]")) {
     t.popover = "manual";
     t.showPopover();
   }
-  setTimeout(() => {
+  if (
+    prevActive &&
+    prevActive !== document.body &&
+    document.activeElement !== prevActive &&
+    prevActive.isConnected &&
+    typeof prevActive.focus === "function"
+  ) {
+    prevActive.focus({ preventScroll: true });
+  }
+  dismissTimer = setTimeout(() => {
     t.style.opacity = "0";
     t.style.transform = "translateX(-50%) translateY(10px)";
     t.style.transition = "all 0.3s ease";
     setTimeout(() => t.remove(), 300);
   }, duration);
+}
+
+const PROJECT_UNDO_LIMIT = 25;
+const projectUndoStack = [];
+let projectUndoInFlight = false;
+
+function snapshotDeliverableUndoState(deliverable) {
+  if (!deliverable) return null;
+  return {
+    name: deliverable.name,
+    due: deliverable.due,
+    legacyDueDates: deliverable.legacyDueDates ? { ...deliverable.legacyDueDates } : undefined,
+    status: deliverable.status,
+    statuses: Array.isArray(deliverable.statuses) ? [...deliverable.statuses] : [],
+    statusTags: Array.isArray(deliverable.statusTags) ? [...deliverable.statusTags] : [],
+    pinned: deliverable.pinned === true,
+    pinnedOrder: deliverable.pinnedOrder,
+    tasksDone: Array.isArray(deliverable.tasks) ? deliverable.tasks.map((task) => !!task?.done) : null,
+  };
+}
+
+function restoreDeliverableUndoState(deliverable, snapshot) {
+  if (!deliverable || !snapshot) return;
+  deliverable.name = snapshot.name;
+  deliverable.due = snapshot.due;
+  if (snapshot.legacyDueDates) {
+    deliverable.legacyDueDates = { ...snapshot.legacyDueDates };
+  } else {
+    delete deliverable.legacyDueDates;
+  }
+  deliverable.status = snapshot.status;
+  deliverable.statuses = [...snapshot.statuses];
+  deliverable.statusTags = [...snapshot.statusTags];
+  deliverable.pinned = snapshot.pinned;
+  deliverable.pinnedOrder = snapshot.pinnedOrder;
+  if (Array.isArray(deliverable.tasks) && Array.isArray(snapshot.tasksDone)) {
+    deliverable.tasks.forEach((task, index) => {
+      if (task && index < snapshot.tasksDone.length) {
+        task.done = snapshot.tasksDone[index];
+      }
+    });
+  }
+}
+
+function pushProjectUndo(entry) {
+  if (!entry || typeof entry.undo !== "function") return;
+  projectUndoStack.push(entry);
+  if (projectUndoStack.length > PROJECT_UNDO_LIMIT) {
+    projectUndoStack.splice(0, projectUndoStack.length - PROJECT_UNDO_LIMIT);
+  }
+}
+
+async function undoLastProjectAction() {
+  if (projectUndoInFlight || !projectUndoStack.length) return false;
+  const entry = projectUndoStack.pop();
+  projectUndoInFlight = true;
+  try {
+    await entry.undo();
+    toast(`Undid: ${entry.label || "last change"}`);
+    return true;
+  } catch (error) {
+    console.warn("Undo failed:", error);
+    toast("Could not undo last action.");
+    return false;
+  } finally {
+    projectUndoInFlight = false;
+  }
 }
 
 function createActivityId(prefix = "activity") {
@@ -12130,7 +12485,7 @@ const DEFAULT_CLEAN_DWG_OPTIONS = {
   hatchColor: true,
 };
 const DEFAULT_PUBLISH_DWG_OPTIONS = {
-  automateProjectDisciplinePublish: false,
+  automateProjectDisciplinePublish: true,
   autoDetectPaperSize: true,
   shrinkPercent: 100,
   stripPdfLayers: true,
@@ -14049,11 +14404,11 @@ function syncPublishOptionsInputs() {
   const publishOptions = userSettings.publishDwgOptions || {};
   setCheckboxValue(
     "settings_publish_automateProjectDisciplinePublish",
-    publishOptions.automateProjectDisciplinePublish === true
+    publishOptions.automateProjectDisciplinePublish !== false
   );
   setCheckboxValue(
     "publish_modal_automateProjectDisciplinePublish",
-    publishOptions.automateProjectDisciplinePublish === true
+    publishOptions.automateProjectDisciplinePublish !== false
   );
   setCheckboxValue(
     "settings_publish_autoDetectPaperSize",
@@ -19248,9 +19603,12 @@ function syncProjectsFilterDropdowns() {
     const label = dropdown.querySelector(".projects-filter-trigger-label");
     const menu = dropdown.querySelector(".projects-filter-menu");
     const options = getProjectsFilterOptions(dropdown);
-    const selectedOption =
-      options.find((option) => option.dataset.filterValue === currentValue) ||
-      options[0];
+    const isAttentionTimeframe =
+      filterKey === "timeframe" && currentValue === "attention";
+    const selectedOption = isAttentionTimeframe
+      ? null
+      : options.find((option) => option.dataset.filterValue === currentValue) ||
+        options[0];
     const isOpen = !filtersPaused && dropdown.classList.contains("open");
     dropdown.classList.toggle("open", isOpen);
     dropdown.classList.toggle("is-filtered", !filtersPaused && currentValue !== "all");
@@ -19258,8 +19616,12 @@ function syncProjectsFilterDropdowns() {
       openProjectsFilterDropdown = null;
     }
 
-    if (label && selectedOption) {
-      label.textContent = selectedOption.textContent.trim();
+    if (label) {
+      if (isAttentionTimeframe) {
+        label.textContent = "Overdue & this week";
+      } else if (selectedOption) {
+        label.textContent = selectedOption.textContent.trim();
+      }
     }
     if (trigger) {
       trigger.disabled = filtersPaused;
@@ -19271,11 +19633,12 @@ function syncProjectsFilterDropdowns() {
       menu.classList.toggle("open", isOpen);
     }
 
-    options.forEach((option) => {
+    options.forEach((option, index) => {
       const isSelected = option === selectedOption;
       option.classList.toggle("is-selected", isSelected);
       option.setAttribute("aria-checked", String(isSelected));
-      option.tabIndex = isOpen && isSelected ? 0 : -1;
+      option.tabIndex =
+        isOpen && (isSelected || (!selectedOption && index === 0)) ? 0 : -1;
     });
   });
 }
@@ -24156,12 +24519,6 @@ function scanAndMergeSimilarProjects() {
   toast(`Merged ${mergedCount} group${mergedCount === 1 ? "" : "s"} (${removedCount} removed).`);
 }
 
-function getDeliverableStatusSortRank(deliverable) {
-  if (!deliverable) return STATUS_PRIORITY.length + 1;
-  const idx = STATUS_PRIORITY.findIndex((status) => hasStatus(deliverable, status));
-  return idx >= 0 ? idx : STATUS_PRIORITY.length;
-}
-
 function sortProjectsByCurrent(items, projectListContextMap = null) {
   items.sort((a, b) => {
     const dir = currentSort.dir === "asc" ? 1 : -1;
@@ -24174,17 +24531,6 @@ function sortProjectsByCurrent(items, projectListContextMap = null) {
       if (!da) return 1;
       if (!dbb) return -1;
       return (da - dbb) * dir;
-    }
-    if (currentSort.key === "deliverable") {
-      const da = String(getOverviewDeliverables(a)?.[0]?.name || "");
-      const dbName = String(getOverviewDeliverables(b)?.[0]?.name || "");
-      return da.localeCompare(dbName, undefined, { numeric: true, sensitivity: "base" }) * dir;
-    }
-    if (currentSort.key === "status") {
-      const ra = getDeliverableStatusSortRank(getOverviewDeliverables(a)?.[0]);
-      const rb = getDeliverableStatusSortRank(getOverviewDeliverables(b)?.[0]);
-      if (ra !== rb) return (ra - rb) * dir;
-      return String(a?.name || "").localeCompare(String(b?.name || ""), undefined, { numeric: true }) * dir;
     }
     const valA = a[currentSort.key];
     const valB = b[currentSort.key];
@@ -24370,27 +24716,6 @@ function compareProjectDeliverableRows(a, b) {
   if (aPinned !== bPinned) return aPinned ? -1 : 1;
 
   const dir = currentSort.dir === "asc" ? 1 : -1;
-  if (currentSort.key === "deliverable") {
-    const delivDiff =
-      String(a?.deliverable?.name || "").localeCompare(
-        String(b?.deliverable?.name || ""),
-        undefined,
-        {
-          numeric: true,
-          sensitivity: "base",
-        }
-      ) * dir;
-    if (delivDiff) return delivDiff;
-    return compareProjectDeliverableRowIdentity(a, b);
-  }
-  if (currentSort.key === "status") {
-    const statusDiff =
-      (getDeliverableStatusSortRank(a?.deliverable) -
-        getDeliverableStatusSortRank(b?.deliverable)) *
-      dir;
-    if (statusDiff) return statusDiff;
-    return compareProjectDeliverableRowIdentity(a, b);
-  }
   if (currentSort.key !== "due") {
     const projectFieldDiff =
       String(a?.project?.[currentSort.key] || "").localeCompare(
@@ -25011,6 +25336,32 @@ function renderProjectDeliverableCell(
   renderDeliverableRegisterCell(deliverablesCell, deliverable, project);
 }
 
+function highlightElementText(element, query) {
+  if (!element || !query) return;
+  const text = element.textContent;
+  if (!text) return;
+  const ranges = findHighlightTextRanges(text, query);
+  if (!ranges.length) return;
+  element.replaceChildren(highlightText(text, query));
+}
+
+function highlightProjectSearchRow(tr, query) {
+  if (!tr || !query) return;
+  const terms = Array.isArray(query) ? query : parseProjectSearchQuery(query);
+  if (!terms.length) return;
+  highlightElementText(
+    tr.querySelector(".reg-pname, .path-link, .project-title-text"),
+    terms
+  );
+  highlightElementText(tr.querySelector(".id-badge"), terms);
+  tr.querySelectorAll(
+    ".reg-client > span:not(.id-badge):not(.work-locally-badge), .project-details-main > small.muted"
+  ).forEach((node) => highlightElementText(node, terms));
+  tr.querySelectorAll(".reg-code:not(.is-empty)").forEach((node) =>
+    highlightElementText(node, terms)
+  );
+}
+
 function appendProjectSearchContextRow(tbody, query, project, matchContextMap) {
   if (!query || !matchContextMap.has(project)) return;
   const contextRow = buildMatchContextRow(query, project, matchContextMap.get(project));
@@ -25026,6 +25377,7 @@ function renderGroupedProjectRows({
   query,
   appendSectionSeparator,
 }) {
+  const searchTerms = query ? parseProjectSearchQuery(query) : [];
   let lastWeekKey = null;
   let lastCompleteWeekKey = null;
   let completeProjectsSectionShown = false;
@@ -25062,6 +25414,9 @@ function renderGroupedProjectRows({
       project,
       projectListContext
     );
+    if (searchTerms.length) {
+      highlightProjectSearchRow(tr, searchTerms);
+    }
     tbody.appendChild(tr);
     appendProjectSearchContextRow(tbody, query, project, matchContextMap);
   });
@@ -25077,6 +25432,7 @@ function renderUngroupedDeliverableRows({
   appendSectionSeparator,
   paginatedDeliverableRows = null,
 }) {
+  const searchTerms = query ? parseProjectSearchQuery(query) : [];
   const deliverableRows = Array.isArray(paginatedDeliverableRows)
     ? paginatedDeliverableRows
     : buildProjectDeliverableRowEntries(items, projectListContextMap);
@@ -25134,6 +25490,9 @@ function renderUngroupedDeliverableRows({
       deliverable,
       project
     );
+    if (searchTerms.length) {
+      highlightProjectSearchRow(tr, searchTerms);
+    }
     tbody.appendChild(tr);
 
     if (!searchContextProjects.has(project)) {
@@ -25145,14 +25504,14 @@ function renderUngroupedDeliverableRows({
 
 function createContextSnippet(text, q, contextChars = 60) {
   const span = el("span", { className: "search-context-snippet" });
-  const lower = text.toLowerCase();
-  const idx = lower.indexOf(q);
-  if (idx === -1) {
+  const ranges = findHighlightTextRanges(text, q);
+  if (!ranges.length) {
     span.textContent = text.slice(0, contextChars * 2) + (text.length > contextChars * 2 ? "..." : "");
     return span;
   }
-  const start = Math.max(0, idx - contextChars);
-  const end = Math.min(text.length, idx + q.length + contextChars);
+  const firstMatch = ranges[0];
+  const start = Math.max(0, firstMatch.start - contextChars);
+  const end = Math.min(text.length, firstMatch.end + contextChars);
   const snippet = (start > 0 ? "..." : "") + text.slice(start, end) + (end < text.length ? "..." : "");
   span.appendChild(highlightText(snippet, q));
   return span;
@@ -25162,12 +25521,13 @@ function buildMatchContextRow(q, project, context) {
   const tr = el("tr", { className: "search-context-row" });
   const td = el("td", { colSpan: 5 });
   const container = el("div", { className: "search-context" });
+  const highlightQuery = context?.terms?.length ? context.terms : q;
 
   if (context.projectFields.includes("notes") && project.notes) {
     const item = el("div", { className: "search-context-item" });
     item.append(
       el("span", { className: "search-context-label", textContent: "Project Notes: " }),
-      createContextSnippet(project.notes, q)
+      createContextSnippet(project.notes, highlightQuery)
     );
     container.appendChild(item);
   }
@@ -25179,7 +25539,7 @@ function buildMatchContextRow(q, project, context) {
       const item = el("div", { className: "search-context-item" });
       const label = el("span", { className: "search-context-label", textContent: "Deliverable: " });
       item.append(label);
-      item.appendChild(highlightText(d.name, q));
+      item.appendChild(highlightText(d.name, highlightQuery));
       container.appendChild(item);
     }
 
@@ -25359,6 +25719,15 @@ function buildCardProjectMeta(project, projectIndex, deliverable) {
 function renderCardView(items = db, projectListContextMap = null) {
   const host = document.getElementById("projectsCardView");
   if (!host) return;
+  const prevScrollLeft = host.scrollLeft || 0;
+  const prevColumnScrollTops = new Map();
+  host.querySelectorAll(".kanban-column").forEach((column) => {
+    const key = column.dataset.columnKey;
+    const cardsHost = column.querySelector(".kanban-column__cards");
+    if (key && cardsHost) {
+      prevColumnScrollTops.set(key, cardsHost.scrollTop || 0);
+    }
+  });
   host.innerHTML = "";
   updateProjectsEmptyColumnUi();
 
@@ -25490,10 +25859,16 @@ function renderCardView(items = db, projectListContextMap = null) {
     }
     column.appendChild(cardsHost);
     host.appendChild(column);
+    if (prevColumnScrollTops.has(col.key)) {
+      cardsHost.scrollTop = prevColumnScrollTops.get(col.key);
+    }
   }
 
+  host.scrollLeft = prevScrollLeft;
   attachKanbanDragHandlers(host);
 }
+
+let preSearchProjectsViewMode = null;
 
 function clearProjectSearchInput() {
   const searchInput = document.getElementById("search");
@@ -25510,6 +25885,9 @@ function normalizeProjectsViewMode(value) {
 function setProjectsViewMode(mode, options = {}) {
   const next = normalizeProjectsViewMode(mode);
   const shouldPersist = options.persist !== false;
+  if (shouldPersist) {
+    preSearchProjectsViewMode = null;
+  }
   const didChange = projectsViewMode !== next;
   const didClearProjectSearch = next !== "list" && clearProjectSearchInput();
   projectsViewMode = next;
@@ -26026,6 +26404,7 @@ function attachKanbanDragHandlers(host) {
     const ctx = findDeliverableContext(deliverableId);
     if (!ctx) return;
     const { deliverable } = ctx;
+    const prevSnapshot = snapshotDeliverableUndoState(deliverable);
 
     if (targetKey === "pinned") {
       setDeliverablePinnedState(deliverable, true);
@@ -26038,6 +26417,18 @@ function attachKanbanDragHandlers(host) {
 
     await save();
     renderProjectsPreservingExpandedDeliverables();
+    const label = targetKey === "pinned"
+      ? `Pinned "${deliverable.name || "Deliverable"}".`
+      : `Moved "${deliverable.name || "Deliverable"}" to ${targetKey}.`;
+    pushProjectUndo({
+      label,
+      undo: async () => {
+        restoreDeliverableUndoState(deliverable, prevSnapshot);
+        await save();
+        renderProjectsPreservingExpandedDeliverables();
+      },
+    });
+    toast(label, { actionLabel: "Undo", onAction: () => undoLastProjectAction() });
   });
 }
 
@@ -26049,14 +26440,16 @@ function render() {
   updateWeekNavLabel();
   tbody.innerHTML = "";
 
-  const q = val("search").toLowerCase();
+  const rawSearch = val("search");
+  const searchTerms = parseProjectSearchQuery(rawSearch);
+  const q = searchTerms.length ? rawSearch.toLowerCase() : "";
   const matchContextMap = new Map();
   const projectListContextMap = new Map();
   const isCardView = projectsViewMode === "card";
 
   let items = db.filter((p) => {
-    if (q) {
-      const ctx = getMatchContext(q, p);
+    if (searchTerms.length) {
+      const ctx = getMatchContext(searchTerms, p);
       if (!ctx) return false;
       matchContextMap.set(p, ctx);
     }
@@ -26074,8 +26467,6 @@ function render() {
     renderCardView(items, projectListContextMap);
     return;
   }
-
-  updateSortHeaders();
 
   const emptyTitle = emptyState?.querySelector("h3");
   const emptyBody = emptyState?.querySelector("p");
@@ -26131,6 +26522,13 @@ function render() {
     items,
     projectListContextMap
   );
+  if (searchTerms.length) {
+    deliverableRows.splice(
+      0,
+      deliverableRows.length,
+      ...filterProjectDeliverableRowsForSearch(deliverableRows, matchContextMap)
+    );
+  }
   sortProjectDeliverableRows(deliverableRows);
   const pagination = paginateProjectsListItems(deliverableRows);
   updateProjectsPaginationUi(pagination, "deliverables");
@@ -26179,53 +26577,170 @@ function renderStatusToggles(p) {
   return wrap;
 }
 
+function parseProjectSearchQuery(query) {
+  const rawInput = String(query ?? "").trim();
+  if (!rawInput) return [];
+
+  const rawTokens = [];
+  const tokenPattern = /"([^"]*)(?:"|$)|([^\s",;]+)/g;
+  let match;
+  while ((match = tokenPattern.exec(rawInput)) !== null) {
+    const isQuoted = match[1] !== undefined;
+    const rawPiece = (isQuoted ? match[1] : match[2]).trim();
+    if (!rawPiece) continue;
+    const folded = foldProjectSearchText(rawPiece).replace(/\s+/g, " ").trim();
+    if (!folded) continue;
+    const normalized = normalizeProjectSearchText(folded);
+    const compact = normalized.replaceAll(" ", "");
+    const isIdLike =
+      !isQuoted &&
+      compact.length > 0 &&
+      /\d/.test(compact) &&
+      /^[#\-\s\p{L}\p{N}]+$/u.test(folded);
+    rawTokens.push({
+      raw: folded,
+      normalized,
+      compact,
+      isPhrase: isQuoted,
+      isIdLike,
+    });
+  }
+
+  // Drop unquoted connectors ("and", "&", "+") when paired with other terms so
+  // queries like `AAA and vegas` or `17th & tustin` match cleanly.
+  const nonConnectors = rawTokens.filter(
+    (term) =>
+      term.isPhrase ||
+      !(term.raw === "and" || term.raw === "&" || term.raw === "+")
+  );
+  const effective = nonConnectors.length ? nonConnectors : rawTokens;
+
+  const seen = new Set();
+  return effective.filter((term) => {
+    const key = `${term.isPhrase ? "p" : "t"}:${term.raw}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function doesProjectSearchTermMatchField(term, fieldValue, { isId = false } = {}) {
+  if (!term || !fieldValue) return false;
+  const folded = foldProjectSearchText(fieldValue);
+  if (!folded) return false;
+  if (folded.includes(term.raw)) return true;
+  const normalized = normalizeProjectSearchText(folded);
+  if (
+    term.normalized &&
+    !term.raw.includes("/") &&
+    normalized.includes(term.normalized)
+  ) {
+    return true;
+  }
+  if (isId && term.isIdLike && term.compact) {
+    const compactId = normalized.replaceAll(" ", "");
+    if (compactId.includes(term.compact)) return true;
+  }
+  return false;
+}
+
+function filterProjectDeliverableRowsForSearch(deliverableRows, matchContextMap) {
+  if (!Array.isArray(deliverableRows) || !matchContextMap) return deliverableRows;
+  return deliverableRows.filter((row) => {
+    const ctx = matchContextMap.get(row.project);
+    if (!ctx || ctx.allTermsMatchedProject) return true;
+    return ctx.deliverables.some((entry) => entry.deliverable === row.deliverable);
+  });
+}
+
 function getMatchContext(q, p) {
-  if (!q) return null;
-  const str = (val) => (val || "").toLowerCase();
-  const context = { projectFields: [], deliverables: [] };
-  let hasMatch = false;
+  if (!q || !p) return null;
+  const terms = Array.isArray(q) ? q : parseProjectSearchQuery(q);
+  if (!terms.length) return null;
 
-  if (str(p.id).includes(q)) { context.projectFields.push("id"); hasMatch = true; }
-  if (str(p.name).includes(q)) { context.projectFields.push("name"); hasMatch = true; }
-  if (str(p.nick).includes(q)) { context.projectFields.push("nick"); hasMatch = true; }
-  if (str(p.notes).includes(q)) { context.projectFields.push("notes"); hasMatch = true; }
+  const account =
+    typeof extractAccountFromPath === "function"
+      ? extractAccountFromPath(p.path) || ""
+      : "";
+  const projectFieldValues = [
+    { key: "id", value: p.id, isId: true },
+    { key: "name", value: p.name, isId: false },
+    { key: "nick", value: p.nick, isId: false },
+    { key: "account", value: account, isId: false },
+    { key: "notes", value: p.notes, isId: false },
+  ];
 
+  const matchedProjectFields = new Set();
+  const projectMatchedTermIndices = new Set();
+
+  terms.forEach((term, termIndex) => {
+    projectFieldValues.forEach(({ key, value, isId }) => {
+      if (doesProjectSearchTermMatchField(term, value, { isId })) {
+        matchedProjectFields.add(key);
+        projectMatchedTermIndices.add(termIndex);
+      }
+    });
+  });
+
+  const allTermsMatchedProject = projectMatchedTermIndices.size === terms.length;
+  const remainingTermIndices = [];
+  for (let i = 0; i < terms.length; i += 1) {
+    if (!projectMatchedTermIndices.has(i)) remainingTermIndices.push(i);
+  }
+
+  const matchedDeliverables = [];
   getProjectDeliverables(p).forEach((d) => {
     syncDeliverableWorkItemFields(d);
-    const dCtx = {
-      deliverable: d,
-      fields: [],
-    };
-    if (str(d.name).includes(q)) dCtx.fields.push("name");
-    if (str(d.due).includes(q)) dCtx.fields.push("due");
-    const hasStatusMatch = (d.statuses || []).some((s) => str(s).includes(q));
-    if (
-      dCtx.fields.length ||
-      hasStatusMatch
-    ) {
-      context.deliverables.push(dCtx);
-      hasMatch = true;
+    const dueValue =
+      typeof getEffectiveDueStr === "function"
+        ? getEffectiveDueStr(d) || d.due || ""
+        : d.due || "";
+    const statuses = Array.isArray(d.statuses) ? d.statuses : [];
+    const fields = new Set();
+    const deliverableMatchedTermIndices = new Set();
+
+    terms.forEach((term, termIndex) => {
+      if (doesProjectSearchTermMatchField(term, d.name)) {
+        fields.add("name");
+        deliverableMatchedTermIndices.add(termIndex);
+      }
+      if (doesProjectSearchTermMatchField(term, dueValue)) {
+        fields.add("due");
+        deliverableMatchedTermIndices.add(termIndex);
+      }
+      if (statuses.some((status) => doesProjectSearchTermMatchField(term, status))) {
+        fields.add("status");
+        deliverableMatchedTermIndices.add(termIndex);
+      }
+    });
+
+    if (!deliverableMatchedTermIndices.size) return;
+
+    const coversRemaining = remainingTermIndices.every((idx) =>
+      deliverableMatchedTermIndices.has(idx)
+    );
+    if (allTermsMatchedProject || coversRemaining) {
+      matchedDeliverables.push({
+        deliverable: d,
+        fields: Array.from(fields),
+      });
     }
   });
 
-  return hasMatch ? context : null;
+  if (!allTermsMatchedProject && !matchedDeliverables.length) return null;
+
+  return {
+    projectFields: Array.from(matchedProjectFields),
+    deliverables: matchedDeliverables,
+    allTermsMatchedProject,
+    terms,
+  };
 }
 
 function matches(q, p) {
-  if (!q) return true;
-  return getMatchContext(q, p) !== null;
-}
-
-function updateSortHeaders() {
-  document.querySelectorAll("th[data-sort]").forEach((th) => {
-    th.classList.remove("sort-asc", "sort-desc");
-    if (th.dataset.sort === currentSort.key) {
-      th.classList.add(`sort-${currentSort.dir}`);
-      th.setAttribute("aria-sort", currentSort.dir === "asc" ? "ascending" : "descending");
-    } else {
-      th.setAttribute("aria-sort", "none");
-    }
-  });
+  const terms = Array.isArray(q) ? q : parseProjectSearchQuery(q);
+  if (!terms.length) return true;
+  return getMatchContext(terms, p) !== null;
 }
 
 // ===================== CRUD OPERATIONS =====================
@@ -26252,6 +26767,62 @@ function createBlankProject(options = {}) {
   };
 }
 
+let editDlgInitialSnapshot = "";
+
+function getEditDlgFormSnapshot() {
+  const deliverables = [];
+  document.querySelectorAll("#deliverableList .deliverable-card").forEach((card) => {
+    deliverables.push({
+      id: card.dataset.deliverableId || "",
+      name: card.querySelector(".d-name")?.value?.trim() || "",
+      due: card.querySelector(".d-due")?.value?.trim() || "",
+      statuses: readStatusPickerFrom(card.querySelector(".deliverable-status")),
+      pinned: card.dataset.pinned === "true",
+      attachments: getDeliverableCardAttachments(card),
+      notes: getModalDeliverableNoteItems(card),
+      tasks: getModalDeliverableTaskItems(card),
+    });
+  });
+  const refs = [];
+  document.querySelectorAll("#refList .ref-row").forEach((row) => {
+    refs.push({
+      label: row.querySelector(".ref-label")?.value?.trim() || "",
+      url: row.querySelector(".ref-url")?.value?.trim() || "",
+    });
+  });
+  return JSON.stringify({
+    id: val("f_id"),
+    name: val("f_name"),
+    nick: val("f_nick"),
+    path: val("f_path"),
+    deliverables,
+    refs,
+  });
+}
+
+function captureEditDlgSnapshot() {
+  try {
+    editDlgInitialSnapshot = getEditDlgFormSnapshot();
+  } catch (e) {
+    editDlgInitialSnapshot = "";
+  }
+}
+
+function isEditDlgDirty() {
+  const dlg = document.getElementById("editDlg");
+  if (!dlg?.open || !editDlgInitialSnapshot) return false;
+  try {
+    return getEditDlgFormSnapshot() !== editDlgInitialSnapshot;
+  } catch (e) {
+    return false;
+  }
+}
+
+function confirmDiscardEditDlgChanges() {
+  if (!isEditDlgDirty()) return true;
+  return confirm("You have unsaved changes in this project. Discard them?");
+}
+
 function openEdit(i) {
   editIndex = i;
   beginModalEmailSession();
@@ -26263,7 +26834,12 @@ function openEdit(i) {
     }`;
   document.getElementById("btnSaveProject").textContent = "Save Changes";
   fillForm(p);
+  captureEditDlgSnapshot();
   dlg.showModal();
+  setTimeout(() => {
+    const target = val("f_id") ? document.getElementById("f_name") : document.getElementById("f_id");
+    target?.focus();
+  }, 0);
 }
 function openNew() {
   editIndex = -1;
@@ -26274,6 +26850,7 @@ function openNew() {
   document.getElementById("dlgTitle").textContent = "New Project — Basics";
   document.getElementById("btnSaveProject").textContent = "Create & Continue";
   fillForm(createBlankProject());
+  captureEditDlgSnapshot();
   dlg.showModal();
   setTimeout(() => document.getElementById("f_id")?.focus(), 0);
   if (typeof projectTutorialOpened === "function") projectTutorialOpened();
@@ -26333,7 +26910,7 @@ function removeProject(i, { skipConfirm = false } = {}) {
 
   void (async () => {
     // 1. Close edit modal if open
-    closeDlg("editDlg");
+    closeDlg("editDlg", { force: true });
 
     // 2. Close page view if currently viewing this project or any of its subpages
     if (pageNav?.project === project) {
@@ -26396,12 +26973,13 @@ function removeDeliverable(project, deliverable) {
   const index = deliverables.indexOf(deliverable);
   if (index < 0) return;
 
+  const deliverableName = deliverable.name || "Untitled";
   if (deliverables.length === 1) {
     const projectTitle = project.name
       ? `${project.id ? project.id + " — " : ""}${project.name}`
       : (project.id || "Untitled");
     const deleteProjectToo = confirm(
-      `"${deliverable.name || "Untitled"}" is the only deliverable for project "${projectTitle}".\n\nWould you like to delete the entire project instead?`
+      `"${deliverableName}" is the only deliverable for project "${projectTitle}".\n\nWould you like to delete the entire project instead?`
     );
     if (deleteProjectToo) {
       const projectIndex = db.indexOf(project);
@@ -26410,14 +26988,28 @@ function removeDeliverable(project, deliverable) {
         return;
       }
     }
-    if (!confirm(`Delete deliverable "${deliverable.name || "Untitled"}"?`)) return;
-  } else {
-    if (!confirm(`Delete deliverable "${deliverable.name || "Untitled"}"?`)) return;
   }
 
-  deliverables.splice(index, 1);
-  save();
+  const [removed] = deliverables.splice(index, 1);
+  void save();
   render();
+  const msg = `Deleted deliverable "${deliverableName}".`;
+  pushProjectUndo({
+    label: msg,
+    undo: async () => {
+      const list = getProjectDeliverables(project);
+      if (!list.includes(removed)) {
+        const insertAt = Math.min(index, list.length);
+        list.splice(insertAt, 0, removed);
+      }
+      await save();
+      render();
+      if (typeof selectDeliverableForCommands === "function") {
+        selectDeliverableForCommands(removed, project);
+      }
+    },
+  });
+  toast(msg, { actionLabel: "Undo", onAction: () => undoLastProjectAction() });
 }
 function onSaveProject() {
   const dlg = document.getElementById("editDlg");
@@ -26454,14 +27046,16 @@ function onSaveProject() {
     document.getElementById("dlgTitle").textContent = `Edit Project — ${data.id || "Untitled"}`;
     document.getElementById("btnSaveProject").textContent = "Save Changes";
     fillForm(db[editIndex]);
+    captureEditDlgSnapshot();
     if (typeof projectTutorialCreated === "function") projectTutorialCreated();
     toast("Project created. Add deliverables to continue.");
     const deliverablesSection = document.getElementById("deliverablesSection");
     if (deliverablesSection) {
-      setTimeout(
-        () => deliverablesSection.scrollIntoView({ behavior: "smooth", block: "start" }),
-        50
-      );
+      setTimeout(() => {
+        deliverablesSection.scrollIntoView({ behavior: "smooth", block: "start" });
+        const firstDeliverableName = document.querySelector("#deliverableList .d-name");
+        firstDeliverableName?.focus();
+      }, 50);
     }
     return;
   }
@@ -26491,7 +27085,7 @@ function onSaveProject() {
   const projectSave = save();
   render();
   flushModalEmailSession(true);
-  closeDlg("editDlg");
+  closeDlg("editDlg", { force: true });
   if (typeof projectTutorialSaved === "function") void projectTutorialSaved(data, projectSave);
 }
 
@@ -36879,7 +37473,14 @@ function guardUnderConstructionToolAccess(card, label, event) {
 function handleProjectSearchInput() {
   resetProjectsListPagination();
   if (projectsViewMode !== "list" && val("search")) {
+    preSearchProjectsViewMode = projectsViewMode;
     setProjectsViewMode("list", { persist: false });
+    return;
+  }
+  if (!val("search") && preSearchProjectsViewMode && preSearchProjectsViewMode !== projectsViewMode) {
+    const restoreMode = preSearchProjectsViewMode;
+    preSearchProjectsViewMode = null;
+    setProjectsViewMode(restoreMode, { persist: false });
     return;
   }
   render();
@@ -38322,28 +38923,14 @@ function initEventListeners() {
   document.getElementById("projectsClearSearch")?.addEventListener("click", () => {
     clearProjectSearchInput();
     resetProjectsListPagination();
-    render();
-    document.getElementById("search")?.focus();
-  });
-  document.querySelectorAll("#projects-panel .projects-table th[data-sort]").forEach((th) => {
-    const activateSort = () => {
-      const sortKey = th.dataset.sort;
-      if (!sortKey) return;
-      if (currentSort.key === sortKey) {
-        currentSort.dir = currentSort.dir === "asc" ? "desc" : "asc";
-      } else {
-        currentSort.key = sortKey;
-        currentSort.dir = "asc";
-      }
-      resetProjectsListPagination();
+    if (preSearchProjectsViewMode && preSearchProjectsViewMode !== projectsViewMode) {
+      const restoreMode = preSearchProjectsViewMode;
+      preSearchProjectsViewMode = null;
+      setProjectsViewMode(restoreMode, { persist: false });
+    } else {
       render();
-    };
-    th.addEventListener("click", activateSort);
-    th.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" && event.key !== " ") return;
-      event.preventDefault();
-      activateSort();
-    });
+    }
+    document.getElementById("search")?.focus();
   });
   const scratchpadBtn = document.getElementById("scratchpadBtn");
   if (scratchpadBtn) scratchpadBtn.onclick = () => toggleScratchpad();
@@ -38480,6 +39067,68 @@ function initEventListeners() {
       normalizeProjectPathInput(pathInput);
     });
   }
+  const editProjectDlg = document.getElementById("editDlg");
+  if (editProjectDlg) {
+    editProjectDlg.addEventListener("cancel", (event) => {
+      if (document.getElementById("inlineCalendarPicker")) {
+        event.preventDefault();
+        closeInlineCalendar({ restoreFocus: true });
+        return;
+      }
+      if (!confirmDiscardEditDlgChanges()) {
+        event.preventDefault();
+        return;
+      }
+      flushModalEmailSession(false);
+      editDlgInitialSnapshot = "";
+      if (_aiMatchSnapshot) {
+        db[_aiMatchSnapshot.index] = normalizeProject(_aiMatchSnapshot.data);
+        _aiMatchSnapshot = null;
+      }
+    });
+    editProjectDlg.addEventListener("keydown", (event) => {
+      if (document.getElementById("inlineCalendarPicker")) return;
+      const isCtrlSave =
+        (event.ctrlKey || event.metaKey) &&
+        !event.altKey &&
+        (event.key === "Enter" || event.key.toLowerCase() === "s");
+      if (isCtrlSave) {
+        event.preventDefault();
+        onSaveProject();
+        return;
+      }
+      if (
+        event.key === "Enter" &&
+        !event.shiftKey &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey &&
+        editProjectDlg.dataset.mode === "create-basics" &&
+        event.target instanceof HTMLInputElement
+      ) {
+        event.preventDefault();
+        onSaveProject();
+      }
+    });
+  }
+
+  document.addEventListener("keydown", (event) => {
+    if (!(event.ctrlKey || event.metaKey) || event.shiftKey || event.altKey) return;
+    if (event.key.toLowerCase() !== "z") return;
+    if (document.body?.dataset?.activeTab !== "projects") return;
+    if (hasVisibleModalOverlay()) return;
+    const target = event.target;
+    if (
+      target?.isContentEditable ||
+      target?.closest?.("input, textarea, select, [contenteditable]:not([contenteditable='false'])")
+    ) {
+      return;
+    }
+    if (!projectUndoStack.length) return;
+    event.preventDefault();
+    void undoLastProjectAction();
+  });
+
   const browseProjectPathBtn = document.getElementById("btnBrowseProjectPath");
   if (pathInput && browseProjectPathBtn) {
     browseProjectPathBtn.addEventListener("click", async () => {

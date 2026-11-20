@@ -86,14 +86,14 @@ test('Ctrl-click adds and removes rows; a plain click goes back to one', () => {
   assert.equal(dock.deliverable, c);
 });
 
-test('a multi-selection offers only pin, unpin and status, and they act on every row', async () => {
+test('a multi-selection offers pin, unpin, status, and set due date, and they act on every row', async () => {
   const { context } = setup();
   const project = { id: 'P1' };
   const [a, b, c] = [{ id: 'a', pinned: true }, { id: 'b' }, { id: 'c' }];
   context.setCommandDockTargets([a, b, c].map((deliverable) => ({ deliverable, project })));
 
   let items = commands(context);
-  assert.deepEqual(Array.from(items, (item) => item.label), ['Complete', 'Pin 2 deliverables', 'Unpin 1 deliverable']);
+  assert.deepEqual(Array.from(items, (item) => item.label), ['Complete', 'Set due date (3)', 'Pin 2 deliverables', 'Unpin 1 deliverable']);
 
   const target = () => ({ targets: context.getCommandDockTargets() });
   await items.find((item) => item.key === 'pin').run(target());
@@ -101,7 +101,7 @@ test('a multi-selection offers only pin, unpin and status, and they act on every
   assert.equal(context.saveCount, 1);
 
   items = commands(context);
-  assert.deepEqual(Array.from(items, (item) => item.label), ['Complete', 'Unpin 3 deliverables']);
+  assert.deepEqual(Array.from(items, (item) => item.label), ['Complete', 'Set due date (3)', 'Unpin 3 deliverables']);
   await items.find((item) => item.key === 'unpin').run(target());
   assert.deepEqual([a, b, c].map((d) => d.pinned), [false, false, false]);
 

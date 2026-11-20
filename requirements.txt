@@ -12,3 +12,5 @@ pillow>=10.0.0
 pillow-heif>=0.18.0
 numpy>=2.1.0
 opencv-python-headless==4.10.0.84
+onnxruntime>=1.19.0
+tokenizers>=0.20.0

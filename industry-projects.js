@@ -1032,9 +1032,36 @@ function buildCommandDockGroups(
   const multi = selected.length > 1;
   const pinnedCount = selected.filter((entry) => isDeliverablePinned(entry.deliverable)).length;
   const setPinnedForTargets = async (targets, nextPinned) => {
+    const snapshots =
+      typeof snapshotDeliverableUndoState === "function"
+        ? targets.map((entry) => ({
+            deliverable: entry.deliverable,
+            snapshot: snapshotDeliverableUndoState(entry.deliverable),
+          }))
+        : null;
     targets.forEach((entry) => setDeliverablePinnedState(entry.deliverable, nextPinned));
     await save();
     rerender();
+    if (snapshots?.length && typeof pushProjectUndo === "function") {
+      const verb = nextPinned ? "Pinned" : "Unpinned";
+      const label =
+        snapshots.length === 1
+          ? `${verb} "${snapshots[0].deliverable?.name || "Deliverable"}".`
+          : `${verb} ${industryPlural(snapshots.length, "deliverable")}.`;
+      pushProjectUndo({
+        label,
+        undo: async () => {
+          snapshots.forEach(({ deliverable: dlv, snapshot }) =>
+            restoreDeliverableUndoState(dlv, snapshot)
+          );
+          await save();
+          rerender();
+        },
+      });
+      if (typeof toast === "function") {
+        toast(label, { actionLabel: "Undo", onAction: () => undoLastProjectAction() });
+      }
+    }
   };
 
   const statusItems = INDUSTRY_STATUS_OPTIONS.map((status) => ({
@@ -1046,13 +1073,46 @@ function buildCommandDockGroups(
       ? selected.every((entry) => hasStatus(entry.deliverable, status))
       : hasTarget && hasStatus(deliverable, status),
     run: async (target) => {
+      const snapshots =
+        typeof snapshotDeliverableUndoState === "function"
+          ? target.targets.map((entry) => ({
+              deliverable: entry.deliverable,
+              snapshot: snapshotDeliverableUndoState(entry.deliverable),
+            }))
+          : null;
       target.targets.forEach((entry) => setSingleStatus(entry.deliverable, status));
       await save();
       rerender();
+      if (snapshots?.length && typeof pushProjectUndo === "function") {
+        const label =
+          snapshots.length === 1
+            ? `Set "${snapshots[0].deliverable?.name || "Deliverable"}" to ${status}.`
+            : `Set ${industryPlural(snapshots.length, "deliverable")} to ${status}.`;
+        pushProjectUndo({
+          label,
+          undo: async () => {
+            snapshots.forEach(({ deliverable: dlv, snapshot }) =>
+              restoreDeliverableUndoState(dlv, snapshot)
+            );
+            await save();
+            rerender();
+          },
+        });
+        if (typeof toast === "function") {
+          toast(label, { actionLabel: "Undo", onAction: () => undoLastProjectAction() });
+        }
+      }
     },
   }));
 
   const deliverableItems = [
+    {
+      key: "set-due-date",
+      bulk: true,
+      label: multi ? `Set due date (${selected.length})` : "Set due date",
+      search: "set due date change deadline reschedule shift clear date",
+      run: (target) => startSetDueDatePrompt(target.targets),
+    },
     {
       key: "add-to-timesheet",
       label: "Add to Timesheet",
@@ -1072,6 +1132,18 @@ function buildCommandDockGroups(
         }
         startAddDeliverablePrompt(target.project, initialDesc);
       },
+    },
+    {
+      key: "rename-deliverable",
+      label: "Rename deliverable",
+      search: "rename deliverable edit title name",
+      run: (target) => startRenameDeliverablePrompt(target.project, target.deliverable),
+    },
+    {
+      key: "duplicate-deliverable",
+      label: "Duplicate deliverable",
+      search: "duplicate deliverable copy clone",
+      run: (target) => duplicateDeliverableFromDock(target.project, target.deliverable),
     },
     multi
       ? {
@@ -1508,7 +1580,23 @@ function parseCommandDockQuery(rawValue) {
   const trimmed = String(rawValue || "").trim();
   const targetMode = trimmed.startsWith("#");
   const query = (targetMode ? trimmed.slice(1) : trimmed).trim().toLowerCase();
-  return { targetMode, query, tokens: query.split(/\s+/).filter(Boolean) };
+  const rawTokens = [];
+  const tokenPattern = /"([^"]*)(?:"|$)|([^\s",;]+)/g;
+  let match;
+  while ((match = tokenPattern.exec(query)) !== null) {
+    const isQuoted = match[1] !== undefined;
+    const text = (isQuoted ? match[1] : match[2]).replace(/\s+/g, " ").trim();
+    if (text) rawTokens.push({ text, isQuoted });
+  }
+  const nonConnectors = rawTokens.filter(
+    (entry) =>
+      entry.isQuoted ||
+      !(entry.text === "and" || entry.text === "&" || entry.text === "+")
+  );
+  const tokens = (nonConnectors.length ? nonConnectors : rawTokens).map(
+    (entry) => entry.text
+  );
+  return { targetMode, query, tokens };
 }
 
 function isCommandDockTargetItem(item) {
@@ -1718,9 +1806,26 @@ function parsePromptDate(text) {
   if (!text) return null;
   const s = String(text).trim().toLowerCase();
   if (!s) return null;
+  const baseDate = arguments.length > 1 ? arguments[1] : null;
 
   const today = new Date();
   today.setHours(0, 0, 0, 0);
+
+  // Relative offsets: +7d, -2d, +1w, +2w, +1m (shift from baseDate if provided, else today)
+  const rel = s.match(/^([+-])\s*(\d+)\s*(d|day|days|w|wk|wks|week|weeks|m|mo|mos|month|months)$/);
+  if (rel) {
+    const sign = rel[1] === "-" ? -1 : 1;
+    const amount = parseInt(rel[2], 10) * sign;
+    const unit = rel[3][0];
+    const anchor =
+      baseDate && typeof baseDate.getTime === "function" && !isNaN(baseDate.getTime())
+        ? new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate())
+        : new Date(today);
+    if (unit === "d") anchor.setDate(anchor.getDate() + amount);
+    else if (unit === "w") anchor.setDate(anchor.getDate() + amount * 7);
+    else if (unit === "m") anchor.setMonth(anchor.getMonth() + amount);
+    return anchor;
+  }
 
   if (s === "today") return today;
   if (s === "tomorrow") {
@@ -1878,6 +1983,258 @@ function renderTimesheetHoursPrompt() {
   host.append(header, guide);
 }
 
+function startSetDueDatePrompt(targets) {
+  const list = Array.isArray(targets) ? targets.filter((entry) => entry?.deliverable) : [];
+  if (!list.length) {
+    toast("Please select a deliverable first.");
+    return;
+  }
+  const dock = ensureCommandDock();
+  const singleExisting = list.length === 1 ? getEffectiveDueStr(list[0].deliverable) : "";
+  industryActivePrompt = {
+    type: "set-due-date",
+    targets: list,
+    step: 0,
+    values: { due: singleExisting || "" },
+  };
+  dock.columns.hidden = true;
+  dock.promptView.hidden = false;
+  setCommandDockExpanded(true);
+  renderPromptView();
+  syncPromptInput();
+}
+
+async function advanceSetDueDatePrompt(raw) {
+  const prompt = industryActivePrompt;
+  if (!prompt || prompt.saving) return;
+  const targets = prompt.targets || [];
+  const lower = raw.toLowerCase();
+  const isClear = !raw || lower === "clear" || lower === "none" || lower === "remove";
+
+  if (!isClear && !parsePromptDate(raw)) {
+    toast("Invalid date. Use MM/DD/YYYY, this friday, +1w, +7d, or clear.");
+    return;
+  }
+
+  prompt.saving = true;
+  const snapshots =
+    typeof snapshotDeliverableUndoState === "function"
+      ? targets.map((entry) => ({
+          deliverable: entry.deliverable,
+          snapshot: snapshotDeliverableUndoState(entry.deliverable),
+        }))
+      : null;
+
+  let changedCount = 0;
+  let lastFormatted = "";
+  targets.forEach((entry) => {
+    let nextValue = "";
+    if (!isClear) {
+      const existing = parseDueStr(getEffectiveDueStr(entry.deliverable));
+      const parsed = parsePromptDate(raw, existing);
+      if (!parsed) return;
+      nextValue = formatPromptDate(parsed);
+      lastFormatted = nextValue;
+    }
+    if (applyDeliverableDueDate(entry.deliverable, "due", nextValue)) {
+      changedCount += 1;
+    }
+  });
+
+  cancelCommandDockPrompt({ silent: true });
+  if (!changedCount) return;
+
+  if (typeof save === "function") await save();
+  renderProjectsPreservingExpandedDeliverables();
+  setCommandDockExpanded(false);
+  industryCommandDock?.input?.blur();
+
+  const label = isClear
+    ? changedCount === 1
+      ? "Cleared due date."
+      : `Cleared due date on ${industryPlural(changedCount, "deliverable")}.`
+    : changedCount === 1
+      ? `Set due date to ${lastFormatted}.`
+      : `Updated due date on ${industryPlural(changedCount, "deliverable")}.`;
+
+  if (snapshots?.length && typeof pushProjectUndo === "function") {
+    pushProjectUndo({
+      label,
+      undo: async () => {
+        snapshots.forEach(({ deliverable: dlv, snapshot }) =>
+          restoreDeliverableUndoState(dlv, snapshot)
+        );
+        await save();
+        renderProjectsPreservingExpandedDeliverables();
+      },
+    });
+    toast(label, { actionLabel: "Undo", onAction: () => undoLastProjectAction() });
+  } else {
+    toast(label);
+  }
+}
+
+function renderSetDueDatePrompt() {
+  const dock = industryCommandDock;
+  const { targets } = industryActivePrompt;
+  const host = dock.promptView;
+  host.innerHTML = "";
+
+  const header = el("div", { className: "cmd-prompt-header" });
+  const title = el("div", { className: "cmd-prompt-title" });
+  const targetLabel =
+    targets.length === 1
+      ? `${getProjectShortName(targets[0].project)} · ${targets[0].deliverable?.name || "Deliverable"}`
+      : industryPlural(targets.length, "selected deliverable");
+  title.append(
+    el("span", { className: "reg-kick cmd-prompt-tag", textContent: "Set Due Date" }),
+    el("span", { className: "cmd-prompt-project-name", textContent: targetLabel })
+  );
+  const cancelBtn = el("button", { type: "button", className: "cmd-prompt-cancel-btn", textContent: "✕ Cancel", title: "Cancel (Esc)" });
+  cancelBtn.addEventListener("click", () => cancelCommandDockPrompt());
+  header.append(title, cancelBtn);
+
+  const guide = el("div", { className: "cmd-prompt-guide" });
+  guide.append(
+    el("div", { className: "cmd-prompt-instruction", textContent: targets.length === 1 ? "Enter a new due date." : `Set due date for ${industryPlural(targets.length, "deliverable")}.` }),
+    el("div", { className: "cmd-prompt-subinstruction", textContent: "Use MM/DD/YYYY, 9/15, this friday, +1w, +7d, or press Enter with empty text to clear." }),
+    el("div", { className: "cmd-prompt-chips-label", textContent: "Quick Dates" })
+  );
+
+  const chips = el("div", { className: "cmd-prompt-chips" });
+  [
+    { label: "Today", value: "today" },
+    { label: "This Friday", value: "this friday" },
+    { label: "Next Friday", value: "next friday" },
+    { label: "+1 Week", value: "+1w" },
+    { label: "+2 Weeks", value: "+2w" },
+    { label: "Clear date", value: "clear" },
+  ].forEach((chip) => {
+    const button = el("button", { type: "button", className: "cmd-prompt-chip", textContent: chip.label });
+    button.addEventListener("click", () => advancePromptStep(chip.value));
+    chips.append(button);
+  });
+  guide.append(chips);
+  host.append(header, guide);
+}
+
+function startRenameDeliverablePrompt(project, deliverable) {
+  if (!project || !deliverable) return;
+  const dock = ensureCommandDock();
+  industryActivePrompt = {
+    type: "rename-deliverable",
+    project,
+    deliverable,
+    step: 0,
+    values: { name: String(deliverable.name || "").trim() },
+  };
+  dock.columns.hidden = true;
+  dock.promptView.hidden = false;
+  setCommandDockExpanded(true);
+  renderPromptView();
+  syncPromptInput();
+}
+
+async function advanceRenameDeliverablePrompt(raw) {
+  const prompt = industryActivePrompt;
+  if (!prompt || prompt.saving) return;
+  const nextName = String(raw || "").trim();
+  if (!nextName) {
+    toast("Please enter a deliverable name.");
+    return;
+  }
+  const { deliverable } = prompt;
+  const prevName = deliverable.name || "";
+  cancelCommandDockPrompt({ silent: true });
+  if (nextName === prevName) {
+    setCommandDockExpanded(false);
+    return;
+  }
+  deliverable.name = nextName;
+  if (typeof save === "function") await save();
+  renderProjectsPreservingExpandedDeliverables();
+  setCommandDockExpanded(false);
+  industryCommandDock?.input?.blur();
+  const label = `Renamed deliverable to "${nextName}".`;
+  if (typeof pushProjectUndo === "function") {
+    pushProjectUndo({
+      label,
+      undo: async () => {
+        deliverable.name = prevName;
+        await save();
+        renderProjectsPreservingExpandedDeliverables();
+      },
+    });
+    toast(label, { actionLabel: "Undo", onAction: () => undoLastProjectAction() });
+  } else {
+    toast(label);
+  }
+}
+
+function renderRenameDeliverablePrompt() {
+  const dock = industryCommandDock;
+  const { project, deliverable } = industryActivePrompt;
+  const host = dock.promptView;
+  host.innerHTML = "";
+  const header = el("div", { className: "cmd-prompt-header" });
+  const title = el("div", { className: "cmd-prompt-title" });
+  title.append(
+    el("span", { className: "reg-kick cmd-prompt-tag", textContent: "Rename Deliverable" }),
+    el("span", { className: "cmd-prompt-project-name", textContent: `${getProjectShortName(project)} · ${deliverable?.name || "Deliverable"}` })
+  );
+  const cancelBtn = el("button", { type: "button", className: "cmd-prompt-cancel-btn", textContent: "✕ Cancel", title: "Cancel (Esc)" });
+  cancelBtn.addEventListener("click", () => cancelCommandDockPrompt());
+  header.append(title, cancelBtn);
+  const guide = el("div", { className: "cmd-prompt-guide" });
+  guide.append(
+    el("div", { className: "cmd-prompt-instruction", textContent: "Enter the new name for this deliverable." }),
+    el("div", { className: "cmd-prompt-subinstruction", textContent: "Press Enter to save or Esc to cancel." })
+  );
+  host.append(header, guide);
+}
+
+async function duplicateDeliverableFromDock(project, deliverable) {
+  if (!project || !deliverable) return;
+  const clone =
+    typeof deepCloneJson === "function"
+      ? deepCloneJson(deliverable, {})
+      : JSON.parse(JSON.stringify(deliverable));
+  clone.id = typeof createId === "function"
+    ? createId("dlv")
+    : `dlv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+  const baseName = String(deliverable.name || "Deliverable").trim();
+  clone.name = `${baseName} (Copy)`;
+  clone.pinned = false;
+  delete clone.pinnedOrder;
+  const normalized = typeof normalizeDeliverable === "function" ? normalizeDeliverable(clone) : clone;
+  if (!Array.isArray(project.deliverables)) project.deliverables = [];
+  const idx = project.deliverables.indexOf(deliverable);
+  const insertAt = idx >= 0 ? idx + 1 : project.deliverables.length;
+  project.deliverables.splice(insertAt, 0, normalized);
+
+  if (typeof save === "function") await save();
+  renderProjectsPreservingExpandedDeliverables();
+  selectDeliverableForCommands(normalized, project, { expand: false });
+  setCommandDockExpanded(false);
+
+  const label = `Duplicated "${baseName}".`;
+  if (typeof pushProjectUndo === "function") {
+    pushProjectUndo({
+      label,
+      undo: async () => {
+        const list = Array.isArray(project.deliverables) ? project.deliverables : [];
+        const copyIdx = list.indexOf(normalized);
+        if (copyIdx >= 0) list.splice(copyIdx, 1);
+        await save();
+        renderProjectsPreservingExpandedDeliverables();
+      },
+    });
+    toast(label, { actionLabel: "Undo", onAction: () => undoLastProjectAction() });
+  } else {
+    toast(label);
+  }
+}
+
 function startAddDeliverablePrompt(project, initialDescription = "") {
   if (!project) {
     toast("Please select a project first.");
@@ -1908,6 +2265,29 @@ function syncPromptInput() {
   const { step, values } = industryActivePrompt;
 
   dock.root.classList.add("has-pending");
+  if (industryActivePrompt.type === "set-due-date") {
+    const count = industryActivePrompt.targets?.length || 1;
+    dock.pending.textContent = count > 1 ? `Set Due Date · ${count} selected` : "Set Due Date";
+    dock.pending.hidden = false;
+    dock.input.placeholder = "MM/DD/YYYY, this friday, +1w, +7d, or empty to clear…";
+    dock.input.value = values.due || "";
+    dock.scope.textContent = "↩ apply date · esc cancel";
+    if (dock.footShortcuts) dock.footShortcuts.textContent = dock.scope.textContent;
+    dock.input.focus({ preventScroll: true });
+    if (dock.input.value) dock.input.select();
+    return;
+  }
+  if (industryActivePrompt.type === "rename-deliverable") {
+    dock.pending.textContent = "Rename Deliverable";
+    dock.pending.hidden = false;
+    dock.input.placeholder = "Enter new deliverable name…";
+    dock.input.value = values.name || "";
+    dock.scope.textContent = "↩ rename · esc cancel";
+    if (dock.footShortcuts) dock.footShortcuts.textContent = dock.scope.textContent;
+    dock.input.focus({ preventScroll: true });
+    if (dock.input.value) dock.input.select();
+    return;
+  }
   if (industryActivePrompt.type === "timesheet-hours") {
     dock.pending.textContent = `Add to Timesheet · ${step + 1}/2 ${step === 0 ? "Hours" : "Date"}`;
     dock.pending.hidden = false;
@@ -1955,6 +2335,12 @@ function advancePromptStep(forcedValue) {
   const raw = String(forcedValue !== undefined ? forcedValue : dock.input.value).trim();
   if (industryActivePrompt.type === "timesheet-hours") {
     return advanceTimesheetHoursPrompt(raw);
+  }
+  if (industryActivePrompt.type === "set-due-date") {
+    return advanceSetDueDatePrompt(raw);
+  }
+  if (industryActivePrompt.type === "rename-deliverable") {
+    return advanceRenameDeliverablePrompt(raw);
   }
   const { step, values } = industryActivePrompt;
 
@@ -2028,7 +2414,13 @@ async function completeAddDeliverablePrompt() {
 }
 
 function cancelCommandDockPrompt({ silent = false } = {}) {
-  const promptLabel = industryActivePrompt?.type === "timesheet-hours" ? "Add to Timesheet" : "Add Deliverable";
+  const promptLabels = {
+    "timesheet-hours": "Add to Timesheet",
+    "set-due-date": "Set Due Date",
+    "rename-deliverable": "Rename Deliverable",
+    "add-deliverable": "Add Deliverable",
+  };
+  const promptLabel = promptLabels[industryActivePrompt?.type] || "Add Deliverable";
   if (industryActivePrompt?.saving && !silent) return;
   industryActivePrompt = null;
   const dock = industryCommandDock;
@@ -2132,6 +2524,8 @@ function renderPromptView() {
   const dock = industryCommandDock;
   if (!dock || !industryActivePrompt) return;
   if (industryActivePrompt.type === "timesheet-hours") return renderTimesheetHoursPrompt();
+  if (industryActivePrompt.type === "set-due-date") return renderSetDueDatePrompt();
+  if (industryActivePrompt.type === "rename-deliverable") return renderRenameDeliverablePrompt();
   const { project, step, values } = industryActivePrompt;
   const host = dock.promptView;
   host.innerHTML = "";
@@ -2290,8 +2684,9 @@ function selectDeliverableForCommands(deliverable, project, { expand = false, fo
 
   if (expand) setCommandDockExpanded(true);
   if (focus) focusCommandDockGroup(focus);
-  if (expand || focus) dock.input.focus({ preventScroll: true });
-  else if (!same) dock.input.focus({ preventScroll: true });
+  if (expand || focus || !same || document.activeElement !== dock.input) {
+    dock.input.focus({ preventScroll: true });
+  }
 }
 
 // Everything the next command acts on: the Ctrl/Shift-click selection when
@@ -2460,6 +2855,20 @@ function syncCommandDockSelection() {
   });
 }
 
+function hasVisibleCommandBlockingOverlay() {
+  if (document.querySelector("dialog[open]")) return true;
+  if (typeof document.querySelectorAll !== "function") {
+    const match = document.querySelector("[aria-modal='true'], details[open]");
+    return Boolean(match && !match.hidden && !match.closest?.("[hidden], dialog:not([open])"));
+  }
+  return Array.from(document.querySelectorAll("[aria-modal='true'], details[open]")).some((node) => {
+    if (!node || node.hidden) return false;
+    if (node.closest?.("[hidden], dialog:not([open])")) return false;
+    if (typeof node.getClientRects === "function" && !node.getClientRects().length) return false;
+    return true;
+  });
+}
+
 // Ctrl+K focuses the command line from anywhere on the Projects tab.
 function bindCommandDockShortcut() {
   document.addEventListener("keydown", (event) => {
@@ -2467,7 +2876,7 @@ function bindCommandDockShortcut() {
     if (event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.altKey) return;
     if (event.key.length !== 1 || !event.key.trim()) return;
     if (document.body.dataset.activeTab !== "projects") return;
-    if (document.querySelector("dialog[open], [aria-modal='true'], details[open]")) return;
+    if (hasVisibleCommandBlockingOverlay()) return;
     const target = event.target;
     if (target?.isContentEditable || target?.closest?.(
       "input, textarea, select, [contenteditable]:not([contenteditable='false']), [role='textbox'], [role='combobox'], [role='menu'], [role='listbox']"
@@ -2485,7 +2894,6 @@ function bindCommandDockShortcut() {
   });
   document.addEventListener("keydown", (event) => {
     if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "k") return;
-    if (document.body.dataset.activeTab !== "projects") return;
     if (document.querySelector("dialog[open]")) return;
     const target = event.target;
     if (
@@ -2497,6 +2905,12 @@ function bindCommandDockShortcut() {
       return;
     }
     event.preventDefault();
+    if (document.body.dataset.activeTab !== "projects") {
+      if (typeof closePageView === "function" && !document.getElementById("pageView")?.hidden) {
+        closePageView();
+      }
+      document.querySelector('.main-tab-btn[data-tab="projects"]')?.click();
+    }
     const dock = ensureCommandDock();
     if (document.activeElement === dock.input && dock.expanded) {
       setCommandDockExpanded(false);

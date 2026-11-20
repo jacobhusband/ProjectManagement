@@ -457,7 +457,7 @@ class PowerShellCadWrapperTests(unittest.TestCase):
         script = SCRIPT_JS_PATH.read_text(encoding="utf-8")
         html = INDEX_HTML_PATH.read_text(encoding="utf-8")
 
-        self.assertIn("automateProjectDisciplinePublish: false,", script)
+        self.assertIn("automateProjectDisciplinePublish: true,", script)
         self.assertIn("discipline: getActiveDiscipline(),", script)
         for control_id in (
             "settings_publish_automateProjectDisciplinePublish",
@@ -613,6 +613,7 @@ class PowerShellCadWrapperTests(unittest.TestCase):
         for expected in (
             'async function resolveCadFilesBeforeLaunch(launchContext = null, toolId = "") {',
             'userSettings.publishDwgOptions?.automateProjectDisciplinePublish === true',
+            'source === "projects-tab" &&\n    userSettings.workroomAutoSelectCadFiles !== false &&',
             '((automaticDisciplineSelection || automaticDisciplineRepairXrefs) &&\n      hasLaunchContextProjectPath(context))',
             'const automaticDisciplineRepairXrefs = toolId === "toolRepairXrefPaths";',
             "window.pywebview.api.select_files({",

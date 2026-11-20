@@ -125,3 +125,18 @@ test('clearing a query restores browse order and preserves the selected item', (
     assert.equal(dock.items[dock.activeIndex].label, 'Deliverable');
   } });
 });
+
+test('target search supports multi-term queries with quotes, commas, and connectors', () => {
+  const candidates = [
+    { kind: 'project', label: 'AAA, 7935 Blue Diamond Rd., Las Vegas, NV', search: '251476 AAA, 7935 Blue Diamond Rd., Las Vegas, NV MBH Blue Diamond' },
+    { kind: 'project', label: 'AAA, 8225 Laguna Blvd., Elk Grove, CA', search: '251208 AAA, 8225 Laguna Blvd., Elk Grove, CA MBH' },
+    { kind: 'project', label: 'Taco Bell, Las Vegas, NV', search: '260767 Taco Bell, Las Vegas, NV Valerio' },
+  ];
+  for (const query of ['#AAA vegas', '#"AAA" "vegas"', '#AAA and vegas', '#AAA, vegas', '#"las vegas" AAA']) {
+    assert.deepEqual(
+      runFilter(query, candidates),
+      ['AAA, 7935 Blue Diamond Rd., Las Vegas, NV'],
+      query
+    );
+  }
+});

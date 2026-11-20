@@ -165,6 +165,8 @@ from lighting_plan import LightingPlanValidationError, analyze_lighting_plan
 import symbol_counter as symbol_counter_module
 from symbol_counter import SymbolCounterError, SymbolCounterService
 import panel_schedule_export as panel_export_module
+import panel_schedule_ai as panel_ai_module
+import panel_photo_prefilter as panel_prefilter_module
 
 
 _PROJECT_PAGE_PDF_VOID_TAGS = frozenset({
@@ -877,7 +879,7 @@ def build_default_user_settings():
             'hatchColor': True
         },
         'publishDwgOptions': {
-            'automateProjectDisciplinePublish': False,
+            'automateProjectDisciplinePublish': True,
             'autoDetectPaperSize': True,
             'shrinkPercent': 100,
             'stripPdfLayers': True,
@@ -4148,6 +4150,453 @@ class Api:
             return {'status': 'success', 'path': str(output_path)}
         except Exception as e:
             logging.exception("Failed to save panel schedule export")
+            return {'status': 'error', 'message': str(e)}
+
+    # --- Panel Schedule AI Studio (Gemini 4 Hydrogen) ---
+    def _get_panel_studio_temp_dir(self):
+        studio_dir = getattr(self, "_panel_studio_temp_dir", None)
+        if not studio_dir or not os.path.isdir(studio_dir):
+            studio_dir = tempfile.mkdtemp(prefix="acies_panel_studio_")
+            self._panel_studio_temp_dir = studio_dir
+        return Path(studio_dir)
+
+    def panel_studio_get_status(self):
+        """Report model info, local ONNX pre-filter status, and API key availability."""
+        try:
+            api_key = self._resolve_panel_schedule_api_key()
+            prefilter = panel_prefilter_module.get_prefilter_status(get_app_data_dir())
+            return {
+                'status': 'success',
+                'model': panel_ai_module.GEMINI_HYDROGEN_MODEL,
+                'hasApiKey': bool(api_key),
+                'templateAvailable': CB_TEMPLATE_PATH.exists(),
+                'prefilter': prefilter,
+            }
+        except Exception as e:
+            logging.exception("Panel studio status failed")
+            return {'status': 'error', 'message': str(e)}
+
+    def panel_studio_start_prefilter(self, payload):
+        """Run local zero-shot ONNX photo pre-filtering ($0 tokens) in a background thread.
+
+        Optionally chains directly into ``gemini-decision-1`` on ONLY the surviving
+        panel candidates (using EXIF + dropped non-panel gap cues to split panels).
+        """
+        try:
+            payload = payload if isinstance(payload, dict) else {}
+            paths = list(payload.get('paths') or [])
+            folder_path = str(payload.get('folderPath') or '').strip()
+            if folder_path:
+                paths.append(folder_path)
+            if not paths:
+                return {'status': 'error', 'message': 'Choose a survey photo folder or select photos first.'}
+
+            sensitivity = str(payload.get('sensitivity') or 'balanced')
+            dedupe = bool(payload.get('dedupe', True))
+            refine_with_decision = bool(payload.get('refineWithDecision', True))
+            split_panels = bool(payload.get('splitPanels', True))
+            api_key = self._resolve_panel_schedule_api_key() if refine_with_decision else ''
+
+            lock, jobs = self._ensure_panel_studio_jobs()
+            with lock:
+                job_id = f"psa_pf_{uuid.uuid4().hex[:10]}"
+                jobs[job_id] = {
+                    'jobId': job_id,
+                    'status': 'running',
+                    'progress': 5,
+                    'message': 'Starting local ONNX vision pre-filter ($0 tokens)...',
+                    'startedAt': time.time(),
+                    'finishedAt': None,
+                    'result': None,
+                    'error': '',
+                }
+
+            app_data_dir = get_app_data_dir()
+
+            def _on_progress(info):
+                with lock:
+                    rec = jobs.get(job_id)
+                    if not rec or rec.get('status') != 'running':
+                        return
+                    if isinstance(info, dict):
+                        raw_pct = int(info.get('progress') or 0)
+                        scaled = int(raw_pct * (0.78 if refine_with_decision else 0.98))
+                        rec['progress'] = max(rec['progress'], min(96, scaled))
+                        if info.get('message'):
+                            rec['message'] = str(info['message'])
+
+            def _worker():
+                try:
+                    pf_result = panel_prefilter_module.prefilter_survey_photos(
+                        paths=paths,
+                        app_data_dir=app_data_dir,
+                        sensitivity=sensitivity,
+                        dedupe=dedupe,
+                        progress_callback=_on_progress,
+                    )
+                    kept = pf_result.get('kept') or []
+                    decision_result = None
+                    decision_warning = ''
+
+                    if refine_with_decision and kept and api_key:
+                        with lock:
+                            rec = jobs.get(job_id)
+                            if rec is not None:
+                                rec['progress'] = 84
+                                rec['message'] = (
+                                    f'Local filter kept {len(kept)} of {pf_result["stats"]["totalScanned"]} photos. '
+                                    'Refining buckets & splitting panels with gemini-decision-1...'
+                                )
+                        try:
+                            decision_result = panel_ai_module.sort_survey_photos_with_decision_api(
+                                sources=kept,
+                                api_key=api_key,
+                                split_panels=split_panels,
+                            )
+                        except Exception as exc:
+                            logging.warning("Decision API refinement after prefilter failed: %s", exc)
+                            decision_warning = (
+                                f"Local ONNX filter succeeded, but gemini-decision-1 refinement failed ({exc}). "
+                                "Using local ONNX bucket suggestions instead."
+                            )
+
+                    final_result = {
+                        **pf_result,
+                        'decisionResult': decision_result,
+                        'decisionWarning': decision_warning,
+                    }
+                    with lock:
+                        rec = jobs.get(job_id)
+                        if rec is not None:
+                            rec['status'] = 'success'
+                            rec['progress'] = 100
+                            rec['finishedAt'] = time.time()
+                            rec['result'] = final_result
+                            st = pf_result['stats']
+                            rec['message'] = (
+                                f"Scanned {st['totalScanned']} photos locally → kept {st['keptCount']} panel "
+                                f"candidates, filtered {st['droppedCount']}."
+                            )
+                except Exception as exc:
+                    logging.exception("Background local pre-filter failed")
+                    with lock:
+                        rec = jobs.get(job_id)
+                        if rec is not None:
+                            rec['status'] = 'error'
+                            rec['progress'] = 100
+                            rec['finishedAt'] = time.time()
+                            rec['error'] = str(exc)
+                            rec['message'] = str(exc)
+
+            threading.Thread(target=_worker, name=f"panel-prefilter-{job_id}", daemon=True).start()
+            return {'status': 'started', 'jobId': job_id}
+        except Exception as e:
+            logging.exception("Failed to start local photo pre-filter")
+            return {'status': 'error', 'message': str(e)}
+
+    def panel_studio_inspect_sources(self, paths=None, uploads=None):
+        """Inspect photos (JPG/PNG/HEIC) and PDF drawings into selectable source items."""
+        try:
+            result = panel_ai_module.inspect_sources(
+                paths=paths or [],
+                uploads=uploads or [],
+                temp_dir=self._get_panel_studio_temp_dir(),
+            )
+            return {'status': 'success', **result}
+        except Exception as e:
+            logging.exception("Panel studio source inspection failed")
+            return {'status': 'error', 'message': str(e)}
+
+    def panel_studio_render_source(self, source):
+        """Render a high-resolution viewer preview data URL for a PDF page or image."""
+        try:
+            data_url = panel_ai_module.render_source_viewer_image(source or {})
+            return {'status': 'success', 'viewerDataUrl': data_url}
+        except Exception as e:
+            logging.exception("Panel studio source render failed")
+            return {'status': 'error', 'message': str(e)}
+
+    def panel_studio_crop_source(self, payload):
+        """Create a full-resolution cropped image from a source photo or PDF page."""
+        try:
+            payload = payload if isinstance(payload, dict) else {}
+            item = panel_ai_module.crop_source_image(
+                source=payload.get('source') or {},
+                rect=payload.get('rect') or {},
+                temp_dir=self._get_panel_studio_temp_dir(),
+                rotation=int(payload.get('rotation') or 0),
+                role=str(payload.get('role') or ''),
+            )
+            return {'status': 'success', 'item': item}
+        except Exception as e:
+            logging.exception("Panel studio image crop failed")
+            return {'status': 'error', 'message': str(e)}
+
+    def panel_studio_auto_sort_photos(self, payload):
+        """Fast auto-bucketing of raw site survey photos using gemini-decision-1."""
+        try:
+            payload = payload if isinstance(payload, dict) else {}
+            sources = payload.get('sources') or []
+            split_panels = bool(payload.get('splitPanels', False))
+            api_key = self._resolve_panel_schedule_api_key()
+            result = panel_ai_module.sort_survey_photos_with_decision_api(
+                sources=sources,
+                api_key=api_key,
+                split_panels=split_panels,
+            )
+            return {'status': 'success', **result}
+        except Exception as e:
+            logging.exception("Panel studio auto-sort failed")
+            return {'status': 'error', 'message': str(e)}
+
+    def _ensure_panel_studio_jobs(self):
+        lock = getattr(self, "_panel_studio_jobs_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._panel_studio_jobs_lock = lock
+        jobs = getattr(self, "_panel_studio_jobs", None)
+        if jobs is None:
+            jobs = {}
+            self._panel_studio_jobs = jobs
+        return lock, jobs
+
+    def panel_studio_start_analyze(self, payload):
+        """Start Gemini 4 Hydrogen extraction in a non-blocking background thread."""
+        try:
+            payload = payload if isinstance(payload, dict) else {}
+            api_key = self._resolve_panel_schedule_api_key()
+            if not api_key:
+                return {
+                    'status': 'error',
+                    'message': (
+                        'Google Gemini API key is not configured. Add your free Google AI Studio key '
+                        'in Settings (or set GEMINI_API_KEY in .env).'
+                    ),
+                }
+            groups = payload.get('groups')
+            sources = payload.get('sources') or []
+            if not ((isinstance(groups, list) and groups) or sources):
+                return {
+                    'status': 'error',
+                    'message': 'Add at least one photo or PDF page to analyze.',
+                }
+
+            self._ensure_aiohttp()
+            lock, jobs = self._ensure_panel_studio_jobs()
+
+            with lock:
+                for existing in jobs.values():
+                    if existing.get('status') == 'running':
+                        return {
+                            'status': 'already_running',
+                            'jobId': existing['jobId'],
+                            'message': existing.get('message') or 'Analysis is already running in the background.',
+                        }
+                # Prune old completed jobs to keep memory lean
+                if len(jobs) > 10:
+                    completed_ids = [jid for jid, rec in jobs.items() if rec.get('status') != 'running']
+                    for jid in completed_ids[:-4]:
+                        jobs.pop(jid, None)
+
+                job_id = f"psa_job_{uuid.uuid4().hex[:10]}"
+                job_record = {
+                    'jobId': job_id,
+                    'status': 'running',
+                    'progress': 8,
+                    'message': 'Starting Gemini 4 Hydrogen extraction in background...',
+                    'startedAt': time.time(),
+                    'finishedAt': None,
+                    'result': None,
+                    'error': '',
+                }
+                jobs[job_id] = job_record
+
+            payload_copy = deepcopy(payload)
+
+            def _update_progress(info):
+                with lock:
+                    rec = jobs.get(job_id)
+                    if not rec or rec.get('status') != 'running':
+                        return
+                    if isinstance(info, dict):
+                        if 'progress' in info:
+                            rec['progress'] = info['progress']
+                        if info.get('message'):
+                            rec['message'] = str(info['message'])
+
+            def _worker():
+                try:
+                    grp_list = payload_copy.get('groups')
+                    if isinstance(grp_list, list) and grp_list:
+                        result = panel_ai_module.analyze_panel_groups_with_hydrogen(
+                            groups=grp_list,
+                            api_key=api_key,
+                            progress_callback=_update_progress,
+                        )
+                    else:
+                        result = panel_ai_module.analyze_sources_with_hydrogen(
+                            sources=payload_copy.get('sources') or [],
+                            api_key=api_key,
+                            mode=str(payload_copy.get('mode') or 'auto'),
+                            panel_name_hint=str(payload_copy.get('panelNameHint') or ''),
+                        )
+                    with lock:
+                        rec = jobs.get(job_id)
+                        if rec is not None:
+                            rec['status'] = 'success'
+                            rec['progress'] = 100
+                            rec['finishedAt'] = time.time()
+                            rec['result'] = result
+                            panel_count = len(result.get('panels') or [])
+                            rec['message'] = f'Extracted {panel_count} panel schedule(s). Ready to review.'
+                except Exception as exc:
+                    logging.exception("Background Panel Studio AI analysis failed")
+                    with lock:
+                        rec = jobs.get(job_id)
+                        if rec is not None:
+                            rec['status'] = 'error'
+                            rec['progress'] = 100
+                            rec['finishedAt'] = time.time()
+                            rec['error'] = str(exc)
+                            rec['message'] = str(exc)
+
+            worker = threading.Thread(target=_worker, name=f"panel-studio-{job_id}", daemon=True)
+            worker.start()
+            return {'status': 'started', 'jobId': job_id}
+        except Exception as e:
+            logging.exception("Failed to start background Panel Studio analysis")
+            return {'status': 'error', 'message': str(e)}
+
+    def panel_studio_get_job_status(self, job_id):
+        """Poll status/progress/result of a background Panel Studio analysis job."""
+        lock, jobs = self._ensure_panel_studio_jobs()
+        with lock:
+            rec = jobs.get(str(job_id or '').strip())
+            if not rec:
+                return {'status': 'not_found', 'message': 'Background job not found.'}
+            now = time.time()
+            end_ts = rec['finishedAt'] if rec['finishedAt'] is not None else now
+            elapsed = max(0, int(round(end_ts - rec['startedAt'])))
+            response = {
+                'status': rec['status'],
+                'jobId': rec['jobId'],
+                'progress': rec['progress'],
+                'message': rec['message'],
+                'elapsedSeconds': elapsed,
+            }
+            if rec['status'] == 'success':
+                response['result'] = rec['result']
+            elif rec['status'] == 'error':
+                response['error'] = rec['error']
+            return response
+
+    def panel_studio_analyze(self, payload):
+        """Analyze structured site survey panel groups or as-built PDF pages with Gemini 4 Hydrogen."""
+        try:
+            payload = payload if isinstance(payload, dict) else {}
+            api_key = self._resolve_panel_schedule_api_key()
+            self._ensure_aiohttp()
+            groups = payload.get('groups')
+            if isinstance(groups, list) and groups:
+                result = panel_ai_module.analyze_panel_groups_with_hydrogen(
+                    groups=groups,
+                    api_key=api_key,
+                )
+            else:
+                sources = payload.get('sources') or []
+                mode = str(payload.get('mode') or 'auto')
+                panel_name_hint = str(payload.get('panelNameHint') or '')
+                result = panel_ai_module.analyze_sources_with_hydrogen(
+                    sources=sources,
+                    api_key=api_key,
+                    mode=mode,
+                    panel_name_hint=panel_name_hint,
+                )
+            return {'status': 'success', **result}
+        except Exception as e:
+            logging.exception("Panel studio AI analysis failed")
+            return {'status': 'error', 'message': str(e)}
+
+    def panel_studio_estimate_kva(self, panel, overwrite_existing=False):
+        """Fill missing kVA values on active circuits using deterministic ACIES estimates."""
+        try:
+            updated = panel_ai_module.apply_estimated_kva_to_panel(
+                panel or {},
+                overwrite_existing=bool(overwrite_existing),
+            )
+            return {'status': 'success', 'panel': updated}
+        except Exception as e:
+            logging.exception("Panel studio kVA estimate failed")
+            return {'status': 'error', 'message': str(e)}
+
+    def panel_studio_choose_save_path(self, default_name='Panel Schedules.xlsx', fmt='xlsx', default_dir=None):
+        """Prompt the user for a new Excel output path (.xlsx or .xls)."""
+        try:
+            ext = 'xls' if str(fmt or '').lower().lstrip('.') == 'xls' else 'xlsx'
+            clean_name = re.sub(r'[<>:"/\\|?*]+', '_', str(default_name or 'Panel Schedules')).strip() or 'Panel Schedules'
+            if clean_name.lower().endswith(('.xlsx', '.xls')):
+                clean_name = os.path.splitext(clean_name)[0]
+            clean_name = f'{clean_name}.{ext}'
+            directory = self._resolve_dialog_directory(default_dir)
+            file_types = (
+                ('Excel 97-2003 Workbook (*.xls)',)
+                if ext == 'xls'
+                else ('Excel Workbook (*.xlsx)',)
+            )
+            output_path = self._create_file_dialog(
+                self._get_file_dialog_type('SAVE'),
+                directory=directory,
+                save_filename=clean_name,
+                file_types=file_types,
+            )
+            if not output_path:
+                return {'status': 'cancelled'}
+            if isinstance(output_path, (list, tuple)):
+                output_path = output_path[0] if output_path else None
+            if not output_path:
+                return {'status': 'cancelled'}
+            path_str = str(output_path)
+            if not path_str.lower().endswith(f'.{ext}'):
+                path_str = f'{path_str}.{ext}'
+            return {'status': 'success', 'path': path_str}
+        except Exception as e:
+            logging.exception("Panel studio save dialog failed")
+            return {'status': 'error', 'message': str(e)}
+
+    def panel_studio_export_excel(self, payload):
+        """Write reviewed panels into Template.xlsx (new workbook or append to existing)."""
+        try:
+            payload = payload if isinstance(payload, dict) else {}
+            panels = payload.get('panels') or []
+            output_path = str(payload.get('outputPath') or '').strip()
+            mode = 'existing' if str(payload.get('mode') or 'new').lower() == 'existing' else 'new'
+            replace_existing = bool(payload.get('replaceExistingSheets', False))
+            result = panel_ai_module.export_panels_to_excel(
+                panels=panels,
+                output_path=output_path,
+                template_path=CB_TEMPLATE_PATH,
+                mode=mode,
+                replace_existing_sheets=replace_existing,
+                excel_converter=self._convert_excel_workbook,
+            )
+            return {'status': 'success', **result}
+        except Exception as e:
+            logging.exception("Panel studio Excel export failed")
+            return {'status': 'error', 'message': str(e)}
+
+    def panel_studio_open_path(self, path, reveal_in_folder=False):
+        """Open the exported Excel file or reveal it in Windows Explorer."""
+        try:
+            target = os.path.abspath(str(path or '').strip())
+            if not target or not os.path.exists(target):
+                return {'status': 'error', 'message': f'Path not found: {path}'}
+            if reveal_in_folder:
+                subprocess.Popen(['explorer', '/select,', target])
+            else:
+                os.startfile(target)
+            return {'status': 'success'}
+        except Exception as e:
+            logging.exception("Panel studio open path failed")
             return {'status': 'error', 'message': str(e)}
 
     # --- Application update helpers ---
@@ -17758,15 +18207,21 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
     def _resolve_workroom_discipline(self, settings, launch_context):
         settings_disciplines = self._get_settings_workroom_disciplines(settings)
         context = self._normalize_launch_context(launch_context)
-        requested = str(context.get('discipline') or '').strip().lower()
-        mapped_requested = {
+        discipline_lookup = {
             'electrical': 'Electrical',
             'mechanical': 'Mechanical',
             'plumbing': 'Plumbing',
-        }.get(requested)
-        # Workroom selection should drive CAD routing when explicitly provided.
+        }
+        requested = str(context.get('discipline') or '').strip().lower()
+        mapped_requested = discipline_lookup.get(requested)
+        # Workroom/project selection should drive CAD routing when explicitly provided.
         if mapped_requested:
             return mapped_requested, 'launch_context'
+        active = discipline_lookup.get(
+            str((settings or {}).get('activeDiscipline') or '').strip().lower()
+        )
+        if active:
+            return active, 'settings_active'
         if len(settings_disciplines) == 1:
             return settings_disciplines[0], 'settings_single'
         return settings_disciplines[0], 'settings_fallback'
@@ -17781,7 +18236,7 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
         ).strip()
         root_project_path = str(context.get('rootProjectPath') or '').strip()
         effective_project_path = root_project_path or project_path
-        if source == 'workroom':
+        if source in ('workroom', 'projects-tab'):
             discipline, discipline_source = self._resolve_workroom_discipline(
                 settings, launch_context)
         else:
@@ -17830,9 +18285,9 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
         context = self._resolve_workroom_context(settings, launch_context)
         source = str(context.get('source') or '').strip().lower()
         auto_select_setting = bool(settings.get('workroomAutoSelectCadFiles', True))
-        if source != 'workroom':
+        if source not in ('workroom', 'projects-tab'):
             logging.info(
-                "_is_workroom_auto_select_enabled: disabled because launch source is not workroom "
+                "_is_workroom_auto_select_enabled: disabled because launch source is not a project launch "
                 f"(source={source or 'none'}, launch_context_type={type(launch_context).__name__}).")
             return False
         if not auto_select_setting:
@@ -18920,8 +19375,11 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
             )
             return None
 
-        cached_entry = self._get_workroom_cad_file_cache_entry(
-            project_path, discipline)
+        cached_entry = (
+            self._get_workroom_cad_file_cache_entry(project_path, discipline)
+            if context.get('source') == 'workroom'
+            else None
+        )
         if cached_entry:
             cached_dwg_files = self._normalize_dwg_file_paths(
                 cached_entry.get('files'), require_exists=True)
@@ -19638,7 +20096,7 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
             publish_options.update(params_override)
         automate_project_discipline_publish = publish_options.get(
             'automateProjectDisciplinePublish',
-            publish_options.get('automateProjectElectricalPublish', False),
+            publish_options.get('automateProjectElectricalPublish', True),
         ) is True
         auto_detect = publish_options.get('autoDetectPaperSize', True)
         shrink_percent = publish_options.get('shrinkPercent', 100)
@@ -20463,7 +20921,11 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
             else:
                 auto_selection = self._resolve_workroom_auto_file_selection(
                     settings, launch_context, 'run_clean_xrefs_script')
-                if self._is_workroom_auto_select_enabled(settings, launch_context) and not auto_selection:
+                if (
+                    self._is_workroom_auto_select_tool_allowed('run_clean_xrefs_script')
+                    and self._is_workroom_auto_select_enabled(settings, launch_context)
+                    and not auto_selection
+                ):
                     fallback_context = self._resolve_workroom_context(
                         settings, launch_context)
                     logging.info(
