@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import sys
 import tempfile
@@ -775,6 +776,139 @@ class WorkroomCadLaunchCommandTests(unittest.TestCase):
                 )
             finally:
                 files_list_path.unlink(missing_ok=True)
+
+    def test_publish_print_order_is_saved_and_follows_the_folder(self):
+        with tempfile.TemporaryDirectory(prefix="acies-print-order-") as temp_dir, patch.object(
+            main_module, "PUBLISH_PRINT_ORDER_FILE", str(Path(temp_dir) / "publish_print_order.json")
+        ):
+            electrical = Path(temp_dir) / "Project" / "Electrical"
+            electrical.mkdir(parents=True)
+            for name in ("E0.01.dwg", "E2.01.dwg", "E3.01.dwg", "E4.01.dwg"):
+                (electrical / name).write_text("", encoding="utf-8")
+
+            def listed():
+                result = self.api.get_publish_print_list(None, str(electrical))
+                self.assertEqual("success", result["status"])
+                return [file["name"] for file in result["files"]]
+
+            # With nothing saved the sheets list alphabetically.
+            self.assertEqual(["E0.01.dwg", "E2.01.dwg", "E3.01.dwg", "E4.01.dwg"], listed())
+            saved = self.api.save_publish_print_order(
+                str(electrical), ["e4.01.DWG", "E0.01.dwg", "E3.01.dwg", "E2.01.dwg", "gone.dwg"])
+            self.assertEqual("success", saved["status"])
+            # Names keep the folder's spelling, and names that are not in the folder drop out.
+            self.assertEqual(["E4.01.dwg", "E0.01.dwg", "E3.01.dwg", "E2.01.dwg"], saved["order"])
+            self.assertEqual(["E4.01.dwg", "E0.01.dwg", "E3.01.dwg", "E2.01.dwg"], listed())
+            with patch.object(self.api, "get_workroom_cad_files", return_value={}):
+                manual_list = self.api.get_publish_print_list({
+                    "source": "manual", "cadFilePaths": [str(electrical / "E2.01.dwg")],
+                })
+            self.assertEqual(saved["order"], [sheet["name"] for sheet in manual_list["files"]])
+
+            # A new sheet goes after the sheet it sorts after; a deleted sheet drops out.
+            (electrical / "E2.02.dwg").write_text("", encoding="utf-8")
+            (electrical / "A0.00.dwg").write_text("", encoding="utf-8")
+            (electrical / "E3.01.dwg").unlink()
+            self.assertEqual(
+                ["A0.00.dwg", "E4.01.dwg", "E0.01.dwg", "E2.01.dwg", "E2.02.dwg"], listed())
+
+    def test_publish_without_the_dialog_plots_in_the_saved_print_order(self):
+        publish_case = next(
+            case for case in TOOL_CASES if case["method_name"] == "run_publish_script"
+        )
+        settings = {
+            **publish_case["settings"],
+            "discipline": ["Electrical"],
+            "activeDiscipline": "Electrical",
+            "publishDwgOptions": {
+                **publish_case["settings"]["publishDwgOptions"],
+                "automateProjectDisciplinePublish": True,
+            },
+        }
+        with tempfile.TemporaryDirectory(prefix="acies-print-order-run-") as temp_dir, patch.object(
+            main_module, "PUBLISH_PRINT_ORDER_FILE", str(Path(temp_dir) / "publish_print_order.json")
+        ):
+            project_path = Path(temp_dir) / "Project"
+            electrical = project_path / "Electrical"
+            electrical.mkdir(parents=True)
+            for name in ("E1.dwg", "E2.dwg", "E3.dwg"):
+                (electrical / name).write_text("", encoding="utf-8")
+            # Use the on-disk format written by the original ordered Publish dialog.
+            order = ["E3.dwg", "E1.dwg", "E2.dwg"]
+            order_file = Path(main_module.PUBLISH_PRINT_ORDER_FILE)
+            order_file.write_text(json.dumps({
+                "version": 1,
+                "folders": {os.path.normcase(str(electrical)): {
+                    "path": str(electrical), "order": order, "updatedAt": "2026-11-18T08:16:42",
+                }},
+            }), encoding="utf-8")
+            original = order_file.read_bytes()
+            print_list = self.api.get_publish_print_list(None, str(electrical))
+            self.assertEqual(order, [sheet["name"] for sheet in print_list["files"]])
+
+            captured = []
+            with patch.object(self.api, "get_user_settings", return_value=settings), patch.object(
+                self.api,
+                "_run_script_with_progress",
+                side_effect=lambda command, tool_id, **kwargs: captured.append(command),
+            ):
+                result = self.api.run_publish_script(
+                    {"source": "projects-tab", "projectPath": str(project_path)})
+
+            self.assertEqual("success", result["status"])
+            command = captured[0]
+            files_list_path = Path(command[command.index("-FilesListPath") + 1])
+            try:
+                self.assertEqual(
+                    [str(electrical / name) for name in order],
+                    files_list_path.read_text(encoding="utf-8").splitlines(),
+                )
+                self.assertEqual(original, order_file.read_bytes())
+            finally:
+                files_list_path.unlink(missing_ok=True)
+
+    def test_print_list_sheets_keep_automatic_publish_paper_size(self):
+        publish_case = next(
+            case for case in TOOL_CASES if case["method_name"] == "run_publish_script"
+        )
+        settings = {
+            **publish_case["settings"],
+            "publishDwgOptions": {
+                **publish_case["settings"]["publishDwgOptions"],
+                "automateProjectDisciplinePublish": True,
+            },
+        }
+        with tempfile.TemporaryDirectory(prefix="acies-print-list-") as temp_dir:
+            sheets = [Path(temp_dir) / name for name in ("E2.dwg", "E1.dwg")]
+            for sheet in sheets:
+                sheet.write_text("", encoding="utf-8")
+            for print_list, expected in ((True, "1"), (False, "0")):
+                captured = []
+                context = {
+                    "source": "workroom",
+                    "projectPath": temp_dir,
+                    "cadFilePaths": [str(sheet) for sheet in sheets],
+                    "workflowPreselectedDwgFiles": True,
+                }
+                if print_list:
+                    context["publishPrintList"] = True
+                with patch.object(self.api, "get_user_settings", return_value=settings), patch.object(
+                    self.api,
+                    "_run_script_with_progress",
+                    side_effect=lambda command, tool_id, **kwargs: captured.append(command),
+                ):
+                    self.api.run_publish_script(context)
+                command = captured[0]
+                self.assertEqual(expected, command[command.index("-AutoAcceptDetectedPaperSize") + 1])
+                files_list_path = Path(command[command.index("-FilesListPath") + 1])
+                try:
+                    # The listed order is kept, not re-sorted.
+                    self.assertEqual(
+                        [str(sheet) for sheet in sheets],
+                        files_list_path.read_text(encoding="utf-8").splitlines(),
+                    )
+                finally:
+                    files_list_path.unlink(missing_ok=True)
 
     def test_automatic_project_publish_missing_selected_discipline_notifies_and_prompts(self):
         publish_case = next(

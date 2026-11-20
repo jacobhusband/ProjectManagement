@@ -383,11 +383,11 @@ class PowerShellCadWrapperTests(unittest.TestCase):
         html = INDEX_HTML_PATH.read_text(encoding="utf-8")
 
         for expected in (
-            "async function askPublishExcelRefresh(launchContext) {",
-            "if (userSettings.publishDwgOptions?.refreshExcelOleLinks !== false) {",
-            "const excelChoice = await askPublishExcelRefresh(launchContext);",
+            "async function askPublishExcelRefresh(launchContext, { requireSelection = false } = {}) {",
+            "if (partialPrint || userSettings.publishDwgOptions?.refreshExcelOleLinks !== false) {",
+            "const excelChoice = await askPublishExcelRefresh(launchContext, { requireSelection: partialPrint });",
             "if (!excelChoice) return;",
-            'publishParams = { refreshExcelOleLinks: excelChoice === "refresh" };',
+            "publishParams = { refreshExcelOleLinks: excelChoice.refresh };",
             "window.pywebview?.api?.get_publish_excel_workbook?.(launchContext)",
         ):
             self.assertIn(expected, script)
@@ -400,27 +400,32 @@ class PowerShellCadWrapperTests(unittest.TestCase):
             "publishExcelRefreshQuick",
             "publishExcelRefreshCancel",
             "publishExcelRefreshWorkbook",
-            "publishExcelRefreshPartial",
-            "publishPartialDlg",
-            "publishPartialList",
-            "publishPartialBrowse",
-            "publishPartialRefresh",
-            "publishPartialPrint",
-            "publishPartialCancel",
+            "publishPrintList",
+            "publishPrintBrowse",
+            "publishPrintAll",
+            "publishPrintNone",
         ):
             self.assertIn(f'id="{control_id}"', html)
-        self.assertIn(">Partial Print</button>", html)
-        # Partial Print lists the discipline folder's DWGs and hands the picked ones
-        # to Publish as preselected files.
-        partial = launch.split('if (excelChoice === "partial") {', 1)[1]
+        # Publish and the Partial Print shortcut share the ordered list.
+        self.assertNotIn("publishPartialDlg", html)
+        self.assertNotIn("askPublishPartialPrint", script)
+        # The checked sheets reach Publish in the listed order as preselected files.
+        listed = launch.split("if (excelChoice.files.length) {", 1)[1]
         for expected in (
-            "const partial = await askPublishPartialPrint(launchContext);",
-            "cadFilePaths: partial.files,",
+            "cadFilePaths: excelChoice.files,",
             "workflowPreselectedDwgFiles: true,",
-            "publishParams = { refreshExcelOleLinks: partial.refresh };",
+            "publishPrintList: !partialPrint && excelChoice.fromDisciplineFolder,",
         ):
-            self.assertIn(expected, partial)
-        self.assertIn("api?.get_workroom_cad_files?.(launchContext)", script)
+            self.assertIn(expected, listed)
+        dialog = script.split("async function askPublishExcelRefresh(", 1)[1]
+        for expected in (
+            "api?.get_publish_print_list?.(launchContext)",
+            "api.get_publish_print_list(null, folderPath)",
+            "api.save_publish_print_order(folderPath, names)",
+            "setInterval(poll, PUBLISH_PRINT_POLL_MS)",
+            "clearInterval(pollTimer);",
+        ):
+            self.assertIn(expected, dialog)
 
     def test_publish_core_console_discards_instead_of_resaving_drawings(self):
         # QUIT's <N> default resaves the DWG, which would make every published

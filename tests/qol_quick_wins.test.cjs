@@ -173,5 +173,6 @@ test('list view sort headers, Partial Print dock entry, Freeze/Thaw settings inp
   assert.doesNotMatch(htmlSource, /refresh control beside the version in the header/);
   assert.match(dockSource, /key:\s*"tool:toolPublishPartial"/);
   assert.match(dockSource, /publishMode:\s*"partial"/);
-  assert.match(scriptSource, /if \(launchContext\?\.publishMode === "partial"\)/);
+  assert.match(scriptSource, /const partialPrint = launchContext\?\.publishMode === "partial"/);
+  assert.match(scriptSource, /askPublishExcelRefresh\(launchContext, \{ requireSelection: partialPrint \}\)/);
 });

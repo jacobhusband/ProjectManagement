@@ -1943,46 +1943,31 @@
         </div>
     </dialog>
 
-    <!-- Asked at each Publish launch while "Refresh linked Excel OLE" is on -->
-    <dialog id="publishExcelRefreshDlg" aria-labelledby="publishExcelRefreshTitle">
+    <!-- Used by the Publish prompt and the Partial Print shortcut. -->
+    <dialog id="publishExcelRefreshDlg" class="publish-print-dialog" aria-labelledby="publishExcelRefreshTitle">
         <div class="modal-header">
-            <div class="title" id="publishExcelRefreshTitle">Refresh Excel links?</div>
+            <div class="title" id="publishExcelRefreshTitle">Publish sheets</div>
             <button type="button" class="btn ghost" id="publishExcelRefreshCancel">Cancel</button>
         </div>
         <div class="modal-body stack">
-            <p><strong>Refresh Excel links</strong> reloads linked Excel tables, such as panel schedules, in full
-                AutoCAD and saves those drawings before plotting. It is slower.</p>
-            <p><strong>Quick print</strong> plots the drawings as they were last saved.</p>
-            <p><strong>Partial Print</strong> plots only the sheets you pick.</p>
+            <div class="tiny muted" id="publishPrintFolder" style="overflow-wrap: anywhere;"></div>
+            <div class="publish-print-toolbar">
+                <button type="button" class="btn ghost" id="publishPrintAll">Select all</button>
+                <button type="button" class="btn ghost" id="publishPrintNone">Clear</button>
+                <button type="button" class="btn" id="publishPrintBrowse">Add other DWGs...</button>
+                <span class="tiny muted" id="publishPrintCount" aria-live="polite"></span>
+            </div>
+            <p class="tiny muted" id="publishPrintHint">Drag sheets, or use the arrows, to set the print order. The
+                order is saved for this folder.</p>
+            <ol id="publishPrintList" class="publish-print-list" aria-label="Sheets to print, in print order"></ol>
+            <p class="tiny"><strong>Refresh Excel links</strong> reloads linked Excel tables, such as panel
+                schedules, in full AutoCAD and saves those drawings before plotting. It is slower.
+                <strong>Quick print</strong> plots the drawings as they were last saved.</p>
             <div class="tiny muted" id="publishExcelRefreshWorkbook" style="overflow-wrap: anywhere;" hidden></div>
         </div>
         <div class="modal-footer">
-            <button type="button" class="btn" id="publishExcelRefreshPartial">Partial Print</button>
             <button type="button" class="btn" id="publishExcelRefreshQuick">Quick print</button>
             <button type="button" class="btn primary" id="publishExcelRefreshRefresh">Refresh Excel links</button>
-        </div>
-    </dialog>
-
-    <!-- Opened by Partial Print: pick discipline-folder sheets or browse for other DWGs -->
-    <dialog id="publishPartialDlg" class="publish-partial-dialog" aria-labelledby="publishPartialTitle">
-        <div class="modal-header">
-            <div class="title" id="publishPartialTitle">Partial Print</div>
-            <button type="button" class="btn ghost" id="publishPartialCancel">Cancel</button>
-        </div>
-        <div class="modal-body stack">
-            <div class="tiny muted" id="publishPartialFolder" style="overflow-wrap: anywhere;"></div>
-            <div class="publish-partial-toolbar">
-                <button type="button" class="btn ghost" id="publishPartialAll">Select all</button>
-                <button type="button" class="btn ghost" id="publishPartialNone">Clear</button>
-                <button type="button" class="btn" id="publishPartialBrowse">Browse for DWGs...</button>
-                <span class="tiny muted" id="publishPartialCount"></span>
-            </div>
-            <fieldset id="publishPartialList" class="publish-partial-list" aria-label="Sheets to print"></fieldset>
-            <label class="radio-label"><input type="checkbox" id="publishPartialRefresh">
-                Refresh Excel links in the selected drawings first</label>
-        </div>
-        <div class="modal-footer">
-            <button type="button" class="btn primary" id="publishPartialPrint" disabled>Print selected</button>
         </div>
     </dialog>
 

@@ -1615,6 +1615,9 @@ CAD_AUTO_SELECT_TRACE_FILE = get_app_data_path("cad_auto_select_trace.log")
 CHECKLISTS_FILE = get_app_data_path("checklists.json")
 ACTIVITY_HISTORY_FILE = get_app_data_path("activity_history.json")
 ACTIVITY_HISTORY_LIMIT = 200
+# Publish's sheet print order per discipline folder, kept apart from settings.json
+# because the page saves its whole settings object and would drop backend-only keys.
+PUBLISH_PRINT_ORDER_FILE = get_app_data_path("publish_print_order.json")
 GITHUB_API_CACHE_FILE = get_app_data_path("github_api_cache.json")
 SYNC_BACKUPS_DIR = os.path.join(get_app_data_dir(), "sync_backups")
 SYNC_METADATA_FILE = get_app_data_path("local_project_sync_metadata.json")
@@ -18726,6 +18729,8 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
             }
 
         dwg_files = self._list_base_level_dwgs(discipline_folder)
+        if tool_id == 'toolPublishDwgs':
+            dwg_files = self._order_dwgs_for_print(dwg_files)
         if not dwg_files:
             return {
                 'status': 'input_required',
@@ -18920,6 +18925,8 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
         if cached_entry:
             cached_dwg_files = self._normalize_dwg_file_paths(
                 cached_entry.get('files'), require_exists=True)
+            if cached_dwg_files and tool_name == 'run_publish_script':
+                cached_dwg_files = self._order_dwgs_for_print(cached_dwg_files)
             if cached_dwg_files:
                 files_list_path = self._write_files_list_temp(cached_dwg_files)
                 cached_folder_path = str(cached_entry.get('folder_path') or '').strip()
@@ -19013,6 +19020,8 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
             )
             return None
         dwg_files = self._list_base_level_dwgs(discipline_folder)
+        if tool_name == 'run_publish_script':
+            dwg_files = self._order_dwgs_for_print(dwg_files)
         if not dwg_files:
             logging.info(
                 f"{tool_name}: Workroom auto-select fallback to manual file picker (no DWGs in {discipline_folder}).")
@@ -19198,6 +19207,134 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
                 launch_context=self._normalize_launch_context(launch_context),
             )
             return {'status': 'error', 'message': str(e), 'files': []}
+
+    @staticmethod
+    def _publish_print_order_key(folder_path):
+        return os.path.normcase(os.path.normpath(str(folder_path or '').strip()))
+
+    def _load_publish_print_orders(self):
+        try:
+            data = _read_data_file_with_recovery(PUBLISH_PRINT_ORDER_FILE)
+        except FileNotFoundError:
+            return {}
+        except Exception as e:
+            logging.warning("Could not read the Publish print order: %s", e)
+            return {}
+        folders = data.get('folders') if isinstance(data, dict) else None
+        return folders if isinstance(folders, dict) else {}
+
+    def _get_publish_print_order(self, folder_path):
+        if not str(folder_path or '').strip():
+            return []
+        entry = self._load_publish_print_orders().get(
+            self._publish_print_order_key(folder_path))
+        order = entry.get('order') if isinstance(entry, dict) else None
+        if not isinstance(order, list):
+            return []
+        return [str(name).strip() for name in order if str(name or '').strip()]
+
+    @staticmethod
+    def _merge_publish_print_order(saved_names, dwg_paths):
+        """Orders a folder's DWGs by the saved print order.
+
+        Deleted sheets drop out. A new sheet goes right after the sheet it sorts
+        after alphabetically, so E2.02 lands behind E2.01 wherever E2.01 was moved.
+        """
+        alphabetical = sorted(dwg_paths, key=lambda path: os.path.basename(path).lower())
+        remaining = {os.path.basename(path).lower(): path for path in alphabetical}
+        ordered = []
+        for name in saved_names or []:
+            path = remaining.pop(str(name).lower(), None)
+            if path:
+                ordered.append(path)
+        if not ordered:
+            return alphabetical
+        for path in [path for path in alphabetical
+                     if os.path.basename(path).lower() in remaining]:
+            name = os.path.basename(path).lower()
+            predecessor = -1
+            predecessor_name = None
+            for index, placed in enumerate(ordered):
+                placed_name = os.path.basename(placed).lower()
+                if placed_name < name and (
+                        predecessor_name is None or placed_name > predecessor_name):
+                    predecessor, predecessor_name = index, placed_name
+            ordered.insert(predecessor + 1, path)
+        return ordered
+
+    def _order_dwgs_for_print(self, dwg_paths):
+        """Applies the saved print order when every DWG is in the same folder."""
+        paths = list(dwg_paths or [])
+        folder = self._get_shared_parent_folder(paths)
+        if not folder:
+            return paths
+        saved = self._get_publish_print_order(folder)
+        return self._merge_publish_print_order(saved, paths) if saved else paths
+
+    def get_publish_print_list(self, launch_context=None, folder_path=None):
+        """The discipline folder's DWGs in the saved print order, for Publish's sheet list.
+
+        The dialog polls with the folder it was given so sheets added or deleted while
+        it is open show up without resolving the project folder again.
+        """
+        try:
+            folder = str(folder_path or '').strip()
+            discipline = ''
+            message = ''
+            if not folder:
+                result = self.get_workroom_cad_files(launch_context)
+                folder = str(result.get('folderPath') or '').strip()
+                discipline = str(result.get('discipline') or '')
+                message = str(result.get('message') or '')
+                if not folder:
+                    folder = self._get_shared_parent_folder(
+                        self._get_launch_context_cad_file_paths(launch_context))
+            if not folder or not os.path.isdir(folder):
+                return {
+                    'status': 'success', 'folderPath': '', 'discipline': discipline,
+                    'files': [],
+                    'message': message or 'No discipline folder was found.',
+                }
+            ordered = self._merge_publish_print_order(
+                self._get_publish_print_order(folder), self._list_base_level_dwgs(folder))
+            return {
+                'status': 'success',
+                'folderPath': folder,
+                'discipline': discipline,
+                'files': [{'name': os.path.basename(path), 'path': path} for path in ordered],
+                'message': '',
+            }
+        except Exception as e:
+            logging.error("get_publish_print_list failed: %s", e)
+            return {'status': 'error', 'message': str(e), 'folderPath': '', 'files': []}
+
+    def save_publish_print_order(self, folder_path, names):
+        """Saves the sheet order Publish prints a discipline folder in."""
+        try:
+            folder = os.path.normpath(str(folder_path or '').strip())
+            if not str(folder_path or '').strip() or not os.path.isdir(folder):
+                return {'status': 'error', 'message': 'The discipline folder was not found.'}
+            present = {os.path.basename(path).lower(): os.path.basename(path)
+                       for path in self._list_base_level_dwgs(folder)}
+            order, seen = [], set()
+            for name in names if isinstance(names, (list, tuple)) else []:
+                key = os.path.basename(str(name or '').strip()).lower()
+                if key in present and key not in seen:
+                    seen.add(key)
+                    order.append(present[key])
+            with _get_data_file_lock(PUBLISH_PRINT_ORDER_FILE):
+                folders = dict(self._load_publish_print_orders())
+                folders[self._publish_print_order_key(folder)] = {
+                    'path': folder,
+                    'order': order,
+                    'updatedAt': datetime.datetime.now().isoformat(timespec='seconds'),
+                }
+                _write_data_file_safely(
+                    PUBLISH_PRINT_ORDER_FILE, {'version': 1, 'folders': folders})
+            return {'status': 'success', 'order': order}
+        except Exception as e:
+            logging.error("save_publish_print_order failed: %s", e)
+            return {'status': 'error', 'message': str(e)}
 
     def _notify_activity_status(self, payload):
         try:
@@ -19520,7 +19657,14 @@ Return JSON matching the provided schema exactly, with image_index values 0 thro
             and not explicit_dwg_files
             and not workflow_preselected
         )
-        automatic_publish_succeeded = False
+        # Sheets picked from Publish's print list stand in for the automatic
+        # discipline publish, so they keep its hands-off paper size.
+        automatic_publish_succeeded = bool(
+            automate_project_discipline_publish
+            and workflow_preselected
+            and explicit_dwg_files
+            and launch_payload.get('publishPrintList') is True
+        )
         automatic_publish_resolution = None
         auto_selection = None
         manual_selection_message = "Select DWG files to publish..."

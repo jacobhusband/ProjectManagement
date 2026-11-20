@@ -15619,13 +15619,26 @@ button.page-crumb:hover {
 .workflow-preflight-input-value { flex: 1; min-width: 0; overflow-wrap: anywhere; white-space: pre-line; }
 .workflow-preflight-input-help { font-size: 12px; color: var(--text-secondary); }
 #workflowBuilderError, #workflowPreFlightError { color: var(--danger, #dc2626); }
-.publish-partial-dialog { width: min(640px, 92vw); }
-.publish-partial-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.publish-partial-list { max-height: 320px; overflow: auto; margin: 0; padding: 4px; border: 1px solid var(--glass-border); border-radius: 8px; }
-.publish-partial-list label { display: flex; align-items: center; gap: 8px; padding: 6px; cursor: pointer; overflow-wrap: anywhere; }
-.publish-partial-list input[type="checkbox"], #publishPartialRefresh { width: 16px; height: 16px; padding: 0; flex: 0 0 16px; margin: 0 6px 0 0; accent-color: var(--accent); }
-.publish-partial-list .tiny { margin-left: auto; text-align: right; }
-#publishPartialCount { margin-left: auto; }
+.publish-print-dialog { width: min(640px, 92vw); }
+.publish-print-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.publish-print-list { max-height: 340px; overflow: auto; margin: 0; padding: 4px; list-style: none; border: 1px solid var(--glass-border); border-radius: 8px; }
+.publish-print-list > li { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; border-top: 2px solid transparent; border-bottom: 2px solid transparent; }
+.publish-print-list > li[draggable="true"] { cursor: grab; }
+.publish-print-list > li.is-dragging { opacity: 0.45; }
+.publish-print-list > li.drop-before { border-top-color: var(--accent); }
+.publish-print-list > li.drop-after { border-bottom-color: var(--accent); }
+.publish-print-list > li:focus-within, .publish-print-list > li:hover { background: rgba(127, 127, 127, 0.08); }
+.publish-print-list > li.is-unchecked .publish-print-name { opacity: 0.55; }
+.publish-print-grip { flex: 0 0 auto; color: var(--muted, inherit); opacity: 0.6; user-select: none; }
+.publish-print-number { flex: 0 0 2.2em; text-align: right; font-variant-numeric: tabular-nums; }
+.publish-print-list label { display: flex; flex: 1 1 auto; align-items: center; gap: 8px; min-width: 0; cursor: pointer; overflow-wrap: anywhere; }
+.publish-print-list input[type="checkbox"] { width: 16px; height: 16px; padding: 0; flex: 0 0 16px; margin: 0; accent-color: var(--accent); }
+.publish-print-list label .tiny { margin-left: auto; text-align: right; }
+.publish-print-move { flex: 0 0 auto; display: flex; gap: 2px; }
+.publish-print-move .btn { min-width: 0; padding: 2px 8px; line-height: 1.2; }
+.publish-print-move .btn:disabled { opacity: 0.3; cursor: default; }
+.publish-print-list > li.publish-print-empty { display: block; cursor: default; }
+#publishPrintCount { margin-left: auto; }
 
 /* ---- AutoCAD command switches dialog ---- */
 .plugin-commands-dialog {
