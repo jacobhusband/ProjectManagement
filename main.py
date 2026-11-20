@@ -12155,8 +12155,9 @@ Return ONLY the JSON object.
                     return candidate
         return ''
 
-    def get_publish_pdf_destinations(self, combined_pdf_path, project_path=''):
-        """Find the project's PDF folder and its immediate issue folders."""
+    def get_publish_pdf_destinations(self, combined_pdf_path, project_path='', sample_path=''):
+        """Find the project's PDF folder, its immediate issue folders, and the
+        file/folder names the newest earlier issue of this discipline used."""
         try:
             source = os.path.abspath(str(combined_pdf_path or '').strip())
             if not source.lower().endswith('.pdf') or not os.path.isfile(
@@ -12174,15 +12175,27 @@ Return ONLY the JSON object.
             folders = [folder for folder in folders if os.path.commonpath([
                 root_real, os.path.normcase(os.path.realpath(folder['path']))
             ]) == root_real]
+            discipline = (self._publish_discipline_for_path(sample_path)
+                          or self._publish_discipline_for_path(source))
+            suggestion = self._suggest_publish_pdf_names(pdf_folder, discipline)
             return {
                 'status': 'success', 'pdfFolder': pdf_folder,
                 'combinedPdfPath': source, 'folders': folders,
+                'suggestedFileName': suggestion.get('fileName', ''),
+                'suggestedFolderName': suggestion.get('folderName', ''),
+                'previousFileName': suggestion.get('previousFileName', ''),
+                'previousFolderName': suggestion.get('previousFolderName', ''),
             }
         except (OSError, ValueError) as exc:
             return {'status': 'error', 'message': str(exc)}
 
-    def move_published_pdf(self, combined_pdf_path, project_path, folder_name, create_new=False):
-        """Move the combined set into one PDF subfolder without replacing files."""
+    def move_published_pdf(self, combined_pdf_path, project_path, folder_name, create_new=False,
+                           file_name=''):
+        """Move the combined set into one PDF subfolder without replacing files.
+
+        file_name renames the set on the way (".pdf" is added when missing);
+        blank keeps the combined PDF's own name.
+        """
         result = self.get_publish_pdf_destinations(combined_pdf_path, project_path)
         if result.get('status') != 'success':
             return result
@@ -12200,6 +12213,19 @@ Return ONLY the JSON object.
                 or re.match(r'^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)', name, re.I)
             ):
                 raise ValueError('Enter a valid folder name without slashes or Windows reserved characters.')
+            pdf_name = str(file_name or '')
+            if pdf_name.strip():
+                if not pdf_name.lower().endswith('.pdf'):
+                    pdf_name += '.pdf'
+                pdf_stem = pdf_name[:-4]
+                if (
+                    not pdf_stem.strip() or pdf_name != pdf_name.strip() or pdf_stem.endswith(('.', ' '))
+                    or re.search(r'[<>:"/\\|?*\x00-\x1f]', pdf_name)
+                    or re.match(r'^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)', pdf_name, re.I)
+                ):
+                    raise ValueError('Enter a valid PDF file name without slashes or Windows reserved characters.')
+            else:
+                pdf_name = ''
             pdf_folder = result['pdfFolder']
             folder = os.path.join(pdf_folder, name)
             root_real = os.path.normcase(os.path.realpath(pdf_folder))
@@ -12212,7 +12238,7 @@ Return ONLY the JSON object.
             elif name not in {item['name'] for item in result['folders']}:
                 raise ValueError('That folder is no longer available. Choose an existing folder or create a new one.')
             source = result['combinedPdfPath']
-            destination = os.path.join(folder, os.path.basename(source))
+            destination = os.path.join(folder, pdf_name or os.path.basename(source))
             if os.path.normcase(os.path.realpath(source)) == os.path.normcase(os.path.realpath(destination)):
                 raise ValueError('The set is already in that folder.')
             # Exclusive creation also protects against another discipline publishing
@@ -12261,6 +12287,92 @@ Return ONLY the JSON object.
         name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '', name).strip(' .')
         return f'{name or "combined"}.pdf'
 
+    def _publish_discipline_for_path(self, path_value):
+        """Electrical/Mechanical/Plumbing from a drawing's folders or a set's file name.
+
+        PlotDWGs.ps1 names a set '<project> - <DWG folder>.pdf', so the combined
+        PDF's own name still carries the discipline after it leaves the project.
+        """
+        raw = str(path_value or '').strip()
+        if not raw:
+            return ''
+        current = os.path.normpath(raw)
+        if os.path.splitext(current)[1]:
+            stem_tokens = self._deliverable_pdf_match_tokens(
+                os.path.splitext(os.path.basename(current))[0])
+            current = os.path.dirname(current)
+        else:
+            stem_tokens = set()
+        while current:
+            discipline = self._normalize_deliverable_pdf_discipline(os.path.basename(current))
+            if discipline:
+                return discipline
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+        for known in DELIVERABLE_PDF_DISCIPLINES:
+            if known.upper() in stem_tokens:
+                return known
+        return ''
+
+    def _refresh_publish_name_dates(self, name, today=None):
+        """Puts today's date into any date stamp a previous issue's name carries.
+
+        Keeps each stamp's layout: '2026.09.24' -> '2026.11.19', '09-15-2026' -> '11-19-2026'.
+        """
+        today = today or datetime.date.today()
+
+        def valid(year, month, day):
+            if not ISSUE_DATE_MIN_YEAR <= year <= ISSUE_DATE_MAX_YEAR:
+                return False
+            try:
+                datetime.date(year, month, day)
+            except ValueError:
+                return False
+            return True
+
+        def year_first(match):
+            year, sep1, month, sep2, day = match.groups()
+            if not valid(int(year), int(month), int(day)):
+                return match.group(0)
+            return f'{today.year:04d}{sep1}{today.month:02d}{sep2}{today.day:02d}'
+
+        def month_first(match):
+            month, sep1, day, sep2, year = match.groups()
+            if not valid(int(year), int(month), int(day)):
+                return match.group(0)
+            return f'{today.month:02d}{sep1}{today.day:02d}{sep2}{today.year:04d}'
+
+        text = str(name or '')
+        text = re.sub(r'(?<!\d)(\d{4})([.\-_])(\d{1,2})([.\-_])(\d{1,2})(?!\d)', year_first, text)
+        return re.sub(r'(?<!\d)(\d{1,2})([.\-_])(\d{1,2})([.\-_])(\d{4})(?!\d)', month_first, text)
+
+    def _suggest_publish_pdf_names(self, pdf_folder, discipline):
+        """Names that follow the newest earlier issue of the discipline's set.
+
+        Returns {} when no issue folder holds a PDF for the discipline, so callers
+        keep the generated name.
+        """
+        if not pdf_folder or not discipline:
+            return {}
+        for folder in self._list_deliverable_pdf_issue_folders(pdf_folder):
+            previous = self._find_deliverable_pdf_in_folder(folder['path'], discipline)
+            if not previous:
+                continue
+            previous_name = os.path.basename(previous)
+            suggestion = {
+                'fileName': self._refresh_publish_name_dates(previous_name),
+                'previousFileName': previous_name,
+                'previousFolderName': folder['name'],
+                'folderName': '',
+            }
+            # Only a dated issue folder shows a pattern worth repeating for a new folder.
+            if DELIVERABLE_PDF_ISSUE_DATE_RE.match(folder['name']):
+                suggestion['folderName'] = self._refresh_publish_name_dates(folder['name'])
+            return suggestion
+        return {}
+
     def select_publish_pdf_target(self, project_path='', current_target='', sample_path=''):
         """Asks where a Publish run's combined set goes, starting in the project PDF folder."""
         try:
@@ -12274,7 +12386,9 @@ Return ONLY the JSON object.
                 pdf_folder = self._resolve_deliverable_pdf_folder(
                     {'path': root, 'localProjectPath': root}) if root else ''
                 directory = pdf_folder or root
-                file_name = self._default_publish_pdf_name(sample_path, root)
+                suggestion = self._suggest_publish_pdf_names(
+                    pdf_folder, self._publish_discipline_for_path(sample_path))
+                file_name = suggestion.get('fileName') or self._default_publish_pdf_name(sample_path, root)
             if not directory or not os.path.isdir(self._to_windows_extended_path(directory)):
                 directory = get_default_documents_dir()
             selected = self._create_file_dialog(

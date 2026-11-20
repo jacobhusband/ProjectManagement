@@ -22,7 +22,7 @@ const extract = name => {
     await page.addScriptTag({ content: `
       const ACTIVITY_STATUS = { RUNNING: 'running', SUCCESS: 'success', ERROR: 'error', WARNING: 'warning', CANCELLED: 'cancelled' };
       const activities = {}, history = {}, moves = [], lookups = [], toasts = [];
-      let folders = [{ name: '2026-10-05 MEP IFP' }], failMove = false;
+      let folders = [{ name: '2026-10-05 MEP IFP' }], failMove = false, suggestion = {};
       let publishDestinationQueue = Promise.resolve();
       const publishDestinationPending = new Set();
       const getActivityRecordById = id => activities[id] || history[id];
@@ -48,12 +48,12 @@ const extract = name => {
       const getActivityLabelFromPayload = () => 'Publish';
       const isTerminalActivityStatus = status => status !== 'running';
       const windowApi = {
-        get_publish_pdf_destinations: async (source, project) => {
-          lookups.push({ source, project });
-          return { status: 'success', pdfFolder: 'M:/Project/PDF', folders };
+        get_publish_pdf_destinations: async (source, project, sample) => {
+          lookups.push({ source, project, sample });
+          return { status: 'success', pdfFolder: 'M:/Project/PDF', folders, ...suggestion };
         },
-        move_published_pdf: async (source, project, folder, create) => {
-          moves.push({ source, project, folder, create });
+        move_published_pdf: async (source, project, folder, create, fileName) => {
+          moves.push({ source, project, folder, create, fileName });
           return failMove ? { status: 'error', message: 'The PDF already exists.' } : {
             status: 'success', combinedPdfPath: 'M:/Project/PDF/' + folder + '/set.pdf',
             openFolderPath: 'M:/Project/PDF/' + folder, message: 'Published set moved.'
@@ -66,7 +66,7 @@ const extract = name => {
           rerunLaunchContext: { projectPath: 'M:/Project' } };
       }
       function done(id) { updateActivityStatusFromPayload({ toolId: 'toolPublishDwgs', activityId: id, message: 'DONE' }); }
-      ${['getServerLaunchContext', 'queuePublishDestination', 'showPublishDestination', 'normalizeActivityStatusFromPayload', 'updateActivityStatusFromPayload'].map(extract).join('\n')}
+      ${['getServerLaunchContext', 'getPublishActivityProjectPath', 'queuePublishDestination', 'showPublishDestination', 'normalizeActivityStatusFromPayload', 'updateActivityStatusFromPayload'].map(extract).join('\n')}
     ` });
 
     // Finishing a publish never opens the prompt or looks anything up; the button does.
@@ -91,6 +91,9 @@ const extract = name => {
     await page.locator('#publishDestinationMove').click();
     await page.evaluate(() => publishDestinationQueue);
     assert.equal(await page.evaluate(() => moves[0].create), false);
+    // With no earlier issue to copy, the set keeps its generated name.
+    assert.equal(await page.evaluate(() => moves[0].fileName), 'set.pdf');
+    assert.equal(await page.locator('#publishDestinationNameHint').isHidden(), true);
     assert.equal(await page.evaluate(() => history.skip.combinedPdfPath), 'M:/Project/PDF/2026-10-05 MEP IFP/set.pdf');
 
     // Errors remain visible and permit retry; archived tray entries still update history.
@@ -142,6 +145,46 @@ const extract = name => {
     await page.locator('#publishDestinationDlg[open]').waitFor();
     await page.locator('#publishDestinationSkip').click();
     await page.evaluate(() => publishDestinationQueue);
+
+    // The newest earlier issue's naming is offered: its file name, and its folder
+    // pattern dated today, picked from the list when that folder already exists.
+    await page.evaluate(() => {
+      folders = [{ name: '2026-11-19 Photometrics' }, { name: '2026-09-18 Photometrics' }];
+      suggestion = {
+        suggestedFileName: 'Electrical Photometric - CFA Woodland.pdf',
+        suggestedFolderName: '2026-11-19 Photometrics',
+        previousFileName: 'Electrical Photometric - CFA Woodland.pdf',
+        previousFolderName: '2026-09-18 Photometrics',
+      };
+      start('named');
+      activities.named.rerunLaunchContext = { projectPath: 'M:/Project', cadFilePaths: ['M:/Project/Electrical/E-Photo.dwg'] };
+      done('named'); queuePublishDestination('named');
+    });
+    await page.locator('#publishDestinationDlg[open]').waitFor();
+    assert.equal(await page.evaluate(() => lookups.at(-1).sample), 'M:/Project/Electrical/E-Photo.dwg');
+    assert.equal(await page.locator('#publishDestinationExisting').inputValue(), '2026-11-19 Photometrics');
+    assert.equal(await page.locator('#publishDestinationName').inputValue(), '');
+    assert.equal(await page.locator('#publishDestinationFileName').inputValue(), 'Electrical Photometric - CFA Woodland.pdf');
+    assert.equal(await page.locator('#publishDestinationNameHint').textContent(),
+      'Named like 2026-09-18 Photometrics \\ Electrical Photometric - CFA Woodland.pdf');
+    await page.locator('#publishDestinationFileName').fill('');
+    await page.locator('#publishDestinationMove').click();
+    assert.equal(await page.locator('#publishDestinationError').textContent(), 'Enter a file name for the set.');
+    await page.locator('#publishDestinationFileName').fill('Electrical Photometric - CFA Woodland Rev 1.pdf');
+    await page.locator('#publishDestinationMove').click();
+    await page.evaluate(() => publishDestinationQueue);
+    assert.deepEqual(await page.evaluate(() => [moves.at(-1).folder, moves.at(-1).fileName]),
+      ['2026-11-19 Photometrics', 'Electrical Photometric - CFA Woodland Rev 1.pdf']);
+
+    // A dated folder that does not exist yet is prefilled as the new folder's name.
+    await page.evaluate(() => {
+      folders = [{ name: '2026-09-18 Photometrics' }];
+      start('named2'); done('named2'); queuePublishDestination('named2');
+    });
+    await page.locator('#publishDestinationDlg[open]').waitFor();
+    assert.equal(await page.locator('#publishDestinationName').inputValue(), '2026-11-19 Photometrics');
+    await page.locator('#publishDestinationSkip').click();
+    await page.evaluate(() => { publishDestinationQueue; suggestion = {}; });
 
     // Failed or cancelled work cannot be moved.
     await page.evaluate(() => {

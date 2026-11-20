@@ -1,4 +1,5 @@
 """Published sets move only on request, within PDF, without overwriting files."""
+import datetime
 import os
 import tempfile
 import unittest
@@ -112,6 +113,100 @@ class PublishDestinationTests(unittest.TestCase):
         self.assertEqual('error', self.move('Linked')['status'])
         self.assertTrue(self.source.exists())
         self.assertFalse((outside / 'set.pdf').exists())
+
+
+class PublishPreviousNamingTests(unittest.TestCase):
+    """A new set follows the newest earlier issue's naming in the project PDF folder."""
+
+    def setUp(self):
+        self.api = Api.__new__(Api)
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        base = Path(self.temp.name)
+        self.root = base / '261164 Chick-Fil-A, Woodland, CA'
+        self.pdf = self.root / 'PDF'
+        self.dwg = self.root / 'Electrical' / 'E-Photometric.dwg'
+        self.dwg.parent.mkdir(parents=True)
+        self.dwg.write_bytes(b'dwg')
+        for folder, name in [
+            ('2026-09-08 Photometrics', 'Electrical Photometric Plan - CFA Woodland.pdf'),
+            ('2026-09-18 Photometrics', 'Electrical Photometric - CFA Woodland.pdf'),
+            ('_POC Coordination', 'Site Plan.pdf'),
+        ]:
+            (self.pdf / folder).mkdir(parents=True)
+            (self.pdf / folder / name).write_bytes(b'%PDF-1.4')
+        (self.pdf / '2026-09-18 Photometrics' / 'Mechanical - CFA Woodland.pdf').write_bytes(b'%PDF-1.4')
+        self.source = base / 'AutoCAD Plots' / 'Chick-Fil-A, Woodland, CA - Electrical.pdf'
+        self.source.parent.mkdir()
+        self.source.write_bytes(b'%PDF-1.4\nnew set')
+        # Pin "today" so date stamps refresh to a known date.
+        original = Api._refresh_publish_name_dates
+        pinned = patch.object(Api, '_refresh_publish_name_dates',
+                              lambda api, name, today=None: original(api, name, datetime.date(2026, 11, 19)))
+        pinned.start()
+        self.addCleanup(pinned.stop)
+
+    def refresh(self, name):
+        return self.api._refresh_publish_name_dates(name)
+
+    def test_destinations_suggest_newest_discipline_issue_names(self):
+        result = self.api.get_publish_pdf_destinations(str(self.source), str(self.root), str(self.dwg))
+        self.assertEqual('success', result['status'])
+        self.assertEqual('Electrical Photometric - CFA Woodland.pdf', result['suggestedFileName'])
+        self.assertEqual('Electrical Photometric - CFA Woodland.pdf', result['previousFileName'])
+        self.assertEqual('2026-09-18 Photometrics', result['previousFolderName'])
+        self.assertEqual('2026-11-19 Photometrics', result['suggestedFolderName'])
+
+    def test_discipline_falls_back_to_the_combined_set_name(self):
+        result = self.api.get_publish_pdf_destinations(str(self.source), str(self.root))
+        self.assertEqual('Electrical Photometric - CFA Woodland.pdf', result['previousFileName'])
+        mech = self.api._suggest_publish_pdf_names(str(self.pdf), 'Mechanical')
+        self.assertEqual('Mechanical - CFA Woodland.pdf', mech['previousFileName'])
+
+    def test_no_matching_issue_keeps_generated_names(self):
+        result = self.api.get_publish_pdf_destinations(str(self.source), str(self.root), str(self.root / 'Plumbing' / 'P1.dwg'))
+        self.assertEqual('', result['suggestedFileName'])
+        self.assertEqual('', result['suggestedFolderName'])
+        self.assertEqual({}, self.api._suggest_publish_pdf_names(str(self.pdf), ''))
+
+    def test_date_stamps_in_previous_names_move_to_today(self):
+        self.assertEqual('(ACIES)26459_CFA-Woodland_PSP-19_11-19-2026-Site Plan.pdf',
+                         self.refresh('(ACIES)26459_CFA-Woodland_PSP-19_09-15-2026-Site Plan.pdf'))
+        self.assertEqual('2026.11.19 E Set.pdf', self.refresh('2026.09.24 E Set.pdf'))
+        self.assertEqual('2026_11_19 MEP IFP', self.refresh('2026_9_4 MEP IFP'))
+        # Project numbers, sheet numbers, and impossible dates stay as they are.
+        for name in ['261164 CFA - E-1.0.pdf', 'Rev 2026-13-45.pdf', 'Electrical Photometric - CFA Woodland.pdf']:
+            self.assertEqual(name, self.refresh(name))
+
+    def test_move_renames_set_without_overwriting(self):
+        folder = self.pdf / '2026-09-18 Photometrics'
+        clash = self.api.move_published_pdf(str(self.source), str(self.root), folder.name, False,
+                                            'Electrical Photometric - CFA Woodland.pdf')
+        self.assertEqual('error', clash['status'])
+        self.assertEqual(b'%PDF-1.4', (folder / 'Electrical Photometric - CFA Woodland.pdf').read_bytes())
+        self.assertTrue(self.source.exists())
+
+        moved = self.api.move_published_pdf(str(self.source), str(self.root), '2026-11-19 Photometrics', True,
+                                            'Electrical Photometric - CFA Woodland')
+        self.assertEqual('success', moved['status'])
+        target = self.pdf / '2026-11-19 Photometrics' / 'Electrical Photometric - CFA Woodland.pdf'
+        self.assertEqual(str(target), moved['combinedPdfPath'])
+        self.assertEqual(b'%PDF-1.4\nnew set', target.read_bytes())
+
+    def test_move_rejects_invalid_file_names(self):
+        for name in ['a/b.pdf', '..\\x.pdf', 'bad:.pdf', ' lead.pdf', 'CON.pdf', '.pdf', 'dot..pdf']:
+            with self.subTest(name=name):
+                result = self.api.move_published_pdf(str(self.source), str(self.root), 'New', True, name)
+                self.assertEqual('error', result['status'])
+                self.assertTrue(self.source.exists())
+                self.assertFalse((self.pdf / 'New').exists())
+
+    def test_save_as_dialog_starts_with_previous_issue_name(self):
+        calls = []
+        with patch.object(Api, '_create_file_dialog', side_effect=lambda t, **kw: calls.append(kw) or None, create=True), \
+                patch.object(Api, '_get_file_dialog_type', return_value='SAVE', create=True):
+            self.assertEqual('cancelled', self.api.select_publish_pdf_target(str(self.root), '', str(self.dwg))['status'])
+        self.assertEqual('Electrical Photometric - CFA Woodland.pdf', calls[0]['save_filename'])
 
 
 class PublishSaveAsTests(unittest.TestCase):

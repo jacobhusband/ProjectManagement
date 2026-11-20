@@ -12031,7 +12031,9 @@ async function showPublishDestination(activityId) {
   const dialog = document.getElementById("publishDestinationDlg");
   if (!activity?.combinedPdfPath || !dialog || !api?.get_publish_pdf_destinations) return;
   const projectPath = getPublishActivityProjectPath(activity);
-  const result = await api.get_publish_pdf_destinations(activity.combinedPdfPath, projectPath);
+  const result = await api.get_publish_pdf_destinations(
+    activity.combinedPdfPath, projectPath, getActivityHistoryDrawingPaths(activity)[0] || ""
+  );
   if (result?.status !== "success") {
     toast(result?.message || "Could not find the project PDF folder.");
     return;
@@ -12042,11 +12044,24 @@ async function showPublishDestination(activityId) {
   const move = document.getElementById("publishDestinationMove");
   const skip = document.getElementById("publishDestinationSkip");
   const modes = [...dialog.querySelectorAll('input[name="publishDestinationMode"]')];
+  const fileName = document.getElementById("publishDestinationFileName");
+  const nameHint = document.getElementById("publishDestinationNameHint");
   const folders = Array.isArray(result.folders) ? result.folders : [];
+  const combinedName = getWindowsPathLeaf(activity.combinedPdfPath);
   document.getElementById("publishDestinationRoot").textContent = result.pdfFolder;
-  document.getElementById("publishDestinationFile").textContent = getWindowsPathLeaf(activity.combinedPdfPath);
+  document.getElementById("publishDestinationFile").textContent = combinedName;
   existing.replaceChildren(...folders.map(folder => new Option(folder.name, folder.name)));
-  name.value = "";
+  // Follow the newest earlier issue's naming: its file name, and its folder pattern
+  // dated today (picked from the list when today's folder already exists).
+  const suggestedFolder = String(result.suggestedFolderName || "");
+  const todaysFolderExists = folders.some(folder => folder.name === suggestedFolder);
+  if (todaysFolderExists) existing.value = suggestedFolder;
+  name.value = todaysFolderExists ? "" : suggestedFolder;
+  fileName.value = String(result.suggestedFileName || "") || combinedName;
+  nameHint.textContent = result.previousFileName
+    ? `Named like ${result.previousFolderName} \\ ${result.previousFileName}`
+    : "";
+  nameHint.hidden = !result.previousFileName;
   error.hidden = true;
   move.disabled = false;
   skip.disabled = false;
@@ -12084,11 +12099,18 @@ async function showPublishDestination(activityId) {
         error.hidden = false;
         return;
       }
+      if (!fileName.value.trim()) {
+        error.textContent = "Enter a file name for the set.";
+        error.hidden = false;
+        return;
+      }
       moving = true;
       move.disabled = skip.disabled = true;
       error.hidden = true;
       try {
-        const moved = await api.move_published_pdf(activity.combinedPdfPath, projectPath, folderName, createNew);
+        const moved = await api.move_published_pdf(
+          activity.combinedPdfPath, projectPath, folderName, createNew, fileName.value.trim()
+        );
         if (moved?.status !== "success") throw new Error(moved?.message || "Could not move the set.");
         const patch = {
           combinedPdfPath: moved.combinedPdfPath, openFolderPath: moved.openFolderPath,
